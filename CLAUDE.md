@@ -13,7 +13,10 @@ Funnel Manager is a login-gated tool to search and inspect Apollo person/company
 | Auth backend | `auth-backend/` | FastAPI, redis-py (async) | Redis | The browser (via nginx, `/api/auth/*`) + the search backend |
 | Search backend | `backend/` | FastAPI, SQLAlchemy (async, asyncpg) | Postgres | The browser (via nginx) |
 | Leads backend | `leads-backend/` | FastAPI, Motor, OpenAI, pymilvus | MongoDB + Milvus | The search backend only |
+| MCP server | `mcp-server/` | Python MCP SDK (FastMCP, streamable HTTP) | — | Internal MCP clients (e.g. OpenClaw) — never via nginx |
 | Frontend | `frontend/` | React 19, MUI 9, Vite 8, TS | — | The browser |
+
+The MCP server (`:8003/mcp`) is a read-only inspection surface: it authenticates to the search backend like the UI does (logs into the auth backend with `AUTH_USERNAME`/`AUTH_PASSWORD`, caches the session token, re-logs-in on 401) and calls the leads backend directly with no auth. Its tools must stay read-only and must not call Apollo or spend credits; the leads backend's `GET /api/leads/stats` and `GET /api/leads/recent` exist for it. Prod publishes it on loopback only (`127.0.0.1:8003`).
 
 **The core architectural rule: only the leads backend ever talks to Apollo, and only the leads backend holds `APOLLO_API_KEY`.** The search backend reaches Apollo functionality exclusively through `backend/app/leads_client.py` (`LeadsClient`) calling `LEADS_BACKEND_URL`. The browser never calls the leads backend directly — nginx does not expose it (except Apollo webhooks). When adding an Apollo-touching feature, the path is always: frontend → search backend router → `LeadsClient` → leads backend → Apollo. Do not shortcut this.
 

@@ -424,6 +424,65 @@ async def leads_health(settings: Settings = Depends(get_settings)) -> dict[str, 
     }
 
 
+@router.get("/stats")
+async def leads_stats(db: AsyncIOMotorDatabase = Depends(get_database)) -> dict[str, Any]:
+    """Collection-level counts for internal observability (e.g. the MCP server)."""
+    total = await db.leads.count_documents({})
+    people = await db.leads.count_documents({"entity_type": "person"})
+    organizations = await db.leads.count_documents({"entity_type": "organization"})
+    embedded = await db.leads.count_documents({"embedding": True})
+    enriched_linkedin = await db.leads.count_documents({"apollo_enriched.linkedin": True})
+    enriched_email = await db.leads.count_documents({"apollo_enriched.email": True})
+    enriched_phone = await db.leads.count_documents({"apollo_enriched.phone": True})
+    latest = await db.leads.find_one(sort=[("updated_at", -1)], projection={"updated_at": 1})
+    return {
+        "total_leads": total,
+        "people": people,
+        "organizations": organizations,
+        "embedded": embedded,
+        "embedding_pending": total - embedded,
+        "enriched": {
+            "linkedin": enriched_linkedin,
+            "email": enriched_email,
+            "phone": enriched_phone,
+        },
+        "last_updated_at": latest.get("updated_at") if latest else None,
+    }
+
+
+@router.get("/recent", response_model=list[LeadOut])
+async def recent_leads(
+    entity_type: Literal["person", "organization"] | None = Query(default=None),
+    enriched: bool | None = Query(
+        default=None,
+        description="True: any enrichment flag set; False: no enrichment flags set",
+    ),
+    embedded: bool | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    skip: int = Query(default=0, ge=0),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> list[LeadOut]:
+    """Most recently updated leads — internal visibility into ingest/enrichment activity."""
+    query: dict[str, Any] = {}
+    if entity_type:
+        query["entity_type"] = entity_type
+    if embedded is not None:
+        query["embedding"] = embedded
+    if enriched is True:
+        query["$or"] = [
+            {"apollo_enriched.linkedin": True},
+            {"apollo_enriched.email": True},
+            {"apollo_enriched.phone": True},
+        ]
+    elif enriched is False:
+        query["apollo_enriched.linkedin"] = {"$ne": True}
+        query["apollo_enriched.email"] = {"$ne": True}
+        query["apollo_enriched.phone"] = {"$ne": True}
+    cursor = db.leads.find(query).sort("updated_at", -1).skip(skip).limit(limit)
+    docs = await cursor.to_list(length=limit)
+    return [_serialize_lead(doc) for doc in docs]
+
+
 def _normalize_apollo_proxy_path(apollo_path: str) -> str:
     """Accept Apollo relative paths with or without the /api/v1 prefix."""
     cleaned = apollo_path.strip().lstrip("/")

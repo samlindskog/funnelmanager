@@ -156,6 +156,29 @@ services:
     expose:
       - "8002"
 
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      AUTH_USERNAME: ${AUTH_USERNAME}
+      AUTH_PASSWORD: ${AUTH_PASSWORD}
+      SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://backend:8000}
+      LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
+    # Loopback-only publish: host-local MCP clients (e.g. OpenClaw) can reach
+    # http://127.0.0.1:8003/mcp, the internet cannot. Drop the ports block to
+    # keep it Docker-network-only; nginx never routes to it.
+    ports:
+      - "127.0.0.1:8003:8003"
+    expose:
+      - "8003"
+    depends_on:
+      - backend
+      - leads-backend
+      - auth-backend
+
   frontend:
     build:
       context: ./frontend

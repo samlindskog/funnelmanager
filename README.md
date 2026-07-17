@@ -7,6 +7,7 @@ Login-gated tool to search and inspect Apollo person and company records. The se
 - **Auth backend:** FastAPI + Redis — issues and stores opaque session tokens (1-day TTL); the single place login and token validation live
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; validates request tokens against the auth backend; relays searches to leads
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only, no request auth
+- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only, read-only inspection tools over the search + leads backends for agents (e.g. OpenClaw)
 - **Frontend:** React + TypeScript + Vite + Material UI
 - **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis
 
@@ -37,6 +38,8 @@ docker compose -f docker-compose.dev.yml up --build
 - Redis: localhost:6379
 
 nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (everything else under `/api/…`). The leads backend and Redis are reached only by other services on the Docker network.
+
+The MCP server listens at `http://localhost:8003/mcp` in dev (streamable HTTP). nginx never routes to it; in prod it is published on loopback only (`127.0.0.1:8003`).
 
 Source is bind-mounted:
 
@@ -101,6 +104,18 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8002
 ```
 
+### MCP server
+
+```bash
+cd mcp-server
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# Set SEARCH_BACKEND_URL / LEADS_BACKEND_URL / AUTH_BACKEND_URL to reachable
+# services (e.g. http://127.0.0.1:8000 / :8001 / :8002) plus AUTH_USERNAME / AUTH_PASSWORD.
+uvicorn app.main:app --reload --port 8003
+```
+
 ### Frontend
 
 ```bash
@@ -126,6 +141,7 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `MONGODB_URL` | MongoDB connection URL |
 | `MONGODB_DB` | MongoDB database name for leads |
 | `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads-backend:8001`) |
+| `SEARCH_BACKEND_URL` | Internal URL the MCP server uses to call the search backend (default `http://backend:8000`) |
 | `DOMAIN` | Production hostname for nginx `server_name` |
 
 ## API
@@ -164,6 +180,8 @@ Apollo-facing routes use the native Apollo API relative path under `/api/leads/a
 | Method | Path | Native Apollo endpoint | Response / side effects |
 |---|---|---|---|
 | `GET` | `/api/leads/health` | — | Liveness / config probe |
+| `GET` | `/api/leads/stats` | — | Lead-collection counts: entity types, embedded vs pending, enrichment flags |
+| `GET` | `/api/leads/recent` | — | Recently updated leads (`entity_type`, `enriched`, `embedded`, `limit`, `skip`) |
 | `GET` | `/api/leads/apollo/api/v1/users/api_profile` | [Get current user profile](https://docs.apollo.io/reference/get-current-user-profile) | Raw Apollo JSON |
 | `POST` | `/api/leads/apollo/api/v1/mixed_people/api_search` | [People API Search](https://docs.apollo.io/reference/people-api-search) | `{ ingest_stream_id, embedding_stream_id, ids }` — optional `stream`; see notes |
 | `POST` | `/api/leads/apollo/api/v1/mixed_companies/search` | [Organization Search](https://docs.apollo.io/reference/organization-search) | `{ ingest_stream_id, embedding_stream_id, ids }` — optional `stream`; see notes |
@@ -201,3 +219,28 @@ MongoDB lead documents:
 | `apollo_enriched` | `{ linkedin, email, phone }` flags for enrichment jobs |
 
 Enrichment updates an existing document when `apollo_id` already exists (no duplicates).
+
+### MCP server (internal)
+
+Read-only [MCP](https://modelcontextprotocol.io) server for internal agents (e.g. OpenClaw) — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only). It logs into the auth backend with `AUTH_USERNAME`/`AUTH_PASSWORD` and calls the search backend with that session token (re-login on 401); the leads backend is called directly with no auth. No tool calls Apollo, spends credits, or mutates data.
+
+| Tool | Backing call | Description |
+|---|---|---|
+| `search_history` | `GET /api/searches` | User activity: recent searches (label, entity type, counts, timestamps) |
+| `search_results` | `POST /api/searches/{id}/page` | One hydrated page of stored results (UI-normalized; `include_raw` for full payloads) |
+| `get_lead` | `GET /api/leads/{mongo_id}` | One lead, normalized like the UI detail pane |
+| `apollo_credits` | `GET /api/apollo/credits` | Apollo credit balance |
+| `leads_stats` | leads `GET /api/leads/stats` | Collection counts: entity types, embedding, enrichment |
+| `recent_leads` | leads `GET /api/leads/recent` | Enrichment/ingest activity feed with per-lead Apollo endpoint timeline |
+| `get_leads` | leads `POST /api/leads` | Batch hydrate by Mongo `_id` (compact summaries; `include_raw` for full docs) |
+| `similarity_search` | leads `POST /api/leads/similarity-search` | Semantic search over stored leads (no Apollo call, no history row) |
+
+Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP). Example OpenClaw/Claude-style config:
+
+```json
+{
+  "mcpServers": {
+    "funnelmanager": { "type": "http", "url": "http://127.0.0.1:8003/mcp" }
+  }
+}
+```

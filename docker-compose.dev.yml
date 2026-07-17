@@ -158,6 +158,27 @@ services:
       redis:
         condition: service_healthy
 
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://backend:8000}
+      LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
+    volumes:
+      - ./mcp-server:/app
+    # Internal MCP endpoint (streamable HTTP at /mcp) for agents like OpenClaw.
+    # Published for host-local MCP clients in dev; never routed through nginx.
+    ports:
+      - "${HOST_BIND:-}8003:8003"
+    depends_on:
+      - backend
+      - leads-backend
+      - auth-backend
+
   frontend:
     build:
       context: ./frontend
