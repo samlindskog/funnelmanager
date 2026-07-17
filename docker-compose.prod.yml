@@ -169,9 +169,10 @@ services:
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
     # Loopback-only publish: host-local MCP clients (e.g. OpenClaw) can reach
     # http://127.0.0.1:8003/mcp, the internet cannot. Drop the ports block to
-    # keep it Docker-network-only; nginx never routes to it.
+    # keep it Docker-network-only; nginx never routes to it. PROD_MCP_PORT lets a
+    # second (coexisting) stack avoid a host-port clash with another deployment.
     ports:
-      - "127.0.0.1:8003:8003"
+      - "${HOST_BIND:-127.0.0.1:}${PROD_MCP_PORT:-8003}:8003"
     expose:
       - "8003"
     depends_on:
@@ -182,6 +183,12 @@ services:
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     restart: unless-stopped
+    # Opt-in in prod: `docker compose --profile agent up -d` starts the agent.
+    # Kept off by default so a coexisting stack does not run a second Telegram
+    # poller against the same bot token. Give prod its own TELEGRAM_BOT_TOKEN
+    # before enabling.
+    profiles:
+      - agent
     environment:
       OPENCLAW_GATEWAY_BIND: lan
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
@@ -196,7 +203,7 @@ services:
     # Loopback-only: open the Control UI via an SSH tunnel or put a TLS
     # reverse proxy in front. Telegram is outbound-only and needs no port.
     ports:
-      - "127.0.0.1:18789:18789"
+      - "${HOST_BIND:-127.0.0.1:}${PROD_OPENCLAW_PORT:-18789}:18789"
     depends_on:
       - mcp-server
 
@@ -207,8 +214,11 @@ services:
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN}
+    # HOST_BIND pins the published port to loopback (e.g. "127.0.0.1:") so a host
+    # TLS reverse proxy fronts it and Docker does not bypass ufw; PROD_HTTP_PORT
+    # frees port 80 when another stack coexists on the box.
     ports:
-      - "80:80"
+      - "${HOST_BIND:-}${PROD_HTTP_PORT:-80}:80"
     depends_on:
       - backend
       - leads-backend

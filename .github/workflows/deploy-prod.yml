@@ -1,0 +1,49 @@
+name: Deploy prod (usfr2)
+
+# Manual / tagged deploys only — pushing to main never ships to prod on its own.
+#   * push a tag matching v*   → deploys that tag
+#   * "Run workflow" (dispatch) → deploys the ref you enter (default origin/main)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Ref to deploy (tag, origin/<branch>, or commit SHA)'
+        required: false
+        default: 'origin/main'
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Attach a GitHub "production" environment so you can optionally require a
+    # reviewer approval before any prod deploy runs (Settings → Environments).
+    environment: production
+    steps:
+      - name: Resolve deploy ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.event.inputs.ref }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.PROD_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy over SSH
+        run: |
+          echo "Deploying ref: ${{ steps.ref.outputs.ref }}"
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes \
+            "${{ secrets.PROD_USER }}@${{ secrets.PROD_HOST }}" \
+            "${{ steps.ref.outputs.ref }}"
