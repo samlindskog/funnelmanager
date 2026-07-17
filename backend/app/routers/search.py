@@ -34,7 +34,7 @@ from app.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["search"])
+router = APIRouter(prefix="/api/search", tags=["search"])
 
 # Per-page size for leads stream jobs (leads walks Apollo pages server-side).
 _APOLLO_FETCH_PER_PAGE = APOLLO_MAX_PER_PAGE

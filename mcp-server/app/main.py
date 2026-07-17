@@ -66,7 +66,7 @@ async def search_history() -> list[dict[str, Any]]:
     """List recent searches (most recent first, up to 100): query label,
     entity type, result count, and when each search ran. This is the user
     activity log of the search backend."""
-    return await search_backend.request("GET", "/api/searches")
+    return await search_backend.request("GET", "/api/search/searches")
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -79,7 +79,7 @@ async def search_results(
     exactly as the UI renders them (100 results per page). Set include_raw=True
     to include full Apollo payloads per record (large!)."""
     data = await search_backend.request(
-        "POST", f"/api/searches/{search_id}/page", json_body={"page": page}
+        "POST", f"/api/search/searches/{search_id}/page", json_body={"page": page}
     )
     history = data.get("history") if isinstance(data, dict) else None
     if include_raw or not isinstance(history, dict):
@@ -97,7 +97,7 @@ async def get_lead(mongo_id: str, include_raw: bool = False) -> dict[str, Any]:
     """Fetch one lead by Mongo `_id`, normalized like the UI detail pane
     (name, contact info, enrichment flags). Set include_raw=True for the full
     endpoint-keyed Apollo payloads."""
-    record = await search_backend.request("GET", f"/api/leads/{mongo_id}")
+    record = await search_backend.request("GET", f"/api/search/leads/{mongo_id}")
     if include_raw or not isinstance(record, dict):
         return record
     return slim_record(record)
@@ -107,7 +107,7 @@ async def get_lead(mongo_id: str, include_raw: bool = False) -> dict[str, Any]:
 async def apollo_credits() -> dict[str, Any]:
     """Current Apollo credit balance (credits_remaining, lead_credits_used,
     effective_lead_credits) — the same numbers shown in the UI header."""
-    return await search_backend.request("GET", "/api/apollo/credits")
+    return await search_backend.request("GET", "/api/search/apollo/credits")
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ async def run_people_search(
         body["organization_id"] = organization_id
     if organization_domain:
         body["organization_domain"] = organization_domain
-    outcome = await search_backend.stream_search("/api/search", body)
+    outcome = await search_backend.stream_search("/api/search/search", body)
     return _search_outcome(outcome, preview_limit)
 
 
@@ -253,7 +253,7 @@ async def run_company_search(
         body["company_name"] = company_name
     if company_domain:
         body["company_domain"] = company_domain
-    outcome = await search_backend.stream_search("/api/search", body)
+    outcome = await search_backend.stream_search("/api/search/search", body)
     return _search_outcome(outcome, preview_limit)
 
 
@@ -263,7 +263,7 @@ async def enrich_person(apollo_id: str, include_raw: bool = False) -> dict[str, 
     CREDITS). Upserts the stored lead (no duplicates) and returns the refreshed
     record. Get apollo_id from search results / lead records (the `id` field)."""
     record = await search_backend.request(
-        "POST", f"/api/people/enrich/{apollo_id}", json_body={}
+        "POST", f"/api/search/people/enrich/{apollo_id}", json_body={}
     )
     if include_raw or not isinstance(record, dict):
         return record
@@ -275,7 +275,7 @@ async def enrich_organization(apollo_id: str, include_raw: bool = False) -> dict
     """Apollo Complete Organization Info enrichment for one company (SPENDS
     APOLLO CREDITS). Upserts the stored lead and returns the refreshed record."""
     record = await search_backend.request(
-        "POST", f"/api/organizations/enrich/{apollo_id}", json_body={}
+        "POST", f"/api/search/organizations/enrich/{apollo_id}", json_body={}
     )
     if include_raw or not isinstance(record, dict):
         return record
@@ -302,7 +302,7 @@ async def match_person(
     if reveal_phone_number:
         body["reveal_phone_number"] = True
     data = await search_backend.request(
-        "POST", f"/api/people/match/{apollo_id}", json_body=body
+        "POST", f"/api/search/people/match/{apollo_id}", json_body=body
     )
     if not isinstance(data, dict):
         return data

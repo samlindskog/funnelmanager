@@ -32,13 +32,13 @@ docker compose -f docker-compose.dev.yml up --build
 - App (nginx → Vite): http://localhost:5173
 - APIs (nginx → backends): http://localhost:8000/api
   - `/api/auth/…` → auth backend (login, session validation)
-  - other `/api/…` → search backend (search/history/enrich)
+  - `/api/search/…` → search backend (search/history/enrich)
   - Leads is internal-only (`LEADS_BACKEND_URL`); the browser does not call it
 - Postgres: localhost:5432
 - MongoDB: localhost:27017
 - Redis: localhost:6379
 
-nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (everything else under `/api/…`). The leads backend and Redis are reached only by other services on the Docker network.
+nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (`/api/search/…`). The leads backend and Redis are reached only by other services on the Docker network.
 
 The MCP server listens at `http://localhost:8003/mcp` in dev (streamable HTTP). nginx never routes to it; in prod it is published on loopback only (`127.0.0.1:8003`).
 
@@ -64,7 +64,7 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
 
 - nginx serves the built SPA on port 80 for `${DOMAIN}`
-- `/api/auth/*` → auth FastAPI (Redis sessions); other `/api/*` → search FastAPI (Postgres), which relays to leads internally
+- `/api/auth/*` → auth FastAPI (Redis sessions); `/api/search/*` → search FastAPI (Postgres), which relays to leads internally
 - Postgres, MongoDB, and Redis data are stored in Docker volumes
 
 Point your DNS A/AAAA record for `${DOMAIN}` at the host. Put TLS in front (Cloudflare, Caddy, Traefik, or certbot) as needed.
@@ -128,7 +128,7 @@ npm install
 npm run dev
 ```
 
-Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8000`). In Docker Compose, nginx is the public entry and routes all `/api` traffic to the search backend.
+Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8000`). In Docker Compose, nginx is the public entry and routes `/api/search` traffic to the search backend.
 
 ## Environment
 
@@ -169,15 +169,15 @@ nginx routes `/api/auth/*` here; it owns login and the Redis-backed session stor
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/search` | NDJSON: progress → `first_page` as soon as page 1 can be filled → `complete`; further pages sync |
-| `POST` | `/api/search/company-people` | People-at-company search via leads (same NDJSON ingest) |
-| `POST` | `/api/searches/{id}/page` | Synchronous page change: hydrate stored Mongo `_id`s for that page |
-| `GET` | `/api/searches` | List previous searches |
-| `GET` | `/api/searches/{id}` | Load stored results (hydrated from leads) |
-| `DELETE` | `/api/searches/{id}` | Remove a history entry |
-| `GET` | `/api/leads/{mongo_id}` | Hydrate one lead by Mongo `_id` |
-| `POST` | `/api/people/{apollo_id}/enrich` | Proxy to leads complete-person enrich |
-| `POST` | `/api/organizations/{apollo_id}/enrich` | Proxy to leads complete-organization enrich |
+| `POST` | `/api/search/search` | NDJSON: progress → `first_page` as soon as page 1 can be filled → `complete`; further pages sync |
+| `POST` | `/api/search/search/company-people` | People-at-company search via leads (same NDJSON ingest) |
+| `POST` | `/api/search/searches/{id}/page` | Synchronous page change: hydrate stored Mongo `_id`s for that page |
+| `GET` | `/api/search/searches` | List previous searches |
+| `GET` | `/api/search/searches/{id}` | Load stored results (hydrated from leads) |
+| `DELETE` | `/api/search/searches/{id}` | Remove a history entry |
+| `GET` | `/api/search/leads/{mongo_id}` | Hydrate one lead by Mongo `_id` |
+| `POST` | `/api/search/people/{apollo_id}/enrich` | Proxy to leads complete-person enrich |
+| `POST` | `/api/search/organizations/{apollo_id}/enrich` | Proxy to leads complete-organization enrich |
 
 ### Leads backend (internal)
 
@@ -213,7 +213,7 @@ Apollo-facing routes use the native Apollo API relative path under `/api/leads/a
 - People match takes Apollo identity params (`id`, email, linkedin_url, …) in the body/query.
 - Client-supplied `webhook_url` on people/match is ignored; when async phone/waterfall flags are set, the leads service injects `{PUBLIC_BASE_URL}/api/leads/webhooks/apollo/{APOLLO_WEBHOOK_SECRET}`.
 - Postgres `search_results.external_id` stores Mongo `_id` strings for later hydrate via `POST /api/leads`.
-- The search backend starts leads streams (`stream=true`) and relays progress to the browser as NDJSON on `POST /api/search`.
+- The search backend starts leads streams (`stream=true`) and relays progress to the browser as NDJSON on `POST /api/search/search`.
 
 MongoDB lead documents:
 
@@ -236,10 +236,10 @@ Read-only inspection tools (free, no Apollo calls):
 
 | Tool | Backing call | Description |
 |---|---|---|
-| `search_history` | `GET /api/searches` | User activity: recent searches (label, entity type, counts, timestamps) |
-| `search_results` | `POST /api/searches/{id}/page` | One hydrated page of stored results (UI-normalized; `include_raw` for full payloads) |
+| `search_history` | `GET /api/search/searches` | User activity: recent searches (label, entity type, counts, timestamps) |
+| `search_results` | `POST /api/search/searches/{id}/page` | One hydrated page of stored results (UI-normalized; `include_raw` for full payloads) |
 | `get_lead` | `GET /api/leads/{mongo_id}` | One lead, normalized like the UI detail pane |
-| `apollo_credits` | `GET /api/apollo/credits` | Apollo credit balance |
+| `apollo_credits` | `GET /api/search/apollo/credits` | Apollo credit balance |
 | `leads_stats` | leads `GET /api/leads/stats` | Collection counts: entity types, embedding, enrichment |
 | `recent_leads` | leads `GET /api/leads/recent` | Enrichment/ingest activity feed with per-lead Apollo endpoint timeline |
 | `get_leads` | leads `POST /api/leads` | Batch hydrate by Mongo `_id` (compact summaries; `include_raw` for full docs) |
@@ -249,11 +249,11 @@ Action tools (**spend Apollo credits**, upsert leads + history — same flows as
 
 | Tool | Backing call | Description |
 |---|---|---|
-| `run_people_search` | `POST /api/search` | Apollo people search; returns page 1, ingest continues server-side |
-| `run_company_search` | `POST /api/search` | Apollo organization search; same streaming/detached behavior |
-| `enrich_person` | `POST /api/people/enrich/{id}` | Complete Person Info enrichment |
-| `enrich_organization` | `POST /api/organizations/enrich/{id}` | Complete Organization Info enrichment |
-| `match_person` | `POST /api/people/match/{id}` | Contact reveal (waterfall email/phone; phone lands async via webhook) |
+| `run_people_search` | `POST /api/search/search` | Apollo people search; returns page 1, ingest continues server-side |
+| `run_company_search` | `POST /api/search/search` | Apollo organization search; same streaming/detached behavior |
+| `enrich_person` | `POST /api/search/people/enrich/{id}` | Complete Person Info enrichment |
+| `enrich_organization` | `POST /api/search/organizations/enrich/{id}` | Complete Organization Info enrichment |
+| `match_person` | `POST /api/search/people/match/{id}` | Contact reveal (waterfall email/phone; phone lands async via webhook) |
 
 The transport's DNS-rebinding protection allows `mcp-server:8003`, `localhost:8003`, and `127.0.0.1:8003` by default — extend via `MCP_ALLOWED_HOSTS` if clients dial another hostname.
 

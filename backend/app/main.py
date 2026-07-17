@@ -29,7 +29,7 @@ app.add_middleware(
 app.include_router(search.router)
 
 
-@app.get("/api/health")
+@app.get("/api/search/health")
 async def health() -> dict[str, object]:
     current = get_settings()
     return {

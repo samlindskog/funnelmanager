@@ -199,7 +199,7 @@ export async function runSearch(
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/x-ndjson')
 
-  const response = await fetch('/api/search', {
+  const response = await fetch('/api/search/search', {
     method: 'POST',
     headers,
     body: JSON.stringify(params),
@@ -301,29 +301,29 @@ export async function runSearch(
 }
 
 export async function listSearches(): Promise<SearchHistorySummary[]> {
-  return request<SearchHistorySummary[]>('/api/searches')
+  return request<SearchHistorySummary[]>('/api/search/searches')
 }
 
 export async function getSearch(id: number): Promise<SearchHistoryDetail> {
-  return request<SearchHistoryDetail>(`/api/searches/${id}`)
+  return request<SearchHistoryDetail>(`/api/search/searches/${id}`)
 }
 
 export async function cancelStream(streamId: string): Promise<{ stream_id: string; cancelled: boolean }> {
   return request<{ stream_id: string; cancelled: boolean }>(
-    `/api/streams/${encodeURIComponent(streamId)}/cancel`,
+    `/api/search/streams/${encodeURIComponent(streamId)}/cancel`,
     { method: 'POST' },
   )
 }
 
 export async function fetchSearchPage(id: number, page: number): Promise<SearchResponse> {
-  return request<SearchResponse>(`/api/searches/${id}/page`, {
+  return request<SearchResponse>(`/api/search/searches/${id}/page`, {
     method: 'POST',
     body: JSON.stringify({ page }),
   })
 }
 
 export async function deleteSearch(id: number): Promise<void> {
-  await request<void>(`/api/searches/${id}`, { method: 'DELETE' })
+  await request<void>(`/api/search/searches/${id}`, { method: 'DELETE' })
 }
 
 export type Lead = {
@@ -347,7 +347,7 @@ export type Lead = {
 }
 
 export async function getPersonLead(mongoId: string): Promise<ApolloRecord> {
-  return request<ApolloRecord>(`/api/leads/${encodeURIComponent(mongoId)}`)
+  return request<ApolloRecord>(`/api/search/leads/${encodeURIComponent(mongoId)}`)
 }
 
 export async function enrichLead(
@@ -357,8 +357,8 @@ export async function enrichLead(
   // Search backend hydrates leads SearchIdsOut into a UI record.
   const path =
     apolloPersonId != null && apolloPersonId !== ''
-      ? `/api/people/enrich/${encodeURIComponent(apolloPersonId)}`
-      : '/api/people/enrich'
+      ? `/api/search/people/enrich/${encodeURIComponent(apolloPersonId)}`
+      : '/api/search/people/enrich'
   return request<ApolloRecord>(path, {
     method: 'POST',
     body: JSON.stringify(params),
@@ -575,7 +575,7 @@ export async function enrichPeopleStream(
   const ids = [...new Set(apolloIds.map((id) => id.trim()).filter(Boolean))]
   if (!ids.length) return
   await consumePeopleProgressStream(
-    '/api/people/enrich',
+    '/api/search/people/enrich',
     { ids, stream: true },
     handlers,
     'Enrich',
@@ -597,7 +597,7 @@ export async function matchPeopleStream(
   const ids = [...new Set(apolloIds.map((id) => id.trim()).filter(Boolean))]
   if (!ids.length) return
   await consumePeopleProgressStream(
-    '/api/people/match',
+    '/api/search/people/match',
     {
       ids,
       stream: true,
@@ -625,8 +625,8 @@ export async function matchLead(
 ): Promise<PersonMatchResult> {
   const path =
     apolloPersonId != null && apolloPersonId !== ''
-      ? `/api/people/match/${encodeURIComponent(apolloPersonId)}`
-      : '/api/people/match'
+      ? `/api/search/people/match/${encodeURIComponent(apolloPersonId)}`
+      : '/api/search/people/match'
   return request<PersonMatchResult>(path, {
     method: 'POST',
     body: JSON.stringify(params),
@@ -639,8 +639,8 @@ export async function enrichOrganizationLead(
 ): Promise<ApolloRecord> {
   const path =
     apolloOrganizationId != null && apolloOrganizationId !== ''
-      ? `/api/organizations/enrich/${encodeURIComponent(apolloOrganizationId)}`
-      : '/api/organizations/enrich'
+      ? `/api/search/organizations/enrich/${encodeURIComponent(apolloOrganizationId)}`
+      : '/api/search/organizations/enrich'
   return request<ApolloRecord>(path, {
     method: 'POST',
     body: JSON.stringify(params),
@@ -654,7 +654,7 @@ export type ApolloCredits = {
 }
 
 export async function getApolloCredits(): Promise<ApolloCredits> {
-  return request<ApolloCredits>('/api/apollo/credits')
+  return request<ApolloCredits>('/api/search/apollo/credits')
 }
 
 export type SimilaritySearchParams = {
@@ -671,7 +671,7 @@ export type SimilaritySearchResponse = {
 export async function runSimilaritySearch(
   params: SimilaritySearchParams,
 ): Promise<SimilaritySearchResponse> {
-  return request<SimilaritySearchResponse>('/api/similarity-search', {
+  return request<SimilaritySearchResponse>('/api/search/similarity-search', {
     method: 'POST',
     body: JSON.stringify({
       query: params.query,
