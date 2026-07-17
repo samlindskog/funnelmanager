@@ -1,0 +1,1557 @@
+import asyncio
+import csv
+import io
+import json
+import logging
+import re
+from collections.abc import AsyncIterator
+from typing import Any
+from urllib.parse import quote
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import get_current_user, oauth2_scheme
+from app.config import Settings, get_settings
+from app.database import SessionLocal, get_db
+from app.leads_client import APOLLO_MAX_PER_PAGE, LeadsClient, lead_to_record, normalize_domain
+
+from app.models import SearchHistory, SearchResult
+from app.schemas import (
+    CompanyPeopleSearchRequest,
+    SearchHistoryDetail,
+    SearchHistorySummary,
+    SearchRequest,
+    SearchResponse,
+    SimilarityHitOut,
+    SimilaritySearchRequest,
+    SimilaritySearchResponse,
+    UserOut,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api", tags=["search"])
+
+# Per-page size for leads stream jobs (leads walks Apollo pages server-side).
+_APOLLO_FETCH_PER_PAGE = APOLLO_MAX_PER_PAGE
+_UI_PER_PAGE = APOLLO_MAX_PER_PAGE
+_LEADS_BY_MONGO_IDS_MAX = 500
+_CSV_FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+# SearchHistory.query column size.
+_HISTORY_QUERY_MAX = 512
+
+# Search jobs run detached from the browser connection so a disconnect doesn't
+# stop id persistence; strong refs keep them alive until done.
+_search_jobs: set[asyncio.Task[None]] = set()
+
+
+class SearchPageRequest(BaseModel):
+    page: int = Field(ge=1)
+
+
+def _clip_history_query(label: str) -> str:
+    if len(label) <= _HISTORY_QUERY_MAX:
+        return label
+    return f"{label[: _HISTORY_QUERY_MAX - 3]}..."
+
+
+def _history_label_for_company_people(company_name: str, keywords: str | None) -> str:
+    base = f"people @ {company_name.strip()}"
+    cleaned = " ".join((keywords or "").split()).strip()
+    return f"{base}: {cleaned}" if cleaned else base
+
+
+def _history_label_for_company_search(
+    keywords: str | None,
+    company_name: str | None,
+    company_domain: str | None = None,
+) -> str:
+    tags = " ".join((keywords or "").split()).strip()
+    name = " ".join((company_name or "").split()).strip()
+    domain = " ".join((company_domain or "").split()).strip()
+    parts = [part for part in (name, domain, tags) if part]
+    return " · ".join(parts) if parts else "company search"
+
+
+def _history_label_for_people_search(
+    query: str,
+    *,
+    organization_id: str | None,
+    organization_name: str | None,
+    resolved_organization: dict | None,
+    organization_display_name: str | None = None,
+) -> str:
+    base = query.strip()
+    company_label: str | None = None
+    if resolved_organization and resolved_organization.get("name"):
+        company_label = str(resolved_organization["name"])
+    elif organization_name and organization_name.strip():
+        company_label = organization_name.strip()
+    elif organization_display_name and organization_display_name.strip():
+        company_label = organization_display_name.strip()
+    elif organization_id and organization_id.strip():
+        company_label = f"org:{organization_id.strip()}"
+
+    if base and company_label:
+        return f"{base} @ {company_label}"
+    if company_label:
+        return f"people @ {company_label}"
+    return base or "people search"
+
+
+def _build_search_params(
+    *,
+    entity_type: str,
+    query: str = "",
+    organization_id: str | None = None,
+    organization_name: str | None = None,
+    organization_display_name: str | None = None,
+    domain: str | None = None,
+    company_name: str | None = None,
+    company_domain: str | None = None,
+    keywords: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "entity_type": entity_type,
+        "query": query,
+        "organization_id": organization_id,
+        "organization_name": organization_name,
+        "organization_display_name": organization_display_name,
+        "domain": domain,
+        "company_name": company_name,
+        "company_domain": company_domain,
+        "keywords": keywords,
+    }
+
+
+async def _count_stored_results(db: AsyncSession, search_id: int) -> int:
+    result = await db.execute(
+        select(func.count()).select_from(SearchResult).where(SearchResult.search_id == search_id)
+    )
+    return int(result.scalar_one())
+
+
+async def _load_page_mongo_ids(
+    db: AsyncSession,
+    *,
+    search_id: int,
+    page: int,
+    per_page: int,
+) -> list[str]:
+    offset = max(page - 1, 0) * per_page
+    result = await db.execute(
+        select(SearchResult.external_id)
+        .where(SearchResult.search_id == search_id)
+        .order_by(SearchResult.position.asc())
+        .offset(offset)
+        .limit(per_page)
+    )
+    return [str(row[0]) for row in result.all()]
+
+
+async def _load_all_mongo_ids(db: AsyncSession, *, search_id: int) -> list[str]:
+    result = await db.execute(
+        select(SearchResult.external_id)
+        .where(SearchResult.search_id == search_id)
+        .order_by(SearchResult.position.asc())
+    )
+    return [str(row[0]) for row in result.all()]
+
+
+def _email_from_value(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                email = item.get("email")
+                if isinstance(email, str) and email.strip():
+                    return email.strip()
+    return None
+
+
+def _resolved_record_email(record: dict[str, Any]) -> str | None:
+    """Mirror frontend resolvedPersonEmail: top-level, then people/match payload."""
+    direct = _email_from_value(record.get("email")) or _email_from_value(record.get("emails"))
+    if direct:
+        return direct
+    responses = record.get("apollo_responses")
+    if not isinstance(responses, dict):
+        return None
+    entry = responses.get("/api/v1/people/match")
+    if not isinstance(entry, dict):
+        return None
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return None
+    person = data.get("person")
+    if isinstance(person, dict):
+        nested = _email_from_value(person.get("email")) or _email_from_value(person.get("emails"))
+        if nested:
+            return nested
+    return _email_from_value(data.get("email")) or _email_from_value(data.get("emails"))
+
+
+def _csv_export_filename(search: SearchHistory) -> str:
+    slug = _CSV_FILENAME_SAFE.sub("-", (search.query or "search").strip())[:48].strip("-._")
+    if not slug:
+        slug = "search"
+    return f"search-{search.id}-{slug}.csv"
+
+
+def _csv_cell(value: str) -> str:
+    """Neutralize spreadsheet formula injection: Excel/Sheets evaluate cells
+    starting with = + - @ (or tab/CR) even when the CSV quotes them."""
+    if value and value[0] in "=+-@\t\r":
+        return f"'{value}"
+    return value
+
+
+async def _iter_search_csv(client: LeadsClient, mongo_ids: list[str]) -> AsyncIterator[str]:
+    """Hydrate and emit rows chunk by chunk so bytes flow immediately.
+
+    Buffering all rows first stalls large exports past nginx's proxy timeout.
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+
+    def _flush() -> str:
+        value = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        return value
+
+    writer.writerow(["name", "email"])
+    yield _flush()
+    for start in range(0, len(mongo_ids), _LEADS_BY_MONGO_IDS_MAX):
+        records = await _hydrate_results(client, mongo_ids[start : start + _LEADS_BY_MONGO_IDS_MAX])
+        for record in records:
+            name = str(record.get("name") or "").strip() or "null"
+            email = _resolved_record_email(record) or "null"
+            writer.writerow([_csv_cell(name), _csv_cell(email)])
+        yield _flush()
+
+
+async def _hydrate_results(
+    client: LeadsClient,
+    mongo_ids: list[str],
+) -> list[dict[str, Any]]:
+    if not mongo_ids:
+        return []
+    by_id: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(mongo_ids), _LEADS_BY_MONGO_IDS_MAX):
+        chunk = mongo_ids[start : start + _LEADS_BY_MONGO_IDS_MAX]
+        leads = await client.get_by_mongo_ids(chunk)
+        for lead in leads:
+            by_id[str(lead.get("id"))] = lead
+    results: list[dict[str, Any]] = []
+    for mongo_id in mongo_ids:
+        lead = by_id.get(mongo_id)
+        if not lead:
+            results.append(
+                {
+                    "id": mongo_id,
+                    "mongo_id": mongo_id,
+                    "entity_type": "person",
+                    "name": f"(missing lead {mongo_id})",
+                }
+            )
+            continue
+        record = lead_to_record(lead)
+        if record:
+            results.append(record)
+        else:
+            results.append(
+                {
+                    "id": lead.get("apollo_id") or mongo_id,
+                    "mongo_id": mongo_id,
+                    "entity_type": "person" if lead.get("entity_type") == "person" else "company",
+                    "name": str(lead.get("apollo_id") or mongo_id),
+                    "raw": {},
+                    "apollo_responses": lead.get("apollo_responses") or {},
+                }
+            )
+    return results
+
+
+async def _append_unique_mongo_ids(
+    db: AsyncSession,
+    *,
+    search: SearchHistory,
+    mongo_ids: list[str],
+    seen: set[str],
+    next_position: int,
+) -> int:
+    """Insert unique Mongo `_id`s. Returns how many new rows were added."""
+    added = 0
+    entity = "person" if search.entity_type in {"people", "person"} else "company"
+    for mongo_id in mongo_ids:
+        external_id = str(mongo_id or "").strip()
+        if not external_id or external_id in seen:
+            continue
+        seen.add(external_id)
+        db.add(
+            SearchResult(
+                search_id=search.id,
+                external_id=external_id,
+                entity_type=entity,
+                position=next_position + added,
+            )
+        )
+        added += 1
+    return added
+
+
+def _ndjson_line(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, default=str) + "\n"
+
+
+async def _apollo_params_for_stream(
+    client: LeadsClient,
+    *,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build Apollo search params and optional meta (e.g. resolved org)."""
+    entity_type = str(params.get("entity_type") or "")
+    meta: dict[str, Any] = {}
+
+    if entity_type == "people":
+        org_id = (params.get("organization_id") or "").strip() or None
+        org_name = " ".join(str(params.get("organization_name") or "").split()).strip() or None
+        domain = normalize_domain(
+            params.get("organization_domain") or params.get("domain")
+        )
+        if org_id and org_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either organization_id or organization_name, not both",
+            )
+        if org_name:
+            resolved = await client.resolve_organization_by_name(org_name)
+            org_id = resolved["id"]
+            domain = domain or normalize_domain(resolved.get("domain"))
+            meta["resolved_organization"] = resolved
+
+        cleaned_query = str(params.get("query") or "").strip() or None
+        if not cleaned_query and not org_id and not domain:
+            raise HTTPException(
+                status_code=400,
+                detail="people search requires search text and/or a company filter",
+            )
+        apollo_params = client.build_people_params(
+            query=cleaned_query,
+            page=1,
+            per_page=_APOLLO_FETCH_PER_PAGE,
+            organization_ids=[org_id] if org_id else None,
+            organization_domains=[domain] if domain and not org_id else None,
+        )
+        return apollo_params, meta
+
+    if entity_type == "companies":
+        keywords = str(params.get("keywords") or params.get("query") or "")
+        apollo_params = client.build_company_params(
+            keywords=keywords,
+            page=1,
+            per_page=_APOLLO_FETCH_PER_PAGE,
+            company_name=params.get("company_name"),
+            company_domain=params.get("company_domain") or params.get("domain"),
+        )
+        return apollo_params, meta
+
+    raise HTTPException(status_code=400, detail="Unsupported search entity type")
+
+
+async def _ingest_leads_via_stream(
+    db: AsyncSession,
+    client: LeadsClient,
+    *,
+    search: SearchHistory,
+    params: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    """Start leads ingest + embedding streams; persist Mongo `_id`s as pages arrive."""
+    entity_type = str(params.get("entity_type") or search.entity_type)
+    apollo_params, meta = await _apollo_params_for_stream(client, params=params)
+
+    resolved = meta.get("resolved_organization")
+    if entity_type == "people" and resolved and resolved.get("name"):
+        params = {
+            **params,
+            "organization_id": resolved.get("id") or params.get("organization_id"),
+            "organization_display_name": resolved.get("name"),
+            "organization_name": None,
+        }
+        search.search_params_json = json.dumps(params)
+        await db.commit()
+
+    if entity_type == "people":
+        stream_handles = await client.start_people_search_stream(apollo_params)
+    elif entity_type == "companies":
+        stream_handles = await client.start_organizations_search_stream(apollo_params)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported search entity type")
+
+    ingest_stream_id = str(stream_handles.get("ingest_stream_id") or "").strip()
+    embedding_stream_id = str(stream_handles.get("embedding_stream_id") or "").strip() or None
+    if not ingest_stream_id:
+        raise HTTPException(status_code=502, detail="Leads search missing ingest_stream_id")
+
+    subscribe_ids = [ingest_stream_id]
+    if embedding_stream_id:
+        subscribe_ids.append(embedding_stream_id)
+
+    seen: set[str] = set()
+    position = 0
+    ingest_done = False
+    embedding_done = embedding_stream_id is None
+
+    yield {
+        "type": "progress",
+        "kind": "ingest",
+        "page": 0,
+        "total_pages": 1,
+        "stored": 0,
+        "ingest_stream_id": ingest_stream_id,
+        "embedding_stream_id": embedding_stream_id,
+    }
+
+    async for event in client.subscribe_streams(subscribe_ids):
+        event_stream_id = str(event.get("stream_id") or "").strip()
+        event_kind = str(event.get("kind") or "").strip()
+        if not event_kind:
+            event_kind = (
+                "embedding" if embedding_stream_id and event_stream_id == embedding_stream_id else "ingest"
+            )
+        event_type = event.get("type")
+
+        if event_kind == "embedding":
+            if event_type == "progress":
+                yield {
+                    "type": "embedding_progress",
+                    "kind": "embedding",
+                    "done": int(event.get("done") or 0),
+                    "total": int(event.get("total") or 0),
+                    "embedding_stream_id": embedding_stream_id,
+                }
+            elif event_type == "complete":
+                embedding_done = True
+                yield {
+                    "type": "embedding_progress",
+                    "kind": "embedding",
+                    "done": int(event.get("done") or event.get("total") or 0),
+                    "total": int(event.get("total") or 0),
+                    "complete": True,
+                    "embedding_stream_id": embedding_stream_id,
+                }
+            elif event_type == "error":
+                embedding_done = True
+                yield {
+                    "type": "embedding_progress",
+                    "kind": "embedding",
+                    "done": int(event.get("done") or 0),
+                    "total": int(event.get("total") or 0),
+                    "error": str(event.get("detail") or "Embedding failed"),
+                    "embedding_stream_id": embedding_stream_id,
+                }
+        else:
+            if event_type == "ids":
+                raw_ids = event.get("ids") or []
+                mongo_ids = [str(item).strip() for item in raw_ids if str(item or "").strip()]
+                added = await _append_unique_mongo_ids(
+                    db,
+                    search=search,
+                    mongo_ids=mongo_ids,
+                    seen=seen,
+                    next_position=position,
+                )
+                position += added
+                search.total_results = position
+                await db.commit()
+                yield {
+                    "type": "progress",
+                    "kind": "ingest",
+                    "page": int(event.get("page") or 0),
+                    "total_pages": int(event.get("total_pages") or 1),
+                    "stored": position,
+                    "ids": mongo_ids,
+                    "ingest_stream_id": ingest_stream_id,
+                    "embedding_stream_id": embedding_stream_id,
+                }
+            elif event_type == "error":
+                detail = event.get("detail") or "Leads stream failed"
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
+            elif event_type == "complete":
+                ingest_done = True
+                search.total_results = position
+                await db.commit()
+                await db.refresh(search)
+                yield {
+                    "type": "ingest_complete",
+                    "kind": "ingest",
+                    "stored": position,
+                    "ingest_stream_id": ingest_stream_id,
+                    "embedding_stream_id": embedding_stream_id,
+                }
+
+        if ingest_done and embedding_done:
+            return
+
+    if not ingest_done:
+        search.total_results = position
+        await db.commit()
+        await db.refresh(search)
+        yield {
+            "type": "ingest_complete",
+            "kind": "ingest",
+            "stored": position,
+            "ingest_stream_id": ingest_stream_id,
+            "embedding_stream_id": embedding_stream_id,
+        }
+
+
+async def _search_ndjson_events(
+    db: AsyncSession,
+    client: LeadsClient,
+    *,
+    search: SearchHistory,
+    params: dict[str, Any],
+) -> AsyncIterator[str]:
+    """Emit ingest/embedding progress, first_page ASAP, then search complete after ingest.
+
+    Embedding progress may continue after ``complete``. Page navigation stays on the
+    synchronous ``POST /searches/{id}/page`` endpoint.
+    """
+    first_page_sent = False
+    search_complete_sent = False
+    per_page = max(search.per_page or _UI_PER_PAGE, 1)
+    page_results: list[dict[str, Any]] = []
+
+    async def _emit_first_page_if_needed() -> AsyncIterator[str]:
+        nonlocal first_page_sent, page_results
+        if first_page_sent:
+            return
+        page_results = await _set_current_page(db, client, search, 1)
+        response = SearchResponse(
+            history=_to_detail(search, page_results),
+            pagination=_pagination_for(search),
+        )
+        yield _ndjson_line({"type": "first_page", **response.model_dump(mode="json")})
+        first_page_sent = True
+
+    async def _emit_search_complete() -> AsyncIterator[str]:
+        nonlocal search_complete_sent, page_results
+        if search_complete_sent:
+            return
+        if not first_page_sent:
+            async for line in _emit_first_page_if_needed():
+                yield line
+        else:
+            # Re-hydrate whatever page the row points to now: the user may have
+            # paginated (sync /page endpoint) while ingest was still running, and
+            # emitting the cached page-1 results with a refreshed page number
+            # would mislabel them and yank the user off the page they're viewing.
+            await db.refresh(search)
+            page_results = await _set_current_page(db, client, search, search.page or 1)
+        response = SearchResponse(
+            history=_to_detail(search, page_results),
+            pagination=_pagination_for(search),
+        )
+        yield _ndjson_line({"type": "complete", **response.model_dump(mode="json")})
+        search_complete_sent = True
+
+    async for event in _ingest_leads_via_stream(
+        db,
+        client,
+        search=search,
+        params=params,
+    ):
+        event_type = event.get("type")
+        if event_type == "embedding_progress":
+            yield _ndjson_line(event)
+            continue
+
+        if event_type == "ingest_complete":
+            async for line in _emit_search_complete():
+                yield line
+            continue
+
+        yield _ndjson_line(event)
+        if (
+            not first_page_sent
+            and event_type == "progress"
+            and event.get("kind", "ingest") == "ingest"
+            and int(event.get("stored") or 0) >= per_page
+        ):
+            async for line in _emit_first_page_if_needed():
+                yield line
+
+    if not search_complete_sent:
+        async for line in _emit_search_complete():
+            yield line
+
+
+async def _set_current_page(
+    db: AsyncSession,
+    client: LeadsClient,
+    search: SearchHistory,
+    page: int,
+) -> list[dict[str, Any]]:
+    per_page = search.per_page or _UI_PER_PAGE
+    mongo_ids = await _load_page_mongo_ids(
+        db,
+        search_id=search.id,
+        page=page,
+        per_page=per_page,
+    )
+    page_results = await _hydrate_results(client, mongo_ids)
+    search.page = page
+    # Cache hydrated page for quick reopen; source of truth remains leads + mongo ids.
+    search.results_json = json.dumps(page_results)
+    await db.commit()
+    await db.refresh(search)
+    return page_results
+
+
+def _to_detail(row: SearchHistory, results: list[dict[str, Any]] | None = None) -> SearchHistoryDetail:
+    if results is None:
+        try:
+            results = json.loads(row.results_json or "[]")
+        except json.JSONDecodeError:
+            results = []
+        if not isinstance(results, list):
+            results = []
+    return SearchHistoryDetail(
+        id=row.id,
+        query=row.query,
+        entity_type=row.entity_type,
+        page=row.page,
+        per_page=row.per_page,
+        total_results=row.total_results,
+        created_at=row.created_at,
+        results=results,
+    )
+
+
+def _pagination_for(row: SearchHistory) -> dict[str, Any]:
+    per_page = max(row.per_page or _UI_PER_PAGE, 1)
+    total = max(row.total_results or 0, 0)
+    total_pages = max(1, (total + per_page - 1) // per_page) if total else 1
+    return {
+        "page": row.page,
+        "per_page": per_page,
+        "total_entries": total,
+        "total_pages": total_pages,
+    }
+
+
+def _search_stream_response(
+    settings: Settings,
+    token: str,
+    *,
+    history_query: str,
+    entity_type: str,
+    per_page: int,
+    search_params: dict[str, Any],
+) -> StreamingResponse:
+    """Run the search as a detached job and relay its NDJSON events to the client.
+
+    The job owns its DB session and keeps persisting Mongo ids even if the
+    browser disconnects mid-stream (explicit cancellation goes through
+    ``POST /streams/{id}/cancel``). Once the NDJSON response has started the
+    stream must never raise — Starlette would reset the connection, the browser
+    reports a generic "network error", and every other stream sharing that
+    origin appears to die — so every failure (HTTP, transport, DB) is emitted
+    as a graceful per-stream ``error`` event instead.
+    """
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    relay_alive = True
+
+    async def _emit(line: str | None) -> None:
+        if relay_alive or line is None:
+            await queue.put(line)
+
+    async def _run_job() -> None:
+        client = LeadsClient(settings, token)
+        try:
+            async with SessionLocal() as job_db:
+                row = SearchHistory(
+                    query=_clip_history_query(history_query),
+                    entity_type=entity_type,
+                    page=1,
+                    per_page=per_page,
+                    total_results=0,
+                    results_json="[]",
+                    search_params_json=json.dumps(search_params),
+                )
+                job_db.add(row)
+                await job_db.commit()
+                await job_db.refresh(row)
+                async for line in _search_ndjson_events(
+                    job_db, client, search=row, params=search_params
+                ):
+                    await _emit(line)
+        except HTTPException as exc:
+            await _emit(_ndjson_line({"type": "error", "detail": exc.detail}))
+        except Exception as exc:
+            logger.exception("Search stream job failed")
+            await _emit(_ndjson_line({"type": "error", "detail": f"Search failed: {exc}"}))
+        finally:
+            await _emit(None)
+
+    task = asyncio.create_task(_run_job(), name="search-stream-job")
+    _search_jobs.add(task)
+    task.add_done_callback(_search_jobs.discard)
+
+    async def event_stream() -> AsyncIterator[str]:
+        nonlocal relay_alive
+        try:
+            while True:
+                line = await queue.get()
+                if line is None:
+                    break
+                yield line
+        finally:
+            # Browser gone (or stream done): stop queueing lines but let the
+            # job keep persisting ids until the leads ingest finishes.
+            relay_alive = False
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/search")
+async def search(
+    body: SearchRequest,
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> StreamingResponse:
+    """NDJSON ingest stream: emit page 1 as soon as filled; further pages via sync endpoint."""
+    client = LeadsClient(settings, token)
+    company_name = (body.company_name or "").strip() or None
+    company_domain = (body.company_domain or "").strip() or None
+
+    # Resolve org name once for history labeling (also warms leads cache).
+    resolved: dict[str, Any] | None = None
+    if body.entity_type == "people" and (body.organization_name or "").strip():
+        resolved = await client.resolve_organization_by_name(body.organization_name.strip())
+
+    if body.entity_type == "people":
+        history_query = _history_label_for_people_search(
+            body.query,
+            organization_id=body.organization_id,
+            organization_name=body.organization_name,
+            resolved_organization=resolved,
+            organization_display_name=body.organization_display_name,
+        )
+    else:
+        history_query = _history_label_for_company_search(
+            body.query, company_name, company_domain
+        )
+
+    org_id = body.organization_id
+    display_name = body.organization_display_name
+    if resolved:
+        org_id = resolved.get("id") or org_id
+        display_name = resolved.get("name") or display_name
+
+    search_params = _build_search_params(
+        entity_type=body.entity_type,
+        query=body.query.strip(),
+        organization_id=org_id,
+        organization_name=None if org_id else body.organization_name,
+        organization_display_name=display_name,
+        domain=body.organization_domain if body.entity_type == "people" else None,
+        company_name=company_name if body.entity_type == "companies" else None,
+        company_domain=company_domain if body.entity_type == "companies" else None,
+        keywords=body.query.strip() if body.entity_type == "companies" else None,
+    )
+
+    return _search_stream_response(
+        settings,
+        token,
+        history_query=history_query,
+        entity_type=body.entity_type,
+        per_page=body.per_page or _UI_PER_PAGE,
+        search_params=search_params,
+    )
+
+
+@router.post("/search/company-people")
+async def search_company_people(
+    body: CompanyPeopleSearchRequest,
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> StreamingResponse:
+    history_query = _history_label_for_company_people(body.company_name, body.keywords)
+    search_params = _build_search_params(
+        entity_type="people",
+        query=(body.keywords or "").strip(),
+        organization_id=body.organization_id,
+        organization_display_name=body.company_name,
+        domain=body.domain,
+        company_name=body.company_name,
+        keywords=body.keywords,
+    )
+
+    return _search_stream_response(
+        settings,
+        token,
+        history_query=history_query,
+        entity_type="people",
+        per_page=body.per_page or _UI_PER_PAGE,
+        search_params=search_params,
+    )
+
+
+@router.post("/searches/{search_id}/page", response_model=SearchResponse)
+async def search_page(
+    search_id: int,
+    body: SearchPageRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> SearchResponse:
+    source = await db.get(SearchHistory, search_id)
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+
+    stored = await _count_stored_results(db, search_id)
+    if stored == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This search has no stored results to paginate",
+        )
+
+    if source.total_results != stored:
+        source.total_results = stored
+
+    client = LeadsClient(settings, token)
+    results = await _set_current_page(db, client, source, body.page)
+    return SearchResponse(history=_to_detail(source, results), pagination=_pagination_for(source))
+
+
+@router.get("/searches", response_model=list[SearchHistorySummary])
+async def list_searches(
+    db: AsyncSession = Depends(get_db),
+    _: UserOut = Depends(get_current_user),
+) -> list[SearchHistory]:
+    result = await db.execute(select(SearchHistory).order_by(SearchHistory.created_at.desc()).limit(100))
+    return list(result.scalars().all())
+
+
+@router.get("/searches/{search_id}", response_model=SearchHistoryDetail)
+async def get_search(
+    search_id: int,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> SearchHistoryDetail:
+    row = await db.get(SearchHistory, search_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+
+    stored = await _count_stored_results(db, search_id)
+    if stored > 0:
+        if row.total_results != stored:
+            row.total_results = stored
+            await db.commit()
+            await db.refresh(row)
+        client = LeadsClient(settings, token)
+        mongo_ids = await _load_page_mongo_ids(
+            db,
+            search_id=row.id,
+            page=row.page or 1,
+            per_page=row.per_page or _UI_PER_PAGE,
+        )
+        results = await _hydrate_results(client, mongo_ids)
+        return _to_detail(row, results)
+
+    return _to_detail(row)
+
+
+@router.delete("/searches/{search_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_search(
+    search_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: UserOut = Depends(get_current_user),
+) -> None:
+    row = await db.get(SearchHistory, search_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    await db.execute(delete(SearchResult).where(SearchResult.search_id == search_id))
+    await db.delete(row)
+    await db.commit()
+
+
+@router.post("/streams/{stream_id}/cancel")
+async def cancel_stream_job(
+    stream_id: str,
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> dict[str, object]:
+    """Cancel a running leads ingest or embedding stream."""
+    cleaned = stream_id.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="stream_id is required")
+    client = LeadsClient(settings, token=token)
+    return await client.cancel_stream(cleaned)
+
+
+@router.get("/searches/{search_id}/export.csv")
+async def export_search_csv(
+    search_id: int,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> StreamingResponse:
+    """Export every stored result for a search as CSV (name, email)."""
+    row = await db.get(SearchHistory, search_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+
+    mongo_ids = await _load_all_mongo_ids(db, search_id=search_id)
+    if not mongo_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This search has no stored results to export",
+        )
+
+    client = LeadsClient(settings, token)
+    filename = _csv_export_filename(row)
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
+        ),
+    }
+    return StreamingResponse(
+        _iter_search_csv(client, mongo_ids),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@router.get("/apollo/credits")
+async def apollo_credits(
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Proxy Apollo credit balance via leads GET /api/leads/apollo/api/v1/users/api_profile."""
+    client = LeadsClient(settings, token)
+    return await client.get_apollo_credits()
+
+
+@router.post("/similarity-search", response_model=SimilaritySearchResponse)
+async def similarity_search(
+    body: SimilaritySearchRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> SimilaritySearchResponse:
+    """Proxy Milvus similarity search; persist history and paginate at 100/page."""
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query must not be empty")
+
+    client = LeadsClient(settings, token)
+    try:
+        hits = await client.similarity_search(query, limit=body.limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Similarity search failed: {exc}",
+        ) from exc
+
+    scored: list[SimilarityHitOut] = []
+    records: list[dict[str, Any]] = []
+    for hit in hits:
+        lead = hit.get("lead")
+        if not isinstance(lead, dict):
+            continue
+        record = lead_to_record(lead)
+        if not record:
+            continue
+        score = float(hit.get("score") or 0.0)
+        scored.append(SimilarityHitOut(score=score, record=record))
+        records.append(record)
+
+    per_page = _UI_PER_PAGE
+    page_results = records[:per_page]
+    history_query = _clip_history_query(query)
+    search_params = {
+        "source": "similarity",
+        "query": query,
+        "limit": body.limit,
+        "entity_type": "people",
+    }
+    row = SearchHistory(
+        query=history_query,
+        entity_type="people",
+        page=1,
+        per_page=per_page,
+        total_results=len(records),
+        results_json=json.dumps(page_results, default=str),
+        search_params_json=json.dumps(search_params),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    mongo_ids = [
+        str(record.get("mongo_id") or "").strip()
+        for record in records
+        if str(record.get("mongo_id") or "").strip()
+    ]
+    await _append_unique_mongo_ids(
+        db,
+        search=row,
+        mongo_ids=mongo_ids,
+        seen=set(),
+        next_position=0,
+    )
+    await db.commit()
+    await db.refresh(row)
+
+    return SimilaritySearchResponse(
+        query=query,
+        results=scored[:per_page],
+        history=_to_detail(row, page_results),
+    )
+
+
+@router.get("/leads/{mongo_id}")
+async def get_lead(
+    mongo_id: str,
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Re-hydrate a lead from Mongo by `_id` (e.g. after async webhook enrich)."""
+    client = LeadsClient(settings, token)
+    leads = await client.get_by_mongo_ids([mongo_id])
+    if not leads:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    record = lead_to_record(leads[0])
+    if not record:
+        raise HTTPException(status_code=502, detail="Lead could not be normalized")
+    return record
+
+
+def _enrich_ids_from_request(
+    apollo_id: str | None,
+    body: dict[str, Any] | None,
+) -> list[str]:
+    payload = dict(body or {})
+    ids: list[str] = []
+    raw_ids = payload.get("ids")
+    if isinstance(raw_ids, list):
+        ids.extend(str(item).strip() for item in raw_ids if str(item or "").strip())
+    for key in ("id", "person_id", "organization_id", "apollo_id"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            ids.append(str(value).strip())
+    if apollo_id and str(apollo_id).strip():
+        ids.append(str(apollo_id).strip())
+    return list(dict.fromkeys(ids))
+
+
+async def _enrich_ndjson_events(
+    client: LeadsClient,
+    *,
+    apollo_ids: list[str],
+    start_stream,
+) -> AsyncIterator[str]:
+    """Relay a per-person leads stream job (complete-info or people/match).
+
+    ``start_stream(apollo_id)`` must return ``{ingest_stream_id, embedding_stream_id}``
+    — same shape for enrich and match. Event relay is identical for both.
+
+    Starts the next person's ingest as soon as the previous ingest completes;
+    embedding streams keep running in parallel. Every progress event includes
+    ``active_stream_ids`` so the UI can cancel the whole in-flight batch.
+    """
+    total = max(len(apollo_ids), 1)
+    line_q: asyncio.Queue[str | None] = asyncio.Queue()
+    # Tracked per-kind so the UI can cancel fetching and embedding independently.
+    active_ingest_ids: set[str] = set()
+    active_embed_ids: set[str] = set()
+    state_lock = asyncio.Lock()
+    embed_finished = 0
+    ingest_finished = 0
+    pending_phone = 0
+    pending_waterfall = 0
+
+    async def _emit(payload: dict[str, Any]) -> None:
+        async with state_lock:
+            active_ingest = sorted(active_ingest_ids)
+            active_embed = sorted(active_embed_ids)
+            phone_n = pending_phone
+            waterfall_n = pending_waterfall
+        await line_q.put(
+            _ndjson_line(
+                {
+                    **payload,
+                    "active_ingest_stream_ids": active_ingest,
+                    "active_embedding_stream_ids": active_embed,
+                    # Union kept for backward compatibility with older clients.
+                    "active_stream_ids": sorted({*active_ingest, *active_embed}),
+                    "phone_reveal_pending_count": phone_n,
+                    "waterfall_pending_count": waterfall_n,
+                }
+            )
+        )
+
+    await _emit(
+        {
+            "type": "progress",
+            "kind": "ingest",
+            "page": 0,
+            "total_pages": total,
+            "stored": 0,
+            "ids": [],
+            "ingest_stream_id": None,
+            "embedding_stream_id": None,
+        }
+    )
+
+    async def _watch_person(
+        index: int, apollo_id: str
+    ) -> tuple[asyncio.Event, asyncio.Task[None]]:
+        """Start streams for one person; Event fires when ingest completes."""
+        ingest_done_event = asyncio.Event()
+
+        handles = await start_stream(apollo_id)
+        ingest_stream_id = str(handles.get("ingest_stream_id") or "").strip()
+        embedding_stream_id = str(handles.get("embedding_stream_id") or "").strip() or None
+        if not ingest_stream_id:
+            raise HTTPException(status_code=502, detail="Leads stream missing ingest_stream_id")
+
+        async with state_lock:
+            active_ingest_ids.add(ingest_stream_id)
+            if embedding_stream_id:
+                active_embed_ids.add(embedding_stream_id)
+
+        subscribe_ids = [ingest_stream_id]
+        if embedding_stream_id:
+            subscribe_ids.append(embedding_stream_id)
+
+        async def _consume() -> None:
+            nonlocal embed_finished, ingest_finished, pending_phone, pending_waterfall
+            ingest_done = False
+            embedding_done = embedding_stream_id is None
+            if embedding_done:
+                async with state_lock:
+                    embed_finished += 1
+            try:
+                async for event in client.subscribe_streams(subscribe_ids):
+                    event_stream_id = str(event.get("stream_id") or "").strip()
+                    event_kind = str(event.get("kind") or "").strip()
+                    if not event_kind:
+                        event_kind = (
+                            "embedding"
+                            if embedding_stream_id and event_stream_id == embedding_stream_id
+                            else "ingest"
+                        )
+                    event_type = event.get("type")
+
+                    if event_kind == "embedding":
+                        if event_type == "progress":
+                            event_done = int(event.get("done") or 0)
+                            event_total = int(event.get("total") or 0)
+                            # Ignore create_embedding_stream's empty 0/0 tick. Opening
+                            # the circle from that makes email/match sit at 0% for the
+                            # whole Apollo call before any embed work starts.
+                            if event_done == 0 and event_total == 0:
+                                continue
+                            async with state_lock:
+                                local_done = 1 if event_done > 0 else 0
+                                done_count = min(total, embed_finished + local_done)
+                                in_flight = event_total > event_done
+                            await _emit(
+                                {
+                                    "type": "embedding_progress",
+                                    "kind": "embedding",
+                                    "done": done_count,
+                                    "total": total,
+                                    "in_flight": in_flight,
+                                    "embedding_stream_id": embedding_stream_id,
+                                }
+                            )
+                        elif event_type == "complete":
+                            embedding_done = True
+                            async with state_lock:
+                                embed_finished += 1
+                                done_count = embed_finished
+                                batch_done = done_count >= total
+                                if embedding_stream_id:
+                                    active_embed_ids.discard(embedding_stream_id)
+                            await _emit(
+                                {
+                                    "type": "embedding_progress",
+                                    "kind": "embedding",
+                                    "done": done_count,
+                                    "total": total,
+                                    # Only the final person clears the ring; earlier
+                                    # completions just advance the determinate %.
+                                    "complete": batch_done,
+                                    "embedding_stream_id": embedding_stream_id,
+                                }
+                            )
+                        elif event_type == "error":
+                            embedding_done = True
+                            async with state_lock:
+                                embed_finished += 1
+                                done_count = embed_finished
+                                if embedding_stream_id:
+                                    active_embed_ids.discard(embedding_stream_id)
+                            await _emit(
+                                {
+                                    "type": "embedding_progress",
+                                    "kind": "embedding",
+                                    "done": done_count,
+                                    "total": total,
+                                    "error": str(event.get("detail") or "Embedding failed"),
+                                    "embedding_stream_id": embedding_stream_id,
+                                }
+                            )
+                    else:
+                        if event_type == "ids":
+                            raw_ids = event.get("ids") or []
+                            mongo_ids = [
+                                str(item).strip()
+                                for item in raw_ids
+                                if str(item or "").strip()
+                            ]
+                            async with state_lock:
+                                if event.get("phone_reveal_pending"):
+                                    pending_phone += 1
+                                if event.get("waterfall_pending"):
+                                    pending_waterfall += 1
+                            await _emit(
+                                {
+                                    "type": "progress",
+                                    "kind": "ingest",
+                                    "page": index,
+                                    "total_pages": total,
+                                    "stored": index,
+                                    "ids": mongo_ids,
+                                    "ingest_stream_id": ingest_stream_id,
+                                    "embedding_stream_id": embedding_stream_id,
+                                    "phone_reveal_pending": bool(
+                                        event.get("phone_reveal_pending")
+                                    ),
+                                    "waterfall_pending": bool(event.get("waterfall_pending")),
+                                }
+                            )
+                        elif event_type == "item_error":
+                            # Per-person failure on the leads side; the stream
+                            # continues (a "complete" event still follows).
+                            await _emit(
+                                {
+                                    "type": "item_error",
+                                    "kind": "ingest",
+                                    "page": index,
+                                    "total_pages": total,
+                                    "detail": str(event.get("detail") or "Enrich failed"),
+                                }
+                            )
+                        elif event_type == "error":
+                            detail = event.get("detail") or "Leads stream failed"
+                            async with state_lock:
+                                if not embedding_done and embedding_stream_id:
+                                    embed_finished += 1
+                                    embedding_done = True
+                            ingest_done_event.set()
+                            await line_q.put(
+                                _ndjson_line({"type": "error", "detail": detail})
+                            )
+                            return
+                        elif event_type == "complete":
+                            ingest_done = True
+                            async with state_lock:
+                                ingest_finished += 1
+                                stored = ingest_finished
+                                active_ingest_ids.discard(ingest_stream_id)
+                            ingest_done_event.set()
+                            await _emit(
+                                {
+                                    "type": "ingest_complete",
+                                    "kind": "ingest",
+                                    "page": stored,
+                                    "total_pages": total,
+                                    "stored": stored,
+                                    "ingest_stream_id": ingest_stream_id,
+                                    "embedding_stream_id": embedding_stream_id,
+                                    "complete": stored >= total,
+                                }
+                            )
+
+                    if ingest_done and embedding_done:
+                        return
+            finally:
+                if not ingest_done_event.is_set():
+                    ingest_done_event.set()
+
+        task = asyncio.create_task(
+            _consume(),
+            name=f"enrich-watch-{index}-{apollo_id[:8]}",
+        )
+        return ingest_done_event, task
+
+    async def _run_batch() -> None:
+        consume_tasks: list[asyncio.Task[None]] = []
+        try:
+            for index, apollo_id in enumerate(apollo_ids, start=1):
+                ingest_done_event, task = await _watch_person(index, apollo_id)
+                consume_tasks.append(task)
+                await ingest_done_event.wait()
+            if consume_tasks:
+                await asyncio.gather(*consume_tasks, return_exceptions=True)
+        except Exception as exc:
+            await line_q.put(_ndjson_line({"type": "error", "detail": str(exc)}))
+        finally:
+            for task in consume_tasks:
+                if not task.done():
+                    task.cancel()
+            if consume_tasks:
+                await asyncio.gather(*consume_tasks, return_exceptions=True)
+            await line_q.put(_ndjson_line({"type": "complete"}))
+            await line_q.put(None)
+
+    runner = asyncio.create_task(_run_batch(), name="enrich-batch-runner")
+    try:
+        while True:
+            line = await line_q.get()
+            if line is None:
+                break
+            yield line
+            if '"type": "error"' in line:
+                break
+    finally:
+        if not runner.done():
+            runner.cancel()
+            try:
+                await runner
+            except asyncio.CancelledError:
+                pass
+        async with state_lock:
+            leftover = list({*active_ingest_ids, *active_embed_ids})
+        for stream_id in leftover:
+            try:
+                await client.cancel_stream(stream_id)
+            except Exception:
+                pass
+
+
+@router.post("/people/enrich")
+@router.post("/people/enrich/{apollo_id}")
+async def enrich_person(
+    request: Request,
+    apollo_id: str | None = None,
+    body: dict[str, Any] | None = Body(default=None),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> Any:
+    """Proxy person enrichment to leads.
+
+    With ``stream=true`` (body/query) or ``Accept: application/x-ndjson``, returns an
+    NDJSON progress stream (retrieve + embedding), same style as ``POST /api/search``.
+    """
+    client = LeadsClient(settings, token)
+    payload = dict(body or {})
+    stream = bool(payload.get("stream"))
+    if not stream:
+        stream = "application/x-ndjson" in (request.headers.get("accept") or "").lower()
+    ids = _enrich_ids_from_request(apollo_id, payload)
+    if stream:
+        if not ids:
+            raise HTTPException(status_code=400, detail="At least one apollo id is required")
+
+        async def event_stream() -> AsyncIterator[str]:
+            try:
+                async for line in _enrich_ndjson_events(
+                    client,
+                    apollo_ids=ids,
+                    start_stream=client.start_person_enrich_stream,
+                ):
+                    yield line
+            except HTTPException as exc:
+                yield _ndjson_line({"type": "error", "detail": exc.detail})
+            except Exception as exc:
+                # Same never-raise invariant: transport/DB errors mid-stream must
+                # surface as an error event, not a connection reset.
+                logger.exception("NDJSON stream failed")
+                yield _ndjson_line({"type": "error", "detail": f"Stream failed: {exc}"})
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Leads returns SearchIdsOut; hydrate mongo ids for the UI record.
+    result = await client.enrich_person(apollo_id, payload)
+    mongo_ids = result.get("ids") if isinstance(result, dict) else None
+    if not isinstance(mongo_ids, list) or not mongo_ids:
+        raise HTTPException(status_code=502, detail="Leads enrich returned no ids")
+    leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+    if not leads:
+        raise HTTPException(status_code=404, detail="Enriched lead not found")
+    record = lead_to_record(leads[0])
+    if not record:
+        raise HTTPException(status_code=502, detail="Enriched lead could not be normalized")
+    return record
+
+
+@router.post("/people/match")
+@router.post("/people/match/{apollo_id}")
+async def match_person(
+    request: Request,
+    apollo_id: str | None = None,
+    body: dict[str, Any] | None = Body(default=None),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> Any:
+    """Proxy people/match (waterfall email/phone). Same NDJSON shape as enrich when streaming."""
+    client = LeadsClient(settings, token)
+    payload = dict(body or {})
+    stream = bool(payload.get("stream"))
+    if not stream:
+        stream = "application/x-ndjson" in (request.headers.get("accept") or "").lower()
+    ids = _enrich_ids_from_request(apollo_id, payload)
+    match_params = {
+        key: payload[key]
+        for key in (
+            "run_waterfall_email",
+            "run_waterfall_phone",
+            "reveal_phone_number",
+        )
+        if key in payload
+    }
+    if stream:
+        if not ids:
+            raise HTTPException(status_code=400, detail="At least one apollo id is required")
+
+        async def start_match(person_id: str) -> dict[str, str | None]:
+            return await client.start_person_match_stream(person_id, match_params)
+
+        async def event_stream() -> AsyncIterator[str]:
+            try:
+                async for line in _enrich_ndjson_events(
+                    client,
+                    apollo_ids=ids,
+                    start_stream=start_match,
+                ):
+                    yield line
+            except HTTPException as exc:
+                yield _ndjson_line({"type": "error", "detail": exc.detail})
+            except Exception as exc:
+                # Same never-raise invariant: transport/DB errors mid-stream must
+                # surface as an error event, not a connection reset.
+                logger.exception("NDJSON stream failed")
+                yield _ndjson_line({"type": "error", "detail": f"Stream failed: {exc}"})
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Leads returns SearchIdsOut; hydrate mongo ids for the UI record.
+    result = await client.match_person(apollo_id, {**payload, **match_params})
+    mongo_ids = result.get("ids") if isinstance(result, dict) else None
+    if not isinstance(mongo_ids, list) or not mongo_ids:
+        raise HTTPException(status_code=502, detail="Leads match returned no ids")
+    leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+    if not leads:
+        raise HTTPException(status_code=404, detail="Matched lead not found")
+    record = lead_to_record(leads[0])
+    if not record:
+        raise HTTPException(status_code=502, detail="Matched lead could not be normalized")
+    return {
+        "lead": record,
+        "phone_reveal_pending": bool(match_params.get("reveal_phone_number"))
+        or bool(match_params.get("run_waterfall_phone")),
+        "waterfall_pending": bool(match_params.get("run_waterfall_email"))
+        or bool(match_params.get("run_waterfall_phone")),
+        "webhook_url": None,
+        "raw_lead": leads[0],
+    }
+
+
+@router.post("/organizations/enrich")
+@router.post("/organizations/enrich/{apollo_id}")
+async def enrich_organization(
+    request: Request,
+    apollo_id: str | None = None,
+    body: dict[str, Any] | None = Body(default=None),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> Any:
+    """Proxy organization enrichment to leads (optional NDJSON stream like people enrich)."""
+    client = LeadsClient(settings, token)
+    payload = dict(body or {})
+    stream = bool(payload.get("stream"))
+    if not stream:
+        stream = "application/x-ndjson" in (request.headers.get("accept") or "").lower()
+    ids = _enrich_ids_from_request(apollo_id, payload)
+    if stream:
+        if not ids:
+            raise HTTPException(status_code=400, detail="At least one apollo id is required")
+
+        async def event_stream() -> AsyncIterator[str]:
+            try:
+                async for line in _enrich_ndjson_events(
+                    client,
+                    apollo_ids=ids,
+                    start_stream=client.start_organization_enrich_stream,
+                ):
+                    yield line
+            except HTTPException as exc:
+                yield _ndjson_line({"type": "error", "detail": exc.detail})
+            except Exception as exc:
+                # Same never-raise invariant: transport/DB errors mid-stream must
+                # surface as an error event, not a connection reset.
+                logger.exception("NDJSON stream failed")
+                yield _ndjson_line({"type": "error", "detail": f"Stream failed: {exc}"})
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    result = await client.enrich_organization(apollo_id, payload)
+    mongo_ids = result.get("ids") if isinstance(result, dict) else None
+    if not isinstance(mongo_ids, list) or not mongo_ids:
+        raise HTTPException(status_code=502, detail="Leads enrich returned no ids")
+    leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+    if not leads:
+        raise HTTPException(status_code=404, detail="Enriched lead not found")
+    record = lead_to_record(leads[0])
+    if not record:
+        raise HTTPException(status_code=502, detail="Enriched lead could not be normalized")
+    return record

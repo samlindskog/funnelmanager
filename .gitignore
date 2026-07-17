@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/.env
+backend/*.db
+*.egg-info/
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Docker / env
+.env
+.env.prod
+.env.local
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Claude Code local settings
+.claude/settings.local.json
