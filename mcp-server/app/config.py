@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     auth_username: str = "admin"
     auth_password: str = "admin"
 
+    # Host headers accepted by the MCP transport's DNS-rebinding protection.
+    # Must cover every name clients dial: the compose service name (other
+    # containers, e.g. OpenClaw) and loopback (host-local clients).
+    mcp_allowed_hosts: str = "mcp-server:8003,localhost:8003,127.0.0.1:8003"
+
+    @property
+    def mcp_allowed_host_list(self) -> list[str]:
+        return [host.strip() for host in self.mcp_allowed_hosts.split(",") if host.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "registry": "https://clawhub.ai",
+  "slug": "web-research",
+  "ownerHandle": "anderskev",
+  "installedVersion": "3.0.3",
+  "installedAt": 1784257932107,
+  "artifact": {
+    "kind": "archive",
+    "sha256": "21905986b64acece13940a4073ddd56f60e23865ae00043d2e05391479003043",
+    "integrity": "sha256-IZBZhrZKzs4TlApAc93Vb2DiOGWuAAQ9LgU5FHkAMEM="
+  },
+  "skillFile": {
+    "path": "SKILL.md",
+    "sha256": "f82158f852d1c096f3df273f1c651e4d8b4eb63269df37b10a384c403b36872c"
+  }
+}

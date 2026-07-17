@@ -1,0 +1,26 @@
+{
+  "agents": {
+    "defaults": {
+      "model": { "primary": "anthropic/claude-opus-4-8" }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": { "mode": "token" }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing"
+    }
+  },
+  "mcp": {
+    "servers": {
+      "funnelmanager": {
+        "url": "http://mcp-server:8003/mcp",
+        "transport": "streamable-http",
+        "supportsParallelToolCalls": true
+      }
+    }
+  }
+}

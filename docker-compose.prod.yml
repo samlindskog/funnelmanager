@@ -179,6 +179,24 @@ services:
       - leads-backend
       - auth-backend
 
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    restart: unless-stopped
+    environment:
+      OPENCLAW_GATEWAY_BIND: lan
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    volumes:
+      - ./openclaw:/home/node/.openclaw
+      - openclaw_auth:/home/node/.config/openclaw
+    # Loopback-only: open the Control UI via an SSH tunnel or put a TLS
+    # reverse proxy in front. Telegram is outbound-only and needs no port.
+    ports:
+      - "127.0.0.1:18789:18789"
+    depends_on:
+      - mcp-server
+
   frontend:
     build:
       context: ./frontend
@@ -200,3 +218,4 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  openclaw_auth:

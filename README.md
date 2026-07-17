@@ -7,7 +7,8 @@ Login-gated tool to search and inspect Apollo person and company records. The se
 - **Auth backend:** FastAPI + Redis — issues and stores opaque session tokens (1-day TTL); the single place login and token validation live
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; validates request tokens against the auth backend; relays searches to leads
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only, no request auth
-- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only, read-only inspection tools over the search + leads backends for agents (e.g. OpenClaw)
+- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only tools over the search + leads backends for agents: read-only inspection plus explicit Apollo actions (search/enrich)
+- **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with funnel-search / funnel-enrich / funnel-activity skills
 - **Frontend:** React + TypeScript + Vite + Material UI
 - **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis
 
@@ -142,6 +143,10 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `MONGODB_DB` | MongoDB database name for leads |
 | `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads-backend:8001`) |
 | `SEARCH_BACKEND_URL` | Internal URL the MCP server uses to call the search backend (default `http://backend:8000`) |
+| `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp-server:8003,localhost:8003,127.0.0.1:8003`) |
+| `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API |
+| `ANTHROPIC_API_KEY` | Model access for the OpenClaw agent |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for the OpenClaw Telegram channel |
 | `DOMAIN` | Production hostname for nginx `server_name` |
 
 ## API
@@ -224,6 +229,8 @@ Enrichment updates an existing document when `apollo_id` already exists (no dupl
 
 Read-only [MCP](https://modelcontextprotocol.io) server for internal agents (e.g. OpenClaw) — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only). It logs into the auth backend with `AUTH_USERNAME`/`AUTH_PASSWORD` and calls the search backend with that session token (re-login on 401); the leads backend is called directly with no auth. No tool calls Apollo, spends credits, or mutates data.
 
+Read-only inspection tools (free, no Apollo calls):
+
 | Tool | Backing call | Description |
 |---|---|---|
 | `search_history` | `GET /api/searches` | User activity: recent searches (label, entity type, counts, timestamps) |
@@ -235,6 +242,18 @@ Read-only [MCP](https://modelcontextprotocol.io) server for internal agents (e.g
 | `get_leads` | leads `POST /api/leads` | Batch hydrate by Mongo `_id` (compact summaries; `include_raw` for full docs) |
 | `similarity_search` | leads `POST /api/leads/similarity-search` | Semantic search over stored leads (no Apollo call, no history row) |
 
+Action tools (**spend Apollo credits**, upsert leads + history — same flows as the UI):
+
+| Tool | Backing call | Description |
+|---|---|---|
+| `run_people_search` | `POST /api/search` | Apollo people search; returns page 1, ingest continues server-side |
+| `run_company_search` | `POST /api/search` | Apollo organization search; same streaming/detached behavior |
+| `enrich_person` | `POST /api/people/enrich/{id}` | Complete Person Info enrichment |
+| `enrich_organization` | `POST /api/organizations/enrich/{id}` | Complete Organization Info enrichment |
+| `match_person` | `POST /api/people/match/{id}` | Contact reveal (waterfall email/phone; phone lands async via webhook) |
+
+The transport's DNS-rebinding protection allows `mcp-server:8003`, `localhost:8003`, and `127.0.0.1:8003` by default — extend via `MCP_ALLOWED_HOSTS` if clients dial another hostname.
+
 Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP). Example OpenClaw/Claude-style config:
 
 ```json
@@ -244,3 +263,24 @@ Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP).
   }
 }
 ```
+
+## OpenClaw agent
+
+The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json` + `skills/` are versioned; runtime state is gitignored) plus a named volume for auth-profile encryption keys.
+
+Skills (in `openclaw/skills/`):
+
+- `funnel-search` — run Apollo people/company searches via MCP (credit-aware: checks history before re-searching)
+- `funnel-enrich` — profile enrichment + email/phone reveal, with confirmation guardrails for bulk work
+- `funnel-activity` — read-only activity/inspection: history, recent enrichment, stats, credits
+- `csv`, `web-research` — ClawHub community skills (verified with `openclaw skills verify` before install) for lead-list CSV handling and cited prospect research
+
+First-run setup:
+
+1. Set in `.env` (see `.env.example`): `OPENCLAW_GATEWAY_TOKEN` (generate: `openssl rand -hex 32`), `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN` (from `@BotFather` → `/newbot`).
+2. `docker compose -f docker-compose.dev.yml up -d openclaw`
+3. Web UI: open `http://localhost:18789` and paste the gateway token.
+4. Telegram: DM your bot, then approve the pairing code:
+   `docker exec funnelmanager-openclaw-1 openclaw pairing approve telegram <CODE>`
+
+Manage skills inside the container: `docker exec funnelmanager-openclaw-1 openclaw skills list|search|verify|install …` (installs land in `openclaw/skills/` and persist).

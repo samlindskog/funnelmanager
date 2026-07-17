@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -29,16 +30,30 @@ leads_backend = LeadsBackendClient(settings)
 mcp = FastMCP(
     "funnelmanager",
     instructions=(
-        "Read-only inspection of the Funnel Manager stack. Use the search_* tools "
-        "to see user activity (search history and stored results, hydrated the same "
-        "way the UI renders them) and the leads_* tools to inspect stored Apollo "
-        "records and their enrichment state. Nothing here calls Apollo or mutates data."
+        "Funnel Manager (Apollo person/company inspector). Inspection tools "
+        "(search_history, search_results, get_lead*, recent_leads, leads_stats, "
+        "similarity_search, apollo_credits) are read-only and free. Action tools "
+        "(run_people_search, run_company_search, enrich_person, enrich_organization, "
+        "match_person) call Apollo and SPEND CREDITS — check apollo_credits when in "
+        "doubt and never loop them blindly. Searches persist to history and keep "
+        "ingesting server-side after the tool returns page 1; poll search_results "
+        "for later pages."
     ),
     stateless_http=True,
     json_response=True,
+    # Default rebinding protection only allows localhost hosts; internal
+    # clients dial the compose service name, so allow it explicitly
+    # (override with MCP_ALLOWED_HOSTS).
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=settings.mcp_allowed_host_list,
+    ),
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
+# Apollo-calling tools: not read-only (they upsert leads + history and spend
+# credits), but not destructive either — they only add/refresh data.
+_APOLLO_ACTION = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +179,139 @@ async def similarity_search(query: str, limit: int = 25) -> list[dict[str, Any]]
             continue
         out.append({"score": hit.get("score"), **summarize_lead(hit["lead"])})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Apollo actions — spend credits, mutate stored data (searches + enrichment)
+# ---------------------------------------------------------------------------
+
+
+def _search_outcome(outcome: dict[str, Any], preview_limit: int) -> dict[str, Any]:
+    data = outcome.get("data") or {}
+    history = data.get("history") if isinstance(data.get("history"), dict) else {}
+    results = history.get("results") if isinstance(history.get("results"), list) else []
+    preview = [
+        slim_record(record)
+        for record in results[: max(0, preview_limit)]
+        if isinstance(record, dict)
+    ]
+    complete = outcome.get("event") == "complete"
+    return {
+        "search_id": history.get("id"),
+        "query": history.get("query"),
+        "status": "complete" if complete else "ingest_running",
+        "note": (
+            "Ingest finished; all results are stored."
+            if complete
+            else "Page 1 returned; ingest keeps running server-side. Use search_results "
+            "(same search_id) to read later pages, and search_history to watch "
+            "total_results grow."
+        ),
+        "pagination": data.get("pagination"),
+        "results_preview": preview,
+    }
+
+
+@mcp.tool(annotations=_APOLLO_ACTION)
+async def run_people_search(
+    query: str = "",
+    organization_name: str | None = None,
+    organization_id: str | None = None,
+    organization_domain: str | None = None,
+    preview_limit: int = 25,
+) -> dict[str, Any]:
+    """Run an Apollo people search (SPENDS APOLLO CREDITS). Needs query text
+    and/or a company filter (organization_name OR organization_id, optionally
+    organization_domain). Persists a search-history entry, returns page 1 as a
+    preview, and keeps ingesting all matching pages (up to 100k) server-side —
+    exactly like the UI. Do not repeat an identical search; reuse the stored one
+    via search_results instead."""
+    body: dict[str, Any] = {"entity_type": "people", "query": query or ""}
+    if organization_name:
+        body["organization_name"] = organization_name
+    if organization_id:
+        body["organization_id"] = organization_id
+    if organization_domain:
+        body["organization_domain"] = organization_domain
+    outcome = await search_backend.stream_search("/api/search", body)
+    return _search_outcome(outcome, preview_limit)
+
+
+@mcp.tool(annotations=_APOLLO_ACTION)
+async def run_company_search(
+    keywords: str = "",
+    company_name: str | None = None,
+    company_domain: str | None = None,
+    preview_limit: int = 25,
+) -> dict[str, Any]:
+    """Run an Apollo company/organization search (SPENDS APOLLO CREDITS). Needs
+    keywords and/or company_name and/or company_domain. Same behavior as
+    run_people_search: persists history, returns page 1, ingest continues
+    server-side."""
+    body: dict[str, Any] = {"entity_type": "companies", "query": keywords or ""}
+    if company_name:
+        body["company_name"] = company_name
+    if company_domain:
+        body["company_domain"] = company_domain
+    outcome = await search_backend.stream_search("/api/search", body)
+    return _search_outcome(outcome, preview_limit)
+
+
+@mcp.tool(annotations=_APOLLO_ACTION)
+async def enrich_person(apollo_id: str, include_raw: bool = False) -> dict[str, Any]:
+    """Apollo Complete Person Info enrichment for one person (SPENDS APOLLO
+    CREDITS). Upserts the stored lead (no duplicates) and returns the refreshed
+    record. Get apollo_id from search results / lead records (the `id` field)."""
+    record = await search_backend.request(
+        "POST", f"/api/people/enrich/{apollo_id}", json_body={}
+    )
+    if include_raw or not isinstance(record, dict):
+        return record
+    return slim_record(record)
+
+
+@mcp.tool(annotations=_APOLLO_ACTION)
+async def enrich_organization(apollo_id: str, include_raw: bool = False) -> dict[str, Any]:
+    """Apollo Complete Organization Info enrichment for one company (SPENDS
+    APOLLO CREDITS). Upserts the stored lead and returns the refreshed record."""
+    record = await search_backend.request(
+        "POST", f"/api/organizations/enrich/{apollo_id}", json_body={}
+    )
+    if include_raw or not isinstance(record, dict):
+        return record
+    return slim_record(record)
+
+
+@mcp.tool(annotations=_APOLLO_ACTION)
+async def match_person(
+    apollo_id: str,
+    run_waterfall_email: bool = False,
+    run_waterfall_phone: bool = False,
+    reveal_phone_number: bool = False,
+) -> dict[str, Any]:
+    """Apollo people/match — reveal contact info for one person (SPENDS APOLLO
+    CREDITS; waterfall/phone reveal costs extra). Email usually lands in the
+    returned record immediately; phone numbers arrive asynchronously via the
+    Apollo webhook — re-fetch the lead (get_lead) after a minute if
+    phone_reveal_pending is true."""
+    body: dict[str, Any] = {}
+    if run_waterfall_email:
+        body["run_waterfall_email"] = True
+    if run_waterfall_phone:
+        body["run_waterfall_phone"] = True
+    if reveal_phone_number:
+        body["reveal_phone_number"] = True
+    data = await search_backend.request(
+        "POST", f"/api/people/match/{apollo_id}", json_body=body
+    )
+    if not isinstance(data, dict):
+        return data
+    lead = data.get("lead")
+    return {
+        "lead": slim_record(lead) if isinstance(lead, dict) else lead,
+        "phone_reveal_pending": data.get("phone_reveal_pending"),
+        "waterfall_pending": data.get("waterfall_pending"),
+    }
 
 
 @mcp.custom_route("/health", methods=["GET"])

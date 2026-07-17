@@ -1,0 +1,9 @@
+# This directory is bind-mounted as /home/node/.openclaw inside the openclaw
+# container. Only the config and skills are versioned; everything else is
+# runtime state (sessions, agent auth, credentials, logs) and must stay out
+# of git.
+*
+!.gitignore
+!openclaw.json
+!skills/
+!skills/**

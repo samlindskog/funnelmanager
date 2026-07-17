@@ -12,6 +12,7 @@ the search backend's ``LeadsClient`` calls it.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -106,6 +107,75 @@ class SearchBackendClient:
         if response.status_code == 204:
             return None
         return response.json()
+
+    async def stream_search(
+        self,
+        path: str,
+        json_body: dict[str, Any],
+        *,
+        max_seconds: float = 180.0,
+    ) -> dict[str, Any]:
+        """Start an NDJSON search stream and return once page 1 is available.
+
+        The search backend runs ingest as a detached job, so disconnecting after
+        ``first_page`` (or ``complete``, whichever comes first) does not stop it —
+        results keep persisting server-side, same as when a browser navigates away.
+        Stream ``error`` events surface as :class:`UpstreamError`.
+        """
+        token = await self._auth.token()
+        timeout = httpx.Timeout(connect=30.0, read=max_seconds, write=30.0, pool=30.0)
+        last_progress: dict[str, Any] = {}
+        for attempt in (0, 1):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    self._url(path),
+                    json=json_body,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/x-ndjson",
+                    },
+                ) as response:
+                    if response.status_code == 401 and attempt == 0:
+                        token = await self._auth.token(force_refresh=True)
+                        continue
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        try:
+                            detail = json.loads(body).get("detail", body)
+                        except Exception:
+                            detail = body
+                        raise UpstreamError(
+                            f"Search backend POST {path} failed "
+                            f"({response.status_code}): {detail}"
+                        )
+                    buffer = ""
+                    async for chunk in response.aiter_text():
+                        buffer += chunk
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(event, dict):
+                                continue
+                            event_type = event.get("type")
+                            if event_type == "error":
+                                raise UpstreamError(str(event.get("detail") or "Search failed"))
+                            if event_type == "progress":
+                                last_progress = event
+                            elif event_type in {"first_page", "complete"}:
+                                return {
+                                    "event": event_type,
+                                    "data": event,
+                                    "last_progress": last_progress,
+                                }
+            break
+        raise UpstreamError("Search stream ended without a first_page or complete event")
 
 
 class LeadsBackendClient:
