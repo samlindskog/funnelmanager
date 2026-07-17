@@ -1,7 +1,18 @@
+# Prod runs prebuilt images pulled from GHCR — nothing builds on the host and no
+# source checkout is needed. `.github/workflows/deploy-prod.yml` builds/pushes the
+# images on GitHub runners, then ships this file to the server and pulls.
+# IMAGE_TAG selects the image set (default: the moving `prod` tag CI pushes on
+# every deploy; per-commit `sha-<sha>` and release `v*` tags exist for pinning).
+#
+# `name:` is pinned so deploys from any directory keep reusing the existing
+# `funnelmanager-prod_*` containers and data volumes.
+name: funnelmanager-prod
+
 services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: 512m
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -17,6 +28,11 @@ services:
   mongo:
     image: mongo:7
     restart: unless-stopped
+    # WiredTiger defaults to ~50% of host RAM per mongod; two stacks share this
+    # box, so pin the cache small — payload data lives on disk and the working
+    # set is tiny. Keep this the first thing to shrink under memory pressure.
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.25"]
+    mem_limit: 768m
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -28,6 +44,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: 128m
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -40,6 +57,7 @@ services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
     restart: unless-stopped
+    mem_limit: 256m
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
@@ -57,6 +75,7 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     restart: unless-stopped
+    mem_limit: 512m
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -72,6 +91,9 @@ services:
   milvus:
     image: milvusdb/milvus:v2.5.4
     restart: unless-stopped
+    # Milvus reads its cgroup limit and scales its internal watermarks to it;
+    # the hard cap keeps segment caches from competing with the rest of the box.
+    mem_limit: 1536m
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
@@ -95,10 +117,9 @@ services:
       - minio
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: ghcr.io/samlindskog/funnelmanager/backend:${IMAGE_TAG:-prod}
     restart: unless-stopped
+    mem_limit: 512m
     environment:
       CORS_ORIGINS: ${CORS_ORIGINS}
       DATABASE_URL: ${DATABASE_URL}
@@ -115,10 +136,11 @@ services:
       - "8000"
 
   leads-backend:
-    build:
-      context: ./leads-backend
-      dockerfile: Dockerfile
+    image: ghcr.io/samlindskog/funnelmanager/leads-backend:${IMAGE_TAG:-prod}
     restart: unless-stopped
+    # Highest app cap: serializing enriched Apollo docs (~5MB JSON per 100
+    # leads) through pydantic spikes well past idle usage.
+    mem_limit: 1g
     environment:
       APOLLO_API_KEY: ${APOLLO_API_KEY}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
@@ -140,10 +162,9 @@ services:
       - "8001"
 
   auth-backend:
-    build:
-      context: ./auth-backend
-      dockerfile: Dockerfile
+    image: ghcr.io/samlindskog/funnelmanager/auth-backend:${IMAGE_TAG:-prod}
     restart: unless-stopped
+    mem_limit: 256m
     environment:
       AUTH_USERNAME: ${AUTH_USERNAME}
       AUTH_PASSWORD: ${AUTH_PASSWORD}
@@ -157,10 +178,10 @@ services:
       - "8002"
 
   mcp-server:
-    build:
-      context: ./mcp-server
-      dockerfile: Dockerfile
+    image: ghcr.io/samlindskog/funnelmanager/mcp-server:${IMAGE_TAG:-prod}
     restart: unless-stopped
+    # Parses full lead payloads before summarizing for agents; give it spike room.
+    mem_limit: 768m
     environment:
       AUTH_USERNAME: ${AUTH_USERNAME}
       AUTH_PASSWORD: ${AUTH_PASSWORD}
@@ -183,6 +204,7 @@ services:
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     restart: unless-stopped
+    mem_limit: 2g
     # Opt-in in prod: `docker compose --profile agent up -d` starts the agent.
     # Kept off by default so a coexisting stack does not run a second Telegram
     # poller against the same bot token. Give prod its own TELEGRAM_BOT_TOKEN
@@ -198,7 +220,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
-      - ./openclaw:/home/node/.openclaw
+      # State dir must exist next to this compose file (or point elsewhere via
+      # OPENCLAW_STATE_DIR) — there is no source checkout to provide it.
+      - ${OPENCLAW_STATE_DIR:-./openclaw}:/home/node/.openclaw
       - openclaw_auth:/home/node/.config/openclaw
     # Loopback-only: open the Control UI via an SSH tunnel or put a TLS
     # reverse proxy in front. Telegram is outbound-only and needs no port.
@@ -208,10 +232,9 @@ services:
       - mcp-server
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}
     restart: unless-stopped
+    mem_limit: 128m
     environment:
       DOMAIN: ${DOMAIN}
     # HOST_BIND pins the published port to loopback (e.g. "127.0.0.1:") so a host

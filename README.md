@@ -57,7 +57,10 @@ Default login: `admin` / `admin`
 cp .env.prod.example .env.prod
 # Set DOMAIN, AUTH_PASSWORD, APOLLO_API_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DATABASE_URL
 
-docker compose -f docker-compose.prod.yml --env-file .env.prod up --build -d
+# Prod uses prebuilt images from GHCR (no local builds) — built and pushed by
+# .github/workflows/deploy-prod.yml; see deploy/README.md for the full flow.
+docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
 
 - nginx serves the built SPA on port 80 for `${DOMAIN}`

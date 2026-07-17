@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16-alpine
+    mem_limit: 512m
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-funnel}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-funnel}
@@ -17,6 +18,10 @@ services:
 
   mongo:
     image: mongo:7
+    # WiredTiger defaults to ~50% of host RAM per mongod; pin the cache small —
+    # the working set is tiny and this cache should be first to go under pressure.
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.25"]
+    mem_limit: 768m
     ports:
       - "${HOST_BIND:-}27017:27017"
     volumes:
@@ -29,6 +34,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    mem_limit: 128m
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${HOST_BIND:-}6379:6379"
@@ -42,6 +48,7 @@ services:
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
+    mem_limit: 256m
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
@@ -58,6 +65,7 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    mem_limit: 512m
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -72,6 +80,9 @@ services:
 
   milvus:
     image: milvusdb/milvus:v2.5.4
+    # Milvus reads its cgroup limit and scales its internal watermarks to it;
+    # the hard cap keeps segment caches from competing with the rest of the box.
+    mem_limit: 1536m
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
@@ -98,6 +109,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    mem_limit: 512m
     env_file:
       - .env
     environment:
@@ -121,6 +133,9 @@ services:
     build:
       context: ./leads-backend
       dockerfile: Dockerfile.dev
+    # Highest app cap: serializing enriched Apollo docs (~5MB JSON per 100
+    # leads) through pydantic spikes well past idle usage.
+    mem_limit: 1g
     env_file:
       - .env
     environment:
@@ -144,6 +159,7 @@ services:
     build:
       context: ./auth-backend
       dockerfile: Dockerfile.dev
+    mem_limit: 256m
     env_file:
       - .env
     environment:
@@ -162,6 +178,8 @@ services:
     build:
       context: ./mcp-server
       dockerfile: Dockerfile.dev
+    # Parses full lead payloads before summarizing for agents; give it spike room.
+    mem_limit: 768m
     env_file:
       - .env
     environment:
@@ -182,6 +200,7 @@ services:
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     restart: unless-stopped
+    mem_limit: 2g
     # Deliberately no env_file: OpenClaw gets only the secrets it needs, not
     # the whole stack's (.env holds Apollo/OpenAI/DB credentials).
     environment:
@@ -209,6 +228,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+    # Vite dev server + esbuild need real headroom during rebuilds.
+    mem_limit: 1g
     environment:
       VITE_API_PROXY_TARGET: http://nginx:80
       VITE_HMR_CLIENT_PORT: ${VITE_HMR_CLIENT_PORT:-5173}
@@ -226,6 +247,7 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
+    mem_limit: 128m
     volumes:
       - ./frontend/nginx.dev.conf:/etc/nginx/conf.d/default.conf:ro
     # HOST_BIND lets a deploy pin published ports to loopback (e.g. "127.0.0.1:")

@@ -63,9 +63,11 @@ Everything runs through Docker Compose; there is one public entrypoint (nginx). 
 cp .env.example .env      # set APOLLO_API_KEY
 docker compose -f docker-compose.dev.yml up --build
 
-# Prod
+# Prod — pulls prebuilt images from GHCR; never builds locally (see deploy/README.md).
+# Images are built/pushed by .github/workflows/deploy-prod.yml (tag v* or manual dispatch).
 cp .env.prod.example .env.prod
-docker compose -f docker-compose.prod.yml --env-file .env.prod up --build -d
+docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
 
 Default dev login: `admin` / `admin`.
