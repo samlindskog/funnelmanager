@@ -2,19 +2,25 @@
 
 ## Topology
 
-usfr2 (`192.155.85.254`) runs **two independent Compose stacks** side by side,
-each fronted by the host nginx (TLS terminated there, Cloudflare in front):
+Two boxes, one role each (both Debian 13, identical hardening — `sam` + key-only
+sshd, ufw 22/443/mosh, fail2ban, unattended-upgrades, swapfile):
 
-| Stack | Dir | Compose project | Compose file | Public URL | Frontend on loopback |
-|---|---|---|---|---|---|
-| dev  | `/home/sam/funnelmanager`      | `funnelmanager`      | `docker-compose.dev.yml`  | https://dev.x9bc433.win | `127.0.0.1:5173` |
-| prod | `/home/sam/funnelmanager-prod` | `funnelmanager-prod` | `docker-compose.prod.yml` | https://x9bc433.win     | `127.0.0.1:8080` |
+| Box | IP | SSH | Role | Dir | Compose file | Public URL |
+|---|---|---|---|---|---|---|
+| usfr2 (8GB) | `192.155.85.254` | `usfr2` | **prod** | `/home/sam/funnelmanager-prod` | `docker-compose.prod.yml` | https://x9bc433.win |
+| usfr3 (4GB) | `192.81.135.223` | `usfr3` | **dev**  | `/home/sam/funnelmanager`      | `docker-compose.dev.yml`  | SSH tunnel (`ssh -L 5173:127.0.0.1:5173 usfr3`) |
 
-Prod publishes only to loopback (`HOST_BIND=127.0.0.1:`) and on non-conflicting
-ports (`PROD_HTTP_PORT=8080`, `PROD_MCP_PORT=8013`, `PROD_OPENCLAW_PORT=18799`)
-so it never clashes with dev or bypasses ufw. Volumes are namespaced by the
-`funnelmanager-prod` project (pinned via `name:` in the compose file), separate
-from dev's `*_dev` volumes.
+Prod is fronted by usfr2's host nginx (TLS there, Cloudflare in front) and
+publishes only to loopback (`HOST_BIND=127.0.0.1:`, `PROD_HTTP_PORT=8080`). Its
+volumes are namespaced by the `funnelmanager-prod` project (pinned via `name:`
+in the compose file). usfr3 is the develop-here box: source checkout + hot-reload
+dev stack, reached over an SSH tunnel (no public TLS). The old dev stack that
+used to coexist on usfr2 is stopped (its `*_dev` volumes are retained but idle;
+`docker volume rm funnelmanager_*_dev` on usfr2 to reclaim the disk).
+
+**Cross-box Mongo sync + Milvus reconcile** live as untracked ops scripts in
+`~/ops/` on both boxes (`mongo-union-sync.sh`, `embed-reconcile.sh`,
+`reconcile_embeddings.py`) — see "Data sync" below.
 
 **Prod never builds.** The prod dir is not a source checkout — it only needs
 `docker-compose.prod.yml` and `.env.prod`. Images are built on GitHub runners
@@ -78,16 +84,44 @@ versioned at `deploy/prod-deploy-hook.sh`; re-install it there after changing it
 Optionally add a required reviewer to the GitHub **production** environment
 (Settings → Environments) to gate each deploy behind an approval.
 
+## Data sync (cross-box)
+
+Mongo is the source of truth; Milvus is per-box and never synced. The `~/ops/`
+scripts (untracked, present on both boxes) reconcile them:
+
+- **`mongo-union-sync.sh <peer> [pull|push|both]`** — union/upsert of the `leads`
+  collection between this box's Mongo and a peer over SSH. Deduped on `apollo_id`,
+  newest-wins by `updated_at`; each box keeps its own `_id` (Postgres search
+  history references local `_id`s, so they must stay stable). `both` (default)
+  leaves both sides holding the union. Uses `mongodump | mongorestore` into a
+  staging collection, then a `$merge`.
+- **`embed-reconcile.sh`** → **`reconcile_embeddings.py`** — after a sync, indexes
+  into *this* box's Milvus any `embedding: true` doc whose vector is missing
+  locally (it was embedded on the other box). Bounded to the intended-embedded
+  set, skips docs already present, idempotent. Run on each box after a sync.
+  Contrast `leads-backend/scripts/reembed.py`, which DROPS and rebuilds the whole
+  collection from scratch.
+
+Cross-box SSH uses a dedicated `funnelmanager-ops-sync` key on both boxes' `sam`
+(peer aliases `usfr2`/`usfr3` in each box's `~/.ssh/config`).
+
+Typical flow: `~/ops/mongo-union-sync.sh usfr2 both` on usfr3, then
+`~/ops/embed-reconcile.sh` on each box.
+
 ## Memory posture (post-incident, 2026-07-17)
 
-The box froze once under memory-pressure livelock (thrash without an OOM kill).
+usfr2 froze once under memory-pressure livelock (thrash without an OOM kill) when
+it ran dev+prod together. Dev has since moved to usfr3, so prod owns the 8GB box.
 Defenses now in place:
 
-- 8GB swapfile (`/swapfile`, in fstab) on top of the 496MB Linode swap partition.
+- 8GB swapfile (`/swapfile`, in fstab) on usfr2; 6GB on usfr3.
 - Every container carries a `mem_limit` in both compose files, so a runaway
   container gets OOM-killed inside its cgroup (and restarted by its restart
   policy) instead of stalling the host.
-- Both mongods run `--wiredTigerCacheSizeGB 0.25` — the default assumes ~50% of
-  host RAM *per mongod*, which two coexisting stacks cannot afford.
-- Milvus is capped at 1.5G; it reads its cgroup limit and scales its internal
-  watermarks accordingly.
+- Prod (usfr2, sole stack) caps are sized up for the 8GB box: Milvus 3G,
+  Mongo/leads-backend 1.5G, MCP 1G, etc. Mongo runs `--wiredTigerCacheSizeGB 0.5`
+  (default assumes ~50% of host RAM per mongod). Milvus reads its cgroup limit
+  and scales its internal watermarks accordingly.
+- Dev (usfr3, 4GB) keeps the tighter caps from `docker-compose.dev.yml`; the 6GB
+  swapfile absorbs single-user dev spikes. `docker compose stop openclaw` if the
+  agent's 2G is not needed while developing.
