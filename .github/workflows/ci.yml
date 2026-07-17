@@ -32,5 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate compose files parse
         run: |
+          # dev compose references env_file: .env (gitignored); a stub satisfies parsing.
+          touch .env
           docker compose -f docker-compose.dev.yml config -q
           docker compose -f docker-compose.prod.yml config -q
