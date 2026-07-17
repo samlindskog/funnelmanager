@@ -187,6 +187,9 @@ services:
     environment:
       OPENCLAW_GATEWAY_BIND: lan
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      # Agent model: OpenAI today; Anthropic stays wired in openclaw.json for
+      # when ANTHROPIC_API_KEY is available.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:

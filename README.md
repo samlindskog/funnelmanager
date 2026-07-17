@@ -145,7 +145,7 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `SEARCH_BACKEND_URL` | Internal URL the MCP server uses to call the search backend (default `http://backend:8000`) |
 | `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp-server:8003,localhost:8003,127.0.0.1:8003`) |
 | `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API |
-| `ANTHROPIC_API_KEY` | Model access for the OpenClaw agent |
+| `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json`); OpenAI is used until then |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for the OpenClaw Telegram channel |
 | `DOMAIN` | Production hostname for nginx `server_name` |
 
@@ -277,7 +277,7 @@ Skills (in `openclaw/skills/`):
 
 First-run setup:
 
-1. Set in `.env` (see `.env.example`): `OPENCLAW_GATEWAY_TOKEN` (generate: `openssl rand -hex 32`), `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN` (from `@BotFather` → `/newbot`).
+1. Set in `.env` (see `.env.example`): `OPENCLAW_GATEWAY_TOKEN` (generate: `openssl rand -hex 32`) and `TELEGRAM_BOT_TOKEN` (from `@BotFather` → `/newbot`). The agent model runs on `OPENAI_API_KEY` (`openai/gpt-5.6`); Anthropic stays wired in `openclaw/openclaw.json` — set `ANTHROPIC_API_KEY` and flip `model.primary` to `anthropic/claude-opus-4-8` when you have a key.
 2. `docker compose -f docker-compose.dev.yml up -d openclaw`
 3. Web UI: open `http://localhost:18789` and paste the gateway token.
 4. Telegram: DM your bot, then approve the pairing code:
