@@ -17,6 +17,10 @@
  *   as `session_token` explicitly.
  * - `channel_pairing_requested`: reports new unpaired DM senders as pending
  *   channel requests so admins see them before any tool call happens.
+ * - `message_received`: additionally reports the sender's identity (throttled
+ *   per identity) so channels that were paired with OpenClaw before this
+ *   plugin existed — and therefore never fire a pairing event — still show up
+ *   as pending channel requests without waiting for a tool call.
  *
  * The token is minted by the auth service for the linked profile; the MCP
  * server forwards it to the search/leads backends, which enforce the OPA
@@ -208,10 +212,30 @@ export default definePluginEntry({
       };
     }
 
-    // Learn channel identities from inbound traffic.
+    // identityKey -> last time it was reported to the auth service. Throttles
+    // the per-message report below to one call per identity per interval.
+    const reportedAt = new Map<string, number>();
+    const REPORT_INTERVAL_MS = 60 * 60 * 1000;
+
+    function reportIdentity(identity: ChannelIdentity): void {
+      const key = `${identity.channel}|${identity.deviceId}`;
+      const now = Date.now();
+      if (now - (reportedAt.get(key) ?? 0) < REPORT_INTERVAL_MS) return;
+      reportedAt.set(key, now);
+      // Fire-and-forget: for unlinked senders the auth service upserts a
+      // pending channel request; for linked ones it just reuses the cached
+      // session. fetchSession reports failures in its result, never throws.
+      void fetchSession(identity);
+    }
+
+    // Learn channel identities from inbound traffic, and surface unlinked
+    // senders as pending channel requests even if they never call a
+    // funnelmanager tool (e.g. chats paired with OpenClaw before this plugin
+    // was installed).
     api.on("message_received", async (_event: any, ctx: any) => {
       try {
-        rememberIdentity(ctx);
+        const identity = rememberIdentity(ctx);
+        if (identity) reportIdentity(identity);
       } catch {
         /* observation only */
       }

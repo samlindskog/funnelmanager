@@ -38,9 +38,7 @@
     }
   },
   "commands": {
-    "ownerAllowFrom": [
-      "telegram:1844012348"
-    ]
+    "ownerAllowFrom": []
   },
   "meta": {
     "lastTouchedVersion": "2026.7.1",
