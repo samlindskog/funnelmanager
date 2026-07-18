@@ -4,6 +4,8 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth'
 import { HubPage } from './pages/HubPage'
 import { LandingPage } from './pages/LandingPage'
+import { SearchPage } from './pages/SearchPage'
+import { ProgressCircles, ProgressProvider } from './progress'
 import { theme } from './theme'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -24,20 +26,31 @@ export default function App() {
     <ThemeProvider theme={theme} defaultMode="system" forceThemeRerender>
       <CssBaseline />
       <AuthProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/login" element={<LandingPage />} />
-            <Route
-              path="/"
-              element={
-                <ProtectedRoute>
-                  <HubPage />
-                </ProtectedRoute>
-              }
-            />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </BrowserRouter>
+        <ProgressProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/login" element={<LandingPage />} />
+              <Route
+                path="/"
+                element={
+                  <ProtectedRoute>
+                    <HubPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/search"
+                element={
+                  <ProtectedRoute>
+                    <SearchPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </BrowserRouter>
+          <ProgressCircles />
+        </ProgressProvider>
       </AuthProvider>
     </ThemeProvider>
   )

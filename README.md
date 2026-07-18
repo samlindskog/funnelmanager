@@ -10,7 +10,7 @@ Apollo person/company search + enrichment platform, driven primarily through an 
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
 - **MCP server:** Python MCP SDK (streamable HTTP) — internal-only tools over the search + leads backends for agents; every tool call carries a per-profile session token that is forwarded upstream
 - **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with funnel-search / funnel-enrich / funnel-activity skills and a `funnelmanager-auth` plugin that maps channel senders to profiles
-- **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels)
+- **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
 - **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis, OPA
 
 ## Features
@@ -152,7 +152,7 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `SESSION_TTL_SECONDS` | Session token lifetime (auth backend; default `86400` = 1 day) |
 | `REDIS_URL` | Redis URL for the auth backend profile + session store (e.g. `redis://redis:6379/0`) |
 | `OPA_URL` | OPA decision service URL (auth backend; default `http://opa:8181`) |
-| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default OpenClaw entry |
+| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + OpenClaw entries |
 | `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth-backend:8002`) |
 | `MCP_SHARED_LOGIN_FALLBACK` | MCP server: allow tokenless tool calls to fall back to the shared login (dev compose: `true`; prod default: `false`) |
 | `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |

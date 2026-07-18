@@ -7,7 +7,9 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = BACKEND_ROOT / ".env"
 
 DEFAULT_WEB_APPS = (
-    '[{"name": "OpenClaw", "description": "Agent chat & control UI", '
+    '[{"name": "Search", "description": "Apollo person/company search", '
+    '"url": "/search"}, '
+    '{"name": "OpenClaw", "description": "Agent chat & control UI", '
     '"url": "http://localhost:18789/"}]'
 )
 
