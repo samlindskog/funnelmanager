@@ -17,7 +17,6 @@ class Settings(BaseSettings):
     app_name: str = "Funnel Manager MCP"
 
     # Internal service URLs on the compose network.
-    search_backend_url: str = "http://backend:8000"
     leads_backend_url: str = "http://leads-backend:8001"
     auth_backend_url: str = "http://auth-backend:8002"
 

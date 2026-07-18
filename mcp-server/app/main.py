@@ -2,11 +2,11 @@
 
 Exposes read-only inspection tools over MCP streamable HTTP (endpoint ``/mcp``)
 for internal agents (e.g. OpenClaw). Runs only on the compose network — nginx
-never routes to it. All data flows through the existing service APIs: search
-history / user activity via the search backend, stored Apollo leads +
-enrichment state via the leads backend. No tool calls Apollo directly.
+never routes to it. All tools read stored Apollo leads + enrichment state via
+the leads backend; nothing here calls Apollo, spends credits, or touches the
+search backend (searches are run by humans in the search app).
 
-Every backend now enforces per-profile authorization (auth service + OPA), so
+Every backend enforces per-profile authorization (auth service + OPA), so
 each tool call must carry a session token. Priority order:
 
 1. the ``session_token`` tool argument (the OpenClaw harness plugin injects it
@@ -25,34 +25,26 @@ from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from app.clients import (
-    AuthSession,
-    LeadsBackendClient,
-    SearchBackendClient,
-    TokenResolver,
-)
+from app.clients import AuthSession, LeadsBackendClient, TokenResolver
 from app.config import get_settings
-from app.summarize import slim_record, summarize_lead
+from app.summarize import summarize_lead
 
 settings = get_settings()
 tokens = TokenResolver(AuthSession(settings))
-search_backend = SearchBackendClient(settings, tokens)
 leads_backend = LeadsBackendClient(settings, tokens)
 
 mcp = FastMCP(
     "funnelmanager",
     instructions=(
-        "Funnel Manager (Apollo person/company inspector). Inspection tools "
-        "(search_history, search_results, get_lead*, recent_leads, leads_stats, "
-        "similarity_search, apollo_credits) are read-only and free. Action tools "
-        "(run_people_search, run_company_search, enrich_person, enrich_organization, "
-        "match_person) call Apollo and SPEND CREDITS — check apollo_credits when in "
-        "doubt and never loop them blindly. Searches persist to history and keep "
-        "ingesting server-side after the tool returns page 1; poll search_results "
-        "for later pages. AUTH: every tool accepts session_token — the OpenClaw "
-        "harness injects it automatically; if a call fails with a missing/expired "
-        "token, pass the value from the funnelmanager_session_token tool. Never "
-        "invent a token."
+        "Funnel Manager (Apollo person/company inspector). All tools "
+        "(leads_stats, recent_leads, get_leads, similarity_search) are "
+        "read-only and free — they inspect leads already stored by the "
+        "platform and never call Apollo or spend credits. New Apollo "
+        "searches/enrichment happen in the Funnel Manager search app, not "
+        "through this server. AUTH: every tool accepts session_token — the "
+        "OpenClaw harness injects it automatically; if a call fails with a "
+        "missing/expired token, pass the value from the "
+        "funnelmanager_session_token tool. Never invent a token."
     ),
     stateless_http=True,
     json_response=True,
@@ -66,9 +58,6 @@ mcp = FastMCP(
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
-# Apollo-calling tools: not read-only (they upsert leads + history and spend
-# credits), but not destructive either — they only add/refresh data.
-_APOLLO_ACTION = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
 
 
 def _request_token(ctx: Context | None) -> str | None:
@@ -93,80 +82,6 @@ def _request_token(ctx: Context | None) -> str | None:
 def _token(session_token: str | None, ctx: Context | None) -> str | None:
     """Effective token for one tool call (explicit arg wins over HTTP header)."""
     return (session_token or "").strip() or _request_token(ctx)
-
-
-# ---------------------------------------------------------------------------
-# Search backend — user activity
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(annotations=_READ_ONLY)
-async def search_history(
-    session_token: str | None = None, ctx: Context = None
-) -> list[dict[str, Any]]:
-    """List recent searches (most recent first, up to 100): query label,
-    entity type, result count, and when each search ran. This is the user
-    activity log of the search backend."""
-    return await search_backend.request(
-        "GET", "/api/search/searches", token=_token(session_token, ctx)
-    )
-
-
-@mcp.tool(annotations=_READ_ONLY)
-async def search_results(
-    search_id: int,
-    page: int = 1,
-    include_raw: bool = False,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Load one page of stored results for a search, hydrated from MongoDB
-    (100 results per page). Set include_raw=True to include full Apollo
-    payloads per record (large!)."""
-    data = await search_backend.request(
-        "POST",
-        f"/api/search/searches/{search_id}/page",
-        json_body={"page": page},
-        token=_token(session_token, ctx),
-    )
-    history = data.get("history") if isinstance(data, dict) else None
-    if include_raw or not isinstance(history, dict):
-        return data
-    results = history.get("results")
-    if isinstance(results, list):
-        history["results"] = [
-            slim_record(record) if isinstance(record, dict) else record for record in results
-        ]
-    return data
-
-
-@mcp.tool(annotations=_READ_ONLY)
-async def get_lead(
-    mongo_id: str,
-    include_raw: bool = False,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Fetch one lead by Mongo `_id`, normalized like the UI detail pane
-    (name, contact info, enrichment flags). Set include_raw=True for the full
-    endpoint-keyed Apollo payloads."""
-    record = await search_backend.request(
-        "GET", f"/api/search/leads/{mongo_id}", token=_token(session_token, ctx)
-    )
-    if include_raw or not isinstance(record, dict):
-        return record
-    return slim_record(record)
-
-
-@mcp.tool(annotations=_READ_ONLY)
-async def apollo_credits(
-    session_token: str | None = None, ctx: Context = None
-) -> dict[str, Any]:
-    """Current Apollo credit balance (credits_remaining, lead_credits_used,
-    effective_lead_credits)."""
-    return await search_backend.request(
-        "GET", "/api/search/apollo/credits", token=_token(session_token, ctx)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -259,168 +174,6 @@ async def similarity_search(
             continue
         out.append({"score": hit.get("score"), **summarize_lead(hit["lead"])})
     return out
-
-
-# ---------------------------------------------------------------------------
-# Apollo actions — spend credits, mutate stored data (searches + enrichment)
-# ---------------------------------------------------------------------------
-
-
-def _search_outcome(outcome: dict[str, Any], preview_limit: int) -> dict[str, Any]:
-    data = outcome.get("data") or {}
-    history = data.get("history") if isinstance(data.get("history"), dict) else {}
-    results = history.get("results") if isinstance(history.get("results"), list) else []
-    preview = [
-        slim_record(record)
-        for record in results[: max(0, preview_limit)]
-        if isinstance(record, dict)
-    ]
-    complete = outcome.get("event") == "complete"
-    return {
-        "search_id": history.get("id"),
-        "query": history.get("query"),
-        "status": "complete" if complete else "ingest_running",
-        "note": (
-            "Ingest finished; all results are stored."
-            if complete
-            else "Page 1 returned; ingest keeps running server-side. Use search_results "
-            "(same search_id) to read later pages, and search_history to watch "
-            "total_results grow."
-        ),
-        "pagination": data.get("pagination"),
-        "results_preview": preview,
-    }
-
-
-@mcp.tool(annotations=_APOLLO_ACTION)
-async def run_people_search(
-    query: str = "",
-    organization_name: str | None = None,
-    organization_id: str | None = None,
-    organization_domain: str | None = None,
-    preview_limit: int = 25,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Run an Apollo people search (SPENDS APOLLO CREDITS). Needs query text
-    and/or a company filter (organization_name OR organization_id, optionally
-    organization_domain). Persists a search-history entry, returns page 1 as a
-    preview, and keeps ingesting all matching pages (up to 100k) server-side.
-    Do not repeat an identical search; reuse the stored one via search_results
-    instead."""
-    body: dict[str, Any] = {"entity_type": "people", "query": query or ""}
-    if organization_name:
-        body["organization_name"] = organization_name
-    if organization_id:
-        body["organization_id"] = organization_id
-    if organization_domain:
-        body["organization_domain"] = organization_domain
-    outcome = await search_backend.stream_search(
-        "/api/search/search", body, token=_token(session_token, ctx)
-    )
-    return _search_outcome(outcome, preview_limit)
-
-
-@mcp.tool(annotations=_APOLLO_ACTION)
-async def run_company_search(
-    keywords: str = "",
-    company_name: str | None = None,
-    company_domain: str | None = None,
-    preview_limit: int = 25,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Run an Apollo company/organization search (SPENDS APOLLO CREDITS). Needs
-    keywords and/or company_name and/or company_domain. Same behavior as
-    run_people_search: persists history, returns page 1, ingest continues
-    server-side."""
-    body: dict[str, Any] = {"entity_type": "companies", "query": keywords or ""}
-    if company_name:
-        body["company_name"] = company_name
-    if company_domain:
-        body["company_domain"] = company_domain
-    outcome = await search_backend.stream_search(
-        "/api/search/search", body, token=_token(session_token, ctx)
-    )
-    return _search_outcome(outcome, preview_limit)
-
-
-@mcp.tool(annotations=_APOLLO_ACTION)
-async def enrich_person(
-    apollo_id: str,
-    include_raw: bool = False,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Apollo Complete Person Info enrichment for one person (SPENDS APOLLO
-    CREDITS). Upserts the stored lead (no duplicates) and returns the refreshed
-    record. Get apollo_id from search results / lead records (the `id` field)."""
-    record = await search_backend.request(
-        "POST",
-        f"/api/search/people/enrich/{apollo_id}",
-        json_body={},
-        token=_token(session_token, ctx),
-    )
-    if include_raw or not isinstance(record, dict):
-        return record
-    return slim_record(record)
-
-
-@mcp.tool(annotations=_APOLLO_ACTION)
-async def enrich_organization(
-    apollo_id: str,
-    include_raw: bool = False,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Apollo Complete Organization Info enrichment for one company (SPENDS
-    APOLLO CREDITS). Upserts the stored lead and returns the refreshed record."""
-    record = await search_backend.request(
-        "POST",
-        f"/api/search/organizations/enrich/{apollo_id}",
-        json_body={},
-        token=_token(session_token, ctx),
-    )
-    if include_raw or not isinstance(record, dict):
-        return record
-    return slim_record(record)
-
-
-@mcp.tool(annotations=_APOLLO_ACTION)
-async def match_person(
-    apollo_id: str,
-    run_waterfall_email: bool = False,
-    run_waterfall_phone: bool = False,
-    reveal_phone_number: bool = False,
-    session_token: str | None = None,
-    ctx: Context = None,
-) -> dict[str, Any]:
-    """Apollo people/match — reveal contact info for one person (SPENDS APOLLO
-    CREDITS; waterfall/phone reveal costs extra). Email usually lands in the
-    returned record immediately; phone numbers arrive asynchronously via the
-    Apollo webhook — re-fetch the lead (get_lead) after a minute if
-    phone_reveal_pending is true."""
-    body: dict[str, Any] = {}
-    if run_waterfall_email:
-        body["run_waterfall_email"] = True
-    if run_waterfall_phone:
-        body["run_waterfall_phone"] = True
-    if reveal_phone_number:
-        body["reveal_phone_number"] = True
-    data = await search_backend.request(
-        "POST",
-        f"/api/search/people/match/{apollo_id}",
-        json_body=body,
-        token=_token(session_token, ctx),
-    )
-    if not isinstance(data, dict):
-        return data
-    lead = data.get("lead")
-    return {
-        "lead": slim_record(lead) if isinstance(lead, dict) else lead,
-        "phone_reveal_pending": data.get("phone_reveal_pending"),
-        "waterfall_pending": data.get("waterfall_pending"),
-    }
 
 
 @mcp.custom_route("/health", methods=["GET"])

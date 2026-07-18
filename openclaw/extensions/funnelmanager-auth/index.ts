@@ -39,19 +39,10 @@ const DEFAULT_AUTH_BACKEND_URL = "http://auth-backend:8002";
 // them (server name, mcp__ namespace, ...), so matching also accepts known
 // suffixes and anything containing "funnelmanager".
 const FM_TOOL_NAMES = [
-  "search_history",
-  "search_results",
-  "get_lead",
   "get_leads",
   "recent_leads",
   "leads_stats",
   "similarity_search",
-  "apollo_credits",
-  "run_people_search",
-  "run_company_search",
-  "enrich_person",
-  "enrich_organization",
-  "match_person",
 ];
 
 type ChannelIdentity = {

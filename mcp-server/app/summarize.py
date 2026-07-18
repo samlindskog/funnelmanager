@@ -154,16 +154,3 @@ def summarize_lead(lead: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return summary
-
-
-def slim_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Trim a search-backend UI record: drop the bulky raw Apollo payloads but
-    keep which endpoints are stored (enrichment state stays visible)."""
-    out = {key: value for key, value in record.items() if key not in {"raw", "apollo_responses"}}
-    responses = record.get("apollo_responses")
-    if isinstance(responses, dict):
-        out["apollo_endpoints"] = {
-            str(key): entry.get("received_at") if isinstance(entry, dict) else None
-            for key, entry in responses.items()
-        }
-    return out

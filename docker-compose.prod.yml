@@ -206,7 +206,6 @@ services:
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-false}
       AUTH_USERNAME: ${AUTH_USERNAME}
       AUTH_PASSWORD: ${AUTH_PASSWORD}
-      SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://backend:8000}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
     # Loopback-only publish: host-local MCP clients (e.g. OpenClaw) can reach
@@ -218,7 +217,6 @@ services:
     expose:
       - "8003"
     depends_on:
-      - backend
       - leads-backend
       - auth-backend
 

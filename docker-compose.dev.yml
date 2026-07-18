@@ -197,7 +197,6 @@ services:
     env_file:
       - .env
     environment:
-      SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://backend:8000}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
       # Dev convenience: tool calls without a session token fall back to the
@@ -210,7 +209,6 @@ services:
     ports:
       - "${HOST_BIND:-}8003:8003"
     depends_on:
-      - backend
       - leads-backend
       - auth-backend
 

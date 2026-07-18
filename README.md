@@ -8,8 +8,8 @@ Apollo person/company search + enrichment platform, driven primarily through an 
 - **OPA:** Open Policy Agent — the authorization decision point; the auth backend pushes the Rego policy and role grants into it (fail closed when unreachable)
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; authorizes every request via the auth backend; relays searches to leads with the caller's token
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
-- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only tools over the search + leads backends for agents; every tool call carries a per-profile session token that is forwarded upstream
-- **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with funnel-search / funnel-enrich / funnel-activity skills and a `funnelmanager-auth` plugin that maps channel senders to profiles
+- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only read-only tools over the leads backend for agents; every tool call carries a per-profile session token that is forwarded upstream
+- **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with a funnel-activity skill and a `funnelmanager-auth` plugin that maps channel senders to profiles
 - **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
 - **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis, OPA
 
@@ -128,8 +128,8 @@ cd mcp-server
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# Set SEARCH_BACKEND_URL / LEADS_BACKEND_URL / AUTH_BACKEND_URL to reachable
-# services (e.g. http://127.0.0.1:8000 / :8001 / :8002) plus AUTH_USERNAME / AUTH_PASSWORD.
+# Set LEADS_BACKEND_URL / AUTH_BACKEND_URL to reachable services
+# (e.g. http://127.0.0.1:8001 / :8002) plus AUTH_USERNAME / AUTH_PASSWORD.
 uvicorn app.main:app --reload --port 8003
 ```
 
@@ -161,7 +161,6 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `MONGODB_URL` | MongoDB connection URL |
 | `MONGODB_DB` | MongoDB database name for leads |
 | `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads-backend:8001`) |
-| `SEARCH_BACKEND_URL` | Internal URL the MCP server uses to call the search backend (default `http://backend:8000`) |
 | `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp-server:8003,localhost:8003,127.0.0.1:8003`) |
 | `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API |
 | `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json`); OpenAI is used until then |
@@ -270,30 +269,16 @@ Enrichment updates an existing document when `apollo_id` already exists (no dupl
 
 [MCP](https://modelcontextprotocol.io) server for internal agents (e.g. OpenClaw) — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only).
 
-**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is forwarded unchanged to the search/leads backends, which authorize it per request against the auth service + OPA — so the agent acts with the authority of the profile behind the token. The OpenClaw `funnelmanager-auth` plugin fetches these tokens per channel sender. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls fall back to a shared `AUTH_USERNAME`/`AUTH_PASSWORD` login.
+**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is forwarded unchanged to the leads backend, which authorizes it per request against the auth service + OPA — so the agent acts with the authority of the profile behind the token. The OpenClaw `funnelmanager-auth` plugin fetches these tokens per channel sender. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls fall back to a shared `AUTH_USERNAME`/`AUTH_PASSWORD` login.
 
-Read-only inspection tools (free, no Apollo calls):
+All tools are read-only inspection over the leads backend (free, no Apollo calls — new searches/enrichment happen in the search app):
 
 | Tool | Backing call | Description |
 |---|---|---|
-| `search_history` | `GET /api/search/searches` | User activity: recent searches (label, entity type, counts, timestamps) |
-| `search_results` | `POST /api/search/searches/{id}/page` | One hydrated page of stored results (UI-normalized; `include_raw` for full payloads) |
-| `get_lead` | `GET /api/leads/{mongo_id}` | One lead, normalized like the UI detail pane |
-| `apollo_credits` | `GET /api/search/apollo/credits` | Apollo credit balance |
 | `leads_stats` | leads `GET /api/leads/stats` | Collection counts: entity types, embedding, enrichment |
 | `recent_leads` | leads `GET /api/leads/recent` | Enrichment/ingest activity feed with per-lead Apollo endpoint timeline |
 | `get_leads` | leads `POST /api/leads` | Batch hydrate by Mongo `_id` (compact summaries; `include_raw` for full docs) |
 | `similarity_search` | leads `POST /api/leads/similarity-search` | Semantic search over stored leads (no Apollo call, no history row) |
-
-Action tools (**spend Apollo credits**, upsert leads + history — same flows as the UI):
-
-| Tool | Backing call | Description |
-|---|---|---|
-| `run_people_search` | `POST /api/search/search` | Apollo people search; returns page 1, ingest continues server-side |
-| `run_company_search` | `POST /api/search/search` | Apollo organization search; same streaming/detached behavior |
-| `enrich_person` | `POST /api/search/people/enrich/{id}` | Complete Person Info enrichment |
-| `enrich_organization` | `POST /api/search/organizations/enrich/{id}` | Complete Organization Info enrichment |
-| `match_person` | `POST /api/search/people/match/{id}` | Contact reveal (waterfall email/phone; phone lands async via webhook) |
 
 The transport's DNS-rebinding protection allows `mcp-server:8003`, `localhost:8003`, and `127.0.0.1:8003` by default — extend via `MCP_ALLOWED_HOSTS` if clients dial another hostname.
 
@@ -315,9 +300,7 @@ The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gate
 
 Skills (in `openclaw/skills/`):
 
-- `funnel-search` — run Apollo people/company searches via MCP (credit-aware: checks history before re-searching)
-- `funnel-enrich` — profile enrichment + email/phone reveal, with confirmation guardrails for bulk work
-- `funnel-activity` — read-only activity/inspection: history, recent enrichment, stats, credits
+- `funnel-activity` — read-only activity/inspection over stored leads: recent enrichment, stats, similarity search
 - `csv`, `web-research` — ClawHub community skills (verified with `openclaw skills verify` before install) for lead-list CSV handling and cited prospect research
 
 First-run setup:
