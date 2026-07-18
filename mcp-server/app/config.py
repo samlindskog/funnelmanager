@@ -21,9 +21,11 @@ class Settings(BaseSettings):
     leads_backend_url: str = "http://leads-backend:8001"
     auth_backend_url: str = "http://auth-backend:8002"
 
-    # The search backend validates every request token against the auth
-    # backend, so this server logs in with the same shared credentials the UI
-    # uses (see clients.AuthSession).
+    # Optional shared-login fallback for tool calls that arrive WITHOUT a
+    # session token (host-local MCP clients in dev). When disabled (default),
+    # tokenless calls fail — production identity comes from the OpenClaw
+    # harness, which fetches per-profile session tokens from the auth service.
+    mcp_shared_login_fallback: bool = False
     auth_username: str = "admin"
     auth_password: str = "admin"
 

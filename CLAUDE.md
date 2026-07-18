@@ -4,22 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Funnel Manager is a login-gated tool to search and inspect Apollo person/company records. It is three services plus their data stores, wired together by Docker Compose. The README has the full API reference and env-var table; this file covers the cross-cutting architecture that isn't obvious from any single file.
+Funnel Manager is an Apollo person/company search + enrichment platform driven primarily through an AI agent (OpenClaw) and gated by a central auth service with per-user profiles, roles, and OPA-backed authorization on **every** API endpoint, internal or external. The README has the full API reference and env-var table; this file covers the cross-cutting architecture that isn't obvious from any single file.
 
 ## Services and the boundary that matters
 
 | Service | Dir | Stack | Data | Faces |
 |---|---|---|---|---|
-| Auth backend | `auth-backend/` | FastAPI, redis-py (async) | Redis | The browser (via nginx, `/api/auth/*`) + the search backend |
-| Search backend | `backend/` | FastAPI, SQLAlchemy (async, asyncpg) | Postgres | The browser (via nginx) |
-| Leads backend | `leads-backend/` | FastAPI, Motor, OpenAI, pymilvus | MongoDB + Milvus | The search backend only |
+| Auth backend | `auth-backend/` | FastAPI, redis-py (async) | Redis | The browser (via nginx, `/api/auth/*`) + every service (`/api/auth/authorize`) + OpenClaw (`/internal/*`, compose network only) |
+| OPA | (compose service) | `openpolicyagent/opa` | in-memory (pushed by auth) | The auth backend only |
+| Search backend | `backend/` | FastAPI, SQLAlchemy (async, asyncpg) | Postgres | The browser/API clients (via nginx) + the MCP server |
+| Leads backend | `leads-backend/` | FastAPI, Motor, OpenAI, pymilvus | MongoDB + Milvus | The search backend + MCP server (token-authorized) |
 | MCP server | `mcp-server/` | Python MCP SDK (FastMCP, streamable HTTP) | — | Internal MCP clients (OpenClaw) — never via nginx |
 | OpenClaw | `openclaw/` (state) | `ghcr.io/openclaw/openclaw` image | bind-mounted `openclaw/` | Telegram + web Control UI (`:18789`) |
-| Frontend | `frontend/` | React 19, MUI 9, Vite 8, TS | — | The browser |
+| Frontend | `frontend/` | React 19, MUI 9, Vite 8, TS | — | The browser — auth hub only (landing → profile/apps/admin), no search UI |
 
-The MCP server (`:8003/mcp`) authenticates to the search backend like the UI does (logs into the auth backend with `AUTH_USERNAME`/`AUTH_PASSWORD`, caches the session token, re-logs-in on 401) and calls the leads backend directly with no auth. Its tools split into two tiers that must stay clearly separated: read-only inspection (annotated `readOnlyHint`, never call Apollo — the leads backend's `GET /api/leads/stats` and `GET /api/leads/recent` exist for these) and explicit Apollo actions (`run_*_search`, `enrich_*`, `match_person`) that spend credits and must say so in their descriptions. Search tools return at `first_page` and rely on the search backend's detached-job design to finish ingest. The transport has a Host-header allowlist (`MCP_ALLOWED_HOSTS`) — internal clients dial `mcp-server:8003`. Prod publishes it on loopback only (`127.0.0.1:8003`).
+The MCP server (`:8003/mcp`) forwards a **per-tool-call session token** to the search and leads backends: every tool accepts `session_token` (an `Authorization: Bearer` header on `/mcp` also works; the explicit argument wins — see `_token` in `mcp-server/app/main.py`). Tokenless calls only work when `MCP_SHARED_LOGIN_FALLBACK=true` (dev compose) via the shared `AUTH_USERNAME`/`AUTH_PASSWORD` login. Its tools split into two tiers that must stay clearly separated: read-only inspection (annotated `readOnlyHint`, never call Apollo — the leads backend's `GET /api/leads/stats` and `GET /api/leads/recent` exist for these) and explicit Apollo actions (`run_*_search`, `enrich_*`, `match_person`) that spend credits and must say so in their descriptions. Search tools return at `first_page` and rely on the search backend's detached-job design to finish ingest. The transport has a Host-header allowlist (`MCP_ALLOWED_HOSTS`) — internal clients dial `mcp-server:8003`. Prod publishes it on loopback only (`127.0.0.1:8003`).
 
-OpenClaw is configured by `openclaw/openclaw.json` (gateway token auth, Telegram channel with pairing, `mcp.servers.funnelmanager` → `http://mcp-server:8003/mcp`). `openclaw/` is bind-mounted as the container's `~/.openclaw`; only `openclaw.json` and `skills/` are versioned — everything else there is runtime state and gitignored. The funnel-* skills teach the agent the MCP tools and credit etiquette; keep them in sync when MCP tools change.
+OpenClaw is configured by `openclaw/openclaw.json` (gateway token auth, Telegram channel with pairing, `mcp.servers.funnelmanager` → `http://mcp-server:8003/mcp`, plugin entry for `funnelmanager-auth`). `openclaw/` is bind-mounted as the container's `~/.openclaw`; only `openclaw.json`, `skills/`, and `extensions/` are versioned — everything else there is runtime state and gitignored. The versioned `funnelmanager-auth` plugin (`openclaw/extensions/funnelmanager-auth/index.ts`) maps each conversation's channel + sender id to a profile via the auth backend's `POST /internal/openclaw/session`: linked senders get a session token injected into funnelmanager tool calls (`before_tool_call` param rewrite) and exposed via the `funnelmanager_session_token` agent tool (for harnesses whose native MCP path can't rewrite args); unlinked senders are blocked and recorded as pending channel requests for admin assignment in the hub. The plugin deliberately avoids npm deps (the extension dir can't resolve the host's `node_modules` — e.g. `typebox`), so tool parameter schemas are plain JSON-schema literals. The funnel-* skills teach the agent the MCP tools, credit etiquette, and the session-token flow; keep them in sync when MCP tools change.
 
 **The core architectural rule: only the leads backend ever talks to Apollo, and only the leads backend holds `APOLLO_API_KEY`.** The search backend reaches Apollo functionality exclusively through `backend/app/leads_client.py` (`LeadsClient`) calling `LEADS_BACKEND_URL`. The browser never calls the leads backend directly — nginx does not expose it (except Apollo webhooks). When adding an Apollo-touching feature, the path is always: frontend → search backend router → `LeadsClient` → leads backend → Apollo. Do not shortcut this.
 
@@ -45,18 +46,20 @@ Searches and enrichment are **NDJSON streams**, not request/response. This is th
 
 Frontend stream handling and the floating progress rings live in `frontend/src/api.ts` and `frontend/src/progress.tsx`.
 
-## Auth
+## Auth + authorization
 
-Authentication is **centralized in the auth backend** (`auth-backend/`) and uses **server-side sessions**, not self-validating JWTs:
+Authentication is **centralized in the auth backend** (`auth-backend/`) with **server-side sessions** (not JWTs); authorization is **role grants evaluated by OPA**:
 
-- Single shared login (`AUTH_USERNAME` / `AUTH_PASSWORD`). `POST /api/auth/login` (OAuth2 password form) mints an **opaque session token** (`secrets.token_urlsafe`) stored in **Redis** under `session:<token>` with a native TTL (`SESSION_TTL_SECONDS`, default 1 day). See `auth-backend/app/sessions.py`.
-- nginx routes `/api/auth/*` directly to the auth backend and `/api/search/*` to the search backend (no generic `/api/` catch-all). The frontend keeps the token in `localStorage` (`fm_token`) and gates a single protected route; logout calls `POST /api/auth/logout` to revoke the session.
-- **The search backend issues no tokens.** Its `get_current_user` (`backend/app/auth.py`) extracts the bearer token and validates it via `POST {AUTH_BACKEND_URL}/api/auth/validate` — the one place any *public* backend checks a token. Future public backends do the same.
-- **Internal service-to-service calls carry no auth.** The leads backend is internal-only (nginx exposes only its Apollo webhooks, which keep their secret-in-path auth), so it no longer validates tokens, and `LeadsClient` sends no `Authorization` header. There is no longer a shared `SECRET_KEY` between services.
+- **Profiles + roles live in Redis** (`auth-backend/app/store.py`): hashes `users`, `roles`, `channel_links`, `account_requests`, `channel_requests`. A user has a bcrypt hash and exactly one role; a role has grants `{service, methods, path_prefix}`. `AUTH_USERNAME`/`AUTH_PASSWORD` only **bootstrap** the admin user (created if missing, never updated — see `bootstrap()` in `auth-backend/app/main.py`).
+- Sessions (`auth-backend/app/sessions.py`) store **only the username** under `session:<token>` with a native TTL (`SESSION_TTL_SECONDS`, default 1 day); role and existence are re-resolved from the user store on every check, so role changes and deletions bite live sessions immediately.
+- **OPA owns no state**: the auth backend pushes the Rego policy + role data into it (`auth-backend/app/opa.py` — at startup, on role changes, every 60s, and on undefined decisions). Decisions **fail closed**: OPA unreachable ⇒ 503 ⇒ callers deny.
+- **One call authorizes any request**: `POST /api/auth/authorize` `{token, service, method, path}`. The search backend (`backend/app/auth.py`, service `search`) and leads backend (`leads-backend/app/auth.py`, service `leads`, router-level dependency exempting `/api/leads/webhooks/*` + health) both use it; the auth backend gates its own `/api/auth/admin/*` the same way (service `auth`, `require_authorized` in `auth-backend/app/security.py`). `LeadsClient` forwards the caller's bearer token on every leads call, streams included.
+- **Auth's access tiers are per-route, not OPA**: `login`/`request-account` anonymous; `me`/`logout`/`apps`/`validate`/`authorize` any valid profile (the token in the body *is* the credential); everything else admin-gated via OPA. The `/internal/*` router (OpenClaw session minting) is reachable only on the compose network — nginx routes `/api/auth/` and never `/internal/`. Keep it that way.
+- nginx routes `/api/auth/*` → auth and `/api/search/*` → search (no generic `/api/` catch-all). The frontend keeps the token in `localStorage` (`fm_token`); the hub shows admin panels only for `role === 'admin'`, but the server, not the UI, is the enforcement point.
 
 ## Commands
 
-Everything runs through Docker Compose; there is one public entrypoint (nginx). Note `docker-compose.dev.yml` also starts Milvus and its deps (`etcd`, `minio`), plus `redis` (auth session store) and the `auth-backend` service.
+Everything runs through Docker Compose; there is one public entrypoint (nginx). Note `docker-compose.dev.yml` also starts Milvus and its deps (`etcd`, `minio`), plus `redis` (auth profile/session store), `opa` (authorization decisions), and the `auth-backend` service.
 
 ```bash
 # Dev (bind-mounted source, hot reload). App at http://localhost:5173, API at http://localhost:8000/api

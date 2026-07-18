@@ -15,6 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.apollo import ApolloLeadsClient
+from app.auth import enforce_authorization
 from app.apollo_endpoints import (
     ORG_BY_ID,
     ORG_SEARCH,
@@ -61,7 +62,13 @@ from app.stream_jobs import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/leads", tags=["leads"])
+# Every route is authorized against the auth service + OPA; the dependency
+# itself exempts the Apollo webhooks (secret-in-path) and the health probe.
+router = APIRouter(
+    prefix="/api/leads",
+    tags=["leads"],
+    dependencies=[Depends(enforce_authorization)],
+)
 
 
 def _serialize_responses(responses: dict[str, Any]) -> dict[str, ApolloEndpointResponseOut]:

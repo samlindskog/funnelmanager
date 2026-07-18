@@ -345,8 +345,9 @@ def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
 class LeadsClient:
     """Relay to /api/leads — never calls Apollo directly.
 
-    The leads backend is internal-only, so these calls carry no auth. ``token``
-    is accepted for call-site compatibility but is not forwarded.
+    The caller's session token is forwarded on every call: the leads backend
+    authorizes each request against the auth service + OPA, same as any other
+    service.
     """
 
     def __init__(self, settings: Settings, token: str | None = None):
@@ -354,10 +355,13 @@ class LeadsClient:
         self.token = token
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _url(self, path: str) -> str:
         base = self.settings.leads_backend_url.rstrip("/")

@@ -1,24 +1,35 @@
 # Funnel Manager — Apollo Inspector
 
-Login-gated tool to search and inspect Apollo person and company records. The search backend stores history and Mongo lead `_id`s in Postgres; the leads backend is the only service that talks to Apollo and stores full records in MongoDB.
+Apollo person/company search + enrichment platform, driven primarily through an AI agent (OpenClaw over Telegram / web UI) and gated by a central auth service with per-user profiles, roles, and OPA-backed authorization on every API endpoint. The search backend stores history and Mongo lead `_id`s in Postgres; the leads backend is the only service that talks to Apollo and stores full records in MongoDB.
 
 ## Stack
 
-- **Auth backend:** FastAPI + Redis — issues and stores opaque session tokens (1-day TTL); the single place login and token validation live
-- **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; validates request tokens against the auth backend; relays searches to leads
-- **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only, no request auth
-- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only tools over the search + leads backends for agents: read-only inspection plus explicit Apollo actions (search/enrich)
-- **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with funnel-search / funnel-enrich / funnel-activity skills
-- **Frontend:** React + TypeScript + Vite + Material UI
-- **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis
+- **Auth backend:** FastAPI + Redis — user profiles (bcrypt), roles, channel links, pending account/channel requests, and opaque session tokens (1-day TTL); owns the OPA policy + role data and answers `POST /api/auth/authorize` for every service
+- **OPA:** Open Policy Agent — the authorization decision point; the auth backend pushes the Rego policy and role grants into it (fail closed when unreachable)
+- **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; authorizes every request via the auth backend; relays searches to leads with the caller's token
+- **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
+- **MCP server:** Python MCP SDK (streamable HTTP) — internal-only tools over the search + leads backends for agents; every tool call carries a per-profile session token that is forwarded upstream
+- **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with funnel-search / funnel-enrich / funnel-activity skills and a `funnelmanager-auth` plugin that maps channel senders to profiles
+- **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels)
+- **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis, OPA
 
 ## Features
 
-- Login page (server-side session tokens issued by the auth backend)
-- Search area for people or companies (search backend relays to `/api/leads`, which calls Apollo)
-- Sidebar of previous searches (Postgres history + Mongo `_id`s; result payloads hydrated from Mongo)
-- Results view with record list + detail pane
+- Minimal landing page (no product info) with sign-in and "request access" (username only)
+- Post-login hub: current profile (username + role), configured web apps (e.g. OpenClaw Control UI)
+- Admin panels (admin role only): pending channel requests (assign a Telegram sender to a new/existing user), pending account requests, user management, role management with per-service grants
+- Every API endpoint — public or internal — validates the session token and checks the caller's role against the OPA policy
+- OpenClaw channel identities (e.g. Telegram sender ids) are linked to profiles; the agent acts with the linked user's authority
 - Leads service: store Apollo people/org search hits in MongoDB (deduped by `apollo_id`), embed in Milvus in the background, and enrich via Complete Person/Organization Info
+
+## Authorization model
+
+- **Profiles** live in the auth backend (Redis): username, bcrypt password hash, one **role**, linked channels.
+- **Roles** carry **grants**: `{service, methods, path_prefix}` rows (service is `auth` / `search` / `leads` / `*`). The built-in `admin` role grants everything and cannot be deleted; more roles can be created in the hub UI.
+- The auth backend pushes the Rego policy + role grants to **OPA** at startup, on every role change, and periodically (self-heals OPA restarts).
+- Every service resolves each request with one call — `POST /api/auth/authorize` `{token, service, method, path}` → `401` (bad token), `{allowed: false}` (deny → 403), or `{allowed: true, username, role}`. OPA unreachable ⇒ deny (fail closed).
+- Auth's own surface: `login` / `request-account` are anonymous; `me`, `logout`, `apps`, `validate`, `authorize` are open to any valid profile; everything else under `/api/auth/admin/*` requires a role whose grants cover the `auth` service.
+- Sessions store only the username; role and existence are re-resolved from the profile store on every check, so role changes and deletions apply to live sessions immediately.
 
 ## Quick start (Docker development)
 
@@ -31,14 +42,14 @@ docker compose -f docker-compose.dev.yml up --build
 
 - App (nginx → Vite): http://localhost:5173
 - APIs (nginx → backends): http://localhost:8000/api
-  - `/api/auth/…` → auth backend (login, session validation)
+  - `/api/auth/…` → auth backend (login, profiles, authorization; `/internal/*` is **not** routed)
   - `/api/search/…` → search backend (search/history/enrich)
   - Leads is internal-only (`LEADS_BACKEND_URL`); the browser does not call it
 - Postgres: localhost:5432
 - MongoDB: localhost:27017
 - Redis: localhost:6379
 
-nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (`/api/search/…`). The leads backend and Redis are reached only by other services on the Docker network.
+nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (`/api/search/…`). The leads backend, OPA, and Redis are reached only by other services on the Docker network; the auth backend's `/internal/*` routes (OpenClaw session minting) are likewise unreachable from outside.
 
 The MCP server listens at `http://localhost:8003/mcp` in dev (streamable HTTP). nginx never routes to it; in prod it is published on loopback only (`127.0.0.1:8003`).
 
@@ -49,7 +60,9 @@ Source is bind-mounted:
 - `./frontend` → frontend container (with a named volume for `node_modules`)
 - `./frontend/nginx.dev.conf` → nginx container
 
-Default login: `admin` / `admin`
+Default login: `admin` / `admin` (the bootstrap admin user — created on first
+startup from `AUTH_USERNAME` / `AUTH_PASSWORD`, then managed like any other
+user in the hub UI; later changes to those env vars do not update it).
 
 ## Production (Docker + nginx)
 
@@ -135,10 +148,13 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | Variable | Description |
 |---|---|
 | `APOLLO_API_KEY` | Apollo master API key (**leads backend only**) |
-| `AUTH_USERNAME` / `AUTH_PASSWORD` | App login credentials (consumed by the **auth backend**) |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | Bootstrap admin credentials — the auth backend creates this admin-role user if missing (never updates an existing one) |
 | `SESSION_TTL_SECONDS` | Session token lifetime (auth backend; default `86400` = 1 day) |
-| `REDIS_URL` | Redis URL for the auth backend session store (e.g. `redis://redis:6379/0`) |
-| `AUTH_BACKEND_URL` | Internal URL the search backend uses to validate session tokens (e.g. `http://auth-backend:8002`) |
+| `REDIS_URL` | Redis URL for the auth backend profile + session store (e.g. `redis://redis:6379/0`) |
+| `OPA_URL` | OPA decision service URL (auth backend; default `http://opa:8181`) |
+| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default OpenClaw entry |
+| `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth-backend:8002`) |
+| `MCP_SHARED_LOGIN_FALLBACK` | MCP server: allow tokenless tool calls to fall back to the shared login (dev compose: `true`; prod default: `false`) |
 | `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |
 | `DATABASE_URL` | Async SQLAlchemy URL (`postgresql+asyncpg://...`) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres bootstrap (compose) |
@@ -156,14 +172,36 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 
 ### Auth backend
 
-nginx routes `/api/auth/*` here; it owns login and the Redis-backed session store. The search backend (and any future public backend) validate request tokens via `POST /api/auth/validate` on the Docker network.
+nginx routes `/api/auth/*` here; it owns profiles, roles, sessions, and the OPA policy. Services authorize every request via `POST /api/auth/authorize` on the Docker network.
+
+Public / any-profile:
+
+| Method | Path | Access | Description |
+|---|---|---|---|
+| `POST` | `/api/auth/login` | anonymous | OAuth2 password form → opaque session token (Redis, 1-day TTL) |
+| `POST` | `/api/auth/request-account` | anonymous | `{ "username": … }` → pending account request (always answers 202) |
+| `GET` | `/api/auth/me` | any profile | Current username + role |
+| `GET` | `/api/auth/apps` | any profile | Hub app list (from `WEB_APPS`) |
+| `POST` | `/api/auth/validate` | token in body | `{ "token": … }` → user or 401 |
+| `POST` | `/api/auth/authorize` | token in body | `{ token, service, method, path }` → `{ allowed, username, role }` (the OPA decision endpoint) |
+| `POST` | `/api/auth/logout` | any profile | Revoke the caller's session |
+
+Admin (role grants must cover the `auth` service):
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/auth/login` | OAuth2 password form → opaque session token (stored in Redis, 1-day TTL) |
-| `GET` | `/api/auth/me` | Current user for a valid bearer token |
-| `POST` | `/api/auth/validate` | Internal: `{ "token": … }` → user or 401 (called by public backends) |
-| `POST` | `/api/auth/logout` | Revoke the caller's session |
+| `GET/POST` | `/api/auth/admin/users` | List / create users (`{username, password, role}`) |
+| `PATCH/DELETE` | `/api/auth/admin/users/{username}` | Change role/password; delete (guards the last admin) |
+| `DELETE` | `/api/auth/admin/users/{u}/channels/{channel}/{device_id}` | Unlink a channel identity |
+| `GET/POST` | `/api/auth/admin/roles`, `DELETE /roles/{name}` | Roles with grants; changes are pushed to OPA |
+| `GET` | `/api/auth/admin/account-requests` (+ `/approve`, `/deny`) | Pending account requests |
+| `GET` | `/api/auth/admin/channel-requests` (+ `/assign`, `/deny`) | Pending channel requests; assign to an existing or new user |
+
+Internal (Docker network only — nginx never routes `/internal/*`):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/internal/openclaw/session` | `{ channel, device_id, display_name? }` → session token for the linked profile, or 403 `{pending: true}` after recording a pending channel request |
 
 ### Search backend
 
@@ -181,7 +219,7 @@ nginx routes `/api/auth/*` here; it owns login and the Redis-backed session stor
 
 ### Leads backend (internal)
 
-Reached by the search backend at `LEADS_BACKEND_URL` (not exposed to the browser via nginx, except Apollo webhooks).
+Reached by the search backend and MCP server at `LEADS_BACKEND_URL` (not exposed to the browser via nginx, except Apollo webhooks). Every route requires a bearer session token and is authorized against the auth service + OPA (service `leads`), except `GET /api/leads/health` and the secret-in-path Apollo webhooks.
 
 Apollo-facing routes use the native Apollo API relative path under `/api/leads/apollo/…`. Method, path, and parameters match [Apollo’s API](https://docs.apollo.io/reference) (path may include or omit the `api/v1/` prefix). Apollo auth uses `APOLLO_API_KEY` from the server `.env` only — clients must not supply an Apollo API key.
 
@@ -230,7 +268,9 @@ Enrichment updates an existing document when `apollo_id` already exists (no dupl
 
 ### MCP server (internal)
 
-Read-only [MCP](https://modelcontextprotocol.io) server for internal agents (e.g. OpenClaw) — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only). It logs into the auth backend with `AUTH_USERNAME`/`AUTH_PASSWORD` and calls the search backend with that session token (re-login on 401); the leads backend is called directly with no auth. No tool calls Apollo, spends credits, or mutates data.
+[MCP](https://modelcontextprotocol.io) server for internal agents (e.g. OpenClaw) — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only).
+
+**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is forwarded unchanged to the search/leads backends, which authorize it per request against the auth service + OPA — so the agent acts with the authority of the profile behind the token. The OpenClaw `funnelmanager-auth` plugin fetches these tokens per channel sender. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls fall back to a shared `AUTH_USERNAME`/`AUTH_PASSWORD` login.
 
 Read-only inspection tools (free, no Apollo calls):
 
@@ -269,7 +309,9 @@ Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP).
 
 ## OpenClaw agent
 
-The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json` + `skills/` are versioned; runtime state is gitignored) plus a named volume for auth-profile encryption keys.
+The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json`, `skills/`, and `extensions/` are versioned; runtime state is gitignored) plus a named volume for auth-profile encryption keys.
+
+**Channel identity → profile:** the versioned `funnelmanager-auth` plugin (`openclaw/extensions/funnelmanager-auth/`) resolves each conversation's channel + sender id, fetches a session token for the linked profile from the auth service's internal endpoint (`POST /internal/openclaw/session`), and injects it as `session_token` into funnelmanager MCP tool calls (`before_tool_call`). For harnesses whose native MCP path cannot rewrite tool arguments, it also registers a `funnelmanager_session_token` agent tool the model can call and pass along explicitly. Unlinked senders are blocked and recorded as **pending channel requests**, which admins assign to a new or existing user from the hub's admin panel.
 
 Skills (in `openclaw/skills/`):
 

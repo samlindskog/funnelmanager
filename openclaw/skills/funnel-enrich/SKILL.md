@@ -11,6 +11,12 @@ credits per person/company** — get explicit confirmation before enriching
 more than ~10 records in one go, and check `apollo_credits` first for bulk
 work.
 
+Auth: every tool needs a `session_token` (usually injected by the harness).
+If a call fails with a missing/expired token, fetch one with
+`funnelmanager_session_token` and pass it explicitly; if the chat is not
+linked to a profile, an admin must approve the pending channel request in the
+Funnel Manager hub.
+
 All enrichment needs the **Apollo id** (`id` on search results / `apollo_id`
 on lead summaries), not the `mongo_id`. Enrichment upserts the stored lead —
 it never creates duplicates.

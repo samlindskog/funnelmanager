@@ -16,6 +16,7 @@ class LoginRequest(BaseModel):
 
 class UserOut(BaseModel):
     username: str
+    role: str = ""
 
 
 class SearchRequest(BaseModel):

@@ -38,6 +38,15 @@ profile) so it doesn't run a second Telegram poller against dev's bot token.
 To enable it, give prod its own `TELEGRAM_BOT_TOKEN` in `.env.prod` and run
 `docker compose --profile agent -f docker-compose.prod.yml --env-file .env.prod up -d`.
 
+Because prod has no source checkout, the OpenClaw container's bind-mount
+(`${OPENCLAW_STATE_DIR:-./openclaw}`) must be seeded on the host with the
+**versioned** parts of `openclaw/` before enabling the profile: `openclaw.json`,
+`skills/`, and `extensions/` (the `funnelmanager-auth` plugin lives here and is
+what links Telegram senders to Funnel Manager profiles). Copy that subtree from
+the repo to the host's `OPENCLAW_STATE_DIR`; everything else there is runtime
+state OpenClaw creates on first run. Without `extensions/`, agent tool calls
+have no session token and every Funnel Manager tool fails authorization.
+
 ## CI/CD (GitHub Actions)
 
 - **`.github/workflows/ci.yml`** — runs on every PR and push to main: frontend

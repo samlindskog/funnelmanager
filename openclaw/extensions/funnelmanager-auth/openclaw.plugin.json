@@ -1,0 +1,21 @@
+{
+  "id": "funnelmanager-auth",
+  "name": "Funnel Manager Auth",
+  "description": "Associates channel device ids with Funnel Manager profiles: fetches per-profile session tokens from the auth service and attaches them to funnelmanager MCP tool calls.",
+  "contracts": {
+    "tools": ["funnelmanager_session_token"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "authBackendUrl": {
+        "type": "string",
+        "description": "Base URL of the Funnel Manager auth service (internal endpoint). Default: http://auth-backend:8002"
+      }
+    }
+  }
+}

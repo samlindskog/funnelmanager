@@ -74,6 +74,15 @@ async def get_session(token: str, settings: Settings | None = None) -> dict[str,
     return data if isinstance(data, dict) else None
 
 
+async def session_ttl_remaining(token: str, settings: Settings | None = None) -> int:
+    """Seconds until the session expires (0 when missing/expired)."""
+    token = (token or "").strip()
+    if not token:
+        return 0
+    ttl = await get_redis(settings).ttl(_key(token))
+    return max(0, int(ttl or 0))
+
+
 async def delete_session(token: str, settings: Settings | None = None) -> bool:
     token = (token or "").strip()
     if not token:

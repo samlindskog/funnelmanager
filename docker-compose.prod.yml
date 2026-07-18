@@ -149,6 +149,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS}
       MONGODB_URL: ${MONGODB_URL:-mongodb://mongo:27017}
       MONGODB_DB: ${MONGODB_DB:-funnelmanager_leads}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
@@ -161,19 +162,35 @@ services:
     expose:
       - "8001"
 
+  # Authorization decision point. Runs bare — the auth backend pushes the Rego
+  # policy and role-grant data into it at startup and on every role change.
+  opa:
+    image: openpolicyagent/opa:1.6.0
+    restart: unless-stopped
+    mem_limit: 256m
+    command: ["run", "--server", "--addr", "0.0.0.0:8181"]
+    expose:
+      - "8181"
+
   auth-backend:
     image: ghcr.io/samlindskog/funnelmanager/auth-backend:${IMAGE_TAG:-prod}
     restart: unless-stopped
     mem_limit: 384m
     environment:
+      # Bootstrap admin only — the user is created if missing, never updated.
       AUTH_USERNAME: ${AUTH_USERNAME}
       AUTH_PASSWORD: ${AUTH_PASSWORD}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OPA_URL: ${OPA_URL:-http://opa:8181}
+      # JSON list of hub apps: [{"name": ..., "description": ..., "url": ...}]
+      WEB_APPS: ${WEB_APPS:-}
       CORS_ORIGINS: ${CORS_ORIGINS}
     depends_on:
       redis:
         condition: service_healthy
+      opa:
+        condition: service_started
     expose:
       - "8002"
 
@@ -183,6 +200,10 @@ services:
     # Parses full lead payloads before summarizing for agents; give it spike room.
     mem_limit: 1g
     environment:
+      # Shared-login fallback for tokenless MCP calls is OFF by default in
+      # prod — identity comes from the OpenClaw harness's per-profile session
+      # tokens. Set MCP_SHARED_LOGIN_FALLBACK=true to restore the old behavior.
+      MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-false}
       AUTH_USERNAME: ${AUTH_USERNAME}
       AUTH_PASSWORD: ${AUTH_PASSWORD}
       SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://backend:8000}

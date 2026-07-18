@@ -11,6 +11,15 @@ credits** — before running a new search, call `search_history` to check whethe
 an equivalent search already exists; if it does, read it with `search_results`
 instead of re-running it.
 
+## Auth (required)
+
+Every funnelmanager tool needs a `session_token` for the person this
+conversation belongs to. The harness usually injects it automatically; if a
+tool fails with a missing/expired token, call `funnelmanager_session_token`
+and pass its `session_token` value explicitly on each call. Never invent a
+token. If the tool reports this chat is not linked to a profile, tell the user
+an admin must approve the pending channel request in the Funnel Manager hub.
+
 ## People search — `run_people_search`
 
 - `query`: free-text keywords (title, name, skills…)

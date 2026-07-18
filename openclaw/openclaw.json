@@ -27,6 +27,16 @@
       }
     }
   },
+  "plugins": {
+    "entries": {
+      "funnelmanager-auth": {
+        "enabled": true,
+        "config": {
+          "authBackendUrl": "http://auth-backend:8002"
+        }
+      }
+    }
+  },
   "commands": {
     "ownerAllowFrom": [
       "telegram:1844012348"

@@ -2,9 +2,8 @@ import { CircularProgress, Box } from '@mui/material'
 import { CssBaseline, ThemeProvider } from '@mui/material'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth'
-import { LoginPage } from './pages/LoginPage'
-import { SearchPage } from './pages/SearchPage'
-import { ProgressCircles, ProgressProvider } from './progress'
+import { HubPage } from './pages/HubPage'
+import { LandingPage } from './pages/LandingPage'
 import { theme } from './theme'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -25,23 +24,20 @@ export default function App() {
     <ThemeProvider theme={theme} defaultMode="system" forceThemeRerender>
       <CssBaseline />
       <AuthProvider>
-        <ProgressProvider>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/login" element={<LoginPage />} />
-              <Route
-                path="/"
-                element={
-                  <ProtectedRoute>
-                    <SearchPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </BrowserRouter>
-          <ProgressCircles />
-        </ProgressProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/login" element={<LandingPage />} />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <HubPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>
   )

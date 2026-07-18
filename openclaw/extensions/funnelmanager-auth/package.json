@@ -1,0 +1,12 @@
+{
+  "name": "openclaw-plugin-funnelmanager-auth",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Per-channel Funnel Manager session tokens for the funnelmanager MCP tools",
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

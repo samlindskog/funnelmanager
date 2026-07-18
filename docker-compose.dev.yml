@@ -141,6 +141,7 @@ services:
     environment:
       MONGODB_URL: mongodb://mongo:27017
       MONGODB_DB: ${MONGODB_DB:-funnelmanager_leads}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       MILVUS_COLLECTION: ${MILVUS_COLLECTION:-leads_people}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
@@ -155,6 +156,15 @@ services:
       milvus:
         condition: service_healthy
 
+  # Authorization decision point. Runs bare — the auth backend pushes the Rego
+  # policy and role-grant data into it at startup and on every role change.
+  opa:
+    image: openpolicyagent/opa:1.6.0
+    mem_limit: 256m
+    command: ["run", "--server", "--addr", "0.0.0.0:8181"]
+    expose:
+      - "8181"
+
   auth-backend:
     build:
       context: ./auth-backend
@@ -165,6 +175,8 @@ services:
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      OPA_URL: ${OPA_URL:-http://opa:8181}
+      WEB_APPS: ${WEB_APPS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
     volumes:
       - ./auth-backend:/app
@@ -173,6 +185,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      opa:
+        condition: service_started
 
   mcp-server:
     build:
@@ -186,6 +200,9 @@ services:
       SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://backend:8000}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
+      # Dev convenience: tool calls without a session token fall back to the
+      # shared AUTH_USERNAME/AUTH_PASSWORD login. Keep off in prod.
+      MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-true}
     volumes:
       - ./mcp-server:/app
     # Internal MCP endpoint (streamable HTTP at /mcp) for agents like OpenClaw.

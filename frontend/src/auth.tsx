@@ -7,7 +7,15 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { apiLogout, fetchMe, getToken, login as apiLogin, onUnauthorized, setToken } from './api'
+import {
+  ApiError,
+  apiLogout,
+  fetchMe,
+  getToken,
+  login as apiLogin,
+  onUnauthorized,
+  setToken,
+} from './api'
 import type { User } from './types'
 
 interface AuthContextValue {
@@ -31,7 +39,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     fetchMe()
       .then(setUser)
-      .catch(() => setToken(null))
+      .catch((err) => {
+        // Only drop the token when the server actually rejected it (401,
+        // already cleared inside api.ts). A transient failure (auth service
+        // briefly down) must not discard a still-valid session.
+        if (err instanceof ApiError && err.status === 401) setToken(null)
+      })
       .finally(() => setLoading(false))
   }, [])
 

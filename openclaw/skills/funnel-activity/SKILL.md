@@ -10,6 +10,12 @@ Use the `funnelmanager` MCP tools. Everything here is **read-only and
 free** (no Apollo calls) — prefer these tools over re-searching or
 re-enriching.
 
+Auth: every tool needs a `session_token` (usually injected by the harness).
+If a call fails with a missing/expired token, fetch one with
+`funnelmanager_session_token` and pass it explicitly; if the chat is not
+linked to a profile, an admin must approve the pending channel request in the
+Funnel Manager hub.
+
 ## User activity (search backend)
 
 - `search_history` — recent searches: label, entity type, result counts, timestamps

@@ -229,12 +229,23 @@ async def _iter_search_csv(client: LeadsClient, mongo_ids: list[str]) -> AsyncIt
 
     writer.writerow(["name", "email"])
     yield _flush()
-    for start in range(0, len(mongo_ids), _LEADS_BY_MONGO_IDS_MAX):
-        records = await _hydrate_results(client, mongo_ids[start : start + _LEADS_BY_MONGO_IDS_MAX])
-        for record in records:
-            name = str(record.get("name") or "").strip() or "null"
-            email = _resolved_record_email(record) or "null"
-            writer.writerow([_csv_cell(name), _csv_cell(email)])
+    # Hydration now goes through the token-authorized leads backend, so a chunk
+    # can fail mid-export (expired token, OPA deny, leads down). Never raise out
+    # of a started download — stop cleanly and append a visible sentinel row so
+    # the truncation is detectable rather than a silently short file.
+    try:
+        for start in range(0, len(mongo_ids), _LEADS_BY_MONGO_IDS_MAX):
+            records = await _hydrate_results(
+                client, mongo_ids[start : start + _LEADS_BY_MONGO_IDS_MAX]
+            )
+            for record in records:
+                name = str(record.get("name") or "").strip() or "null"
+                email = _resolved_record_email(record) or "null"
+                writer.writerow([_csv_cell(name), _csv_cell(email)])
+            yield _flush()
+    except Exception as exc:
+        logger.warning("CSV export truncated after hydrate failure: %s", exc)
+        writer.writerow(["ERROR: export truncated before all rows were written", ""])
         yield _flush()
 
 
@@ -1308,6 +1319,13 @@ async def _enrich_ndjson_events(
 
                     if ingest_done and embedding_done:
                         return
+            except Exception as exc:
+                # A subscribe-level failure (e.g. leads 401/403 now that the
+                # leads backend authorizes every request) must surface as an
+                # error line — otherwise the batch's gather() swallows it and
+                # the finally below emits a false "complete".
+                detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                await line_q.put(_ndjson_line({"type": "error", "detail": detail}))
             finally:
                 if not ingest_done_event.is_set():
                     ingest_done_event.set()

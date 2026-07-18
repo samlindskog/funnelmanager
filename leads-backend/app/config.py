@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     apollo_api_key: str = ""
     apollo_base_url: str = "https://api.apollo.io/api/v1"
+    # Central auth service; every non-webhook request is authorized against it.
+    auth_backend_url: str = "http://auth-backend:8002"
     # Public origin Apollo can POST async webhooks to (nginx → leads webhook only).
     # Example: https://your-host.example or an ngrok URL in local dev.
     public_base_url: str = ""
