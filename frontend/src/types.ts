@@ -47,6 +47,10 @@ export interface ChannelRequest {
   display_name?: string
   requested_at?: string
   last_seen_at?: string
+  /** OpenClaw DM pairing code — present while the pairing still needs admin
+   * approval (approve from the hub; assigning also completes it). */
+  pairing_code?: string
+  pairing_requested_at?: string
 }
 
 // ---------------------------------------------------------------------------

@@ -271,6 +271,21 @@ export async function denyChannelRequest(
   })
 }
 
+/** Approve the OpenClaw DM pairing for a pending channel request (the sender
+ * can then talk to the agent; profile assignment stays a separate step). */
+export async function approveChannelPairing(
+  channel: string,
+  deviceId: string,
+): Promise<ChannelRequest & { paired: boolean; linked: boolean }> {
+  return request<ChannelRequest & { paired: boolean; linked: boolean }>(
+    '/api/auth/admin/channel-requests/approve-pairing',
+    {
+      method: 'POST',
+      body: JSON.stringify({ channel, device_id: deviceId }),
+    },
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Search app — Apollo searches, enrichment, NDJSON streams (search backend)
 // ---------------------------------------------------------------------------

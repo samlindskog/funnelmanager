@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app import sessions, store
 from app.config import Settings, get_settings
-from app.schemas import OpenClawSessionIn, OpenClawSessionOut
+from app.schemas import OpenClawPairingRequestIn, OpenClawSessionIn, OpenClawSessionOut
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,24 @@ async def revoke_channel_session(
     if cached:
         await sessions.delete_session(cached, settings)
         await redis.delete(cache_key)
+
+
+@router.post("/openclaw/pairing-request", status_code=status.HTTP_202_ACCEPTED)
+async def openclaw_pairing_request(body: OpenClawPairingRequestIn) -> dict[str, str]:
+    """Record an OpenClaw DM pairing request (with its code) so an admin can
+    approve the pairing — and then assign a profile — from the hub UI."""
+    channel = (body.channel or "").strip().lower()
+    device_id = str(body.device_id or "").strip()
+    code = (body.code or "").strip()
+    if not channel or not device_id or not code:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="channel, device_id and code are required",
+        )
+    await store.upsert_channel_request(
+        channel, device_id, body.display_name, pairing_code=code
+    )
+    return {"status": "recorded"}
 
 
 @router.post("/openclaw/session", response_model=OpenClawSessionOut)

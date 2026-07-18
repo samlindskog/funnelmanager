@@ -22,6 +22,7 @@ import {
 import { useCallback, useEffect, useState } from 'react'
 import {
   approveAccountRequest,
+  approveChannelPairing,
   assignChannelRequest,
   denyAccountRequest,
   denyChannelRequest,
@@ -77,7 +78,8 @@ export function RequestsPanel({ roles }: { roles: Role[] }) {
           {channelRequests.length === 0 && (
             <Typography color="text.secondary">
               No pending channel requests. New channel identities (e.g. Telegram senders)
-              appear here when they first talk to the agent.
+              appear here when they first message the agent — approve the pairing and
+              assign a profile without leaving this page.
             </Typography>
           )}
           <Stack spacing={1.5}>
@@ -89,12 +91,26 @@ export function RequestsPanel({ roles }: { roles: Role[] }) {
                 sx={{ alignItems: { sm: 'center' } }}
               >
                 <Chip label={req.channel} size="small" />
+                {req.pairing_code && (
+                  <Chip label="pairing pending" size="small" color="warning" variant="outlined" />
+                )}
                 <Typography sx={{ flexGrow: 1, fontFamily: 'monospace' }}>
                   {req.device_id}
                   {req.display_name ? `  (${req.display_name})` : ''}
                 </Typography>
+                {req.pairing_code && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() =>
+                      act(() => approveChannelPairing(req.channel, req.device_id))
+                    }
+                  >
+                    Approve pairing
+                  </Button>
+                )}
                 <Button size="small" variant="contained" onClick={() => setAssignTarget(req)}>
-                  Assign
+                  {req.pairing_code ? 'Approve & assign' : 'Assign'}
                 </Button>
                 <Button
                   size="small"
@@ -274,7 +290,7 @@ function AssignChannelDialog({
             (mode === 'existing' ? !username : !newUsername || !newPassword || !newRole)
           }
         >
-          Assign
+          {request.pairing_code ? 'Approve & assign' : 'Assign'}
         </Button>
       </DialogActions>
     </Dialog>

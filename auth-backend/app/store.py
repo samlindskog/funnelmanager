@@ -288,7 +288,10 @@ async def get_channel_request(channel: str, device_id: str) -> dict[str, Any] | 
 
 
 async def upsert_channel_request(
-    channel: str, device_id: str, display_name: str = ""
+    channel: str,
+    device_id: str,
+    display_name: str = "",
+    pairing_code: str | None = None,
 ) -> dict[str, Any]:
     field = channel_key(channel, device_id)
     existing = await _hget(CHANNEL_REQUESTS_KEY, field)
@@ -299,7 +302,27 @@ async def upsert_channel_request(
     }
     if display_name.strip():
         request["display_name"] = display_name.strip()
+    if pairing_code is not None and pairing_code.strip():
+        # OpenClaw DM pairing code reported by the plugin: while present, the
+        # sender cannot talk to the agent until an admin approves the pairing.
+        request["pairing_code"] = pairing_code.strip()
+        request["pairing_requested_at"] = _now()
     request["last_seen_at"] = _now()
+    await get_redis().hset(CHANNEL_REQUESTS_KEY, field, json.dumps(request))
+    return request
+
+
+async def clear_channel_request_pairing(
+    channel: str, device_id: str
+) -> dict[str, Any] | None:
+    """Drop the pairing code after approval (the request row may remain,
+    awaiting profile assignment)."""
+    field = channel_key(channel, device_id)
+    request = await _hget(CHANNEL_REQUESTS_KEY, field)
+    if not request:
+        return None
+    request.pop("pairing_code", None)
+    request.pop("pairing_requested_at", None)
     await get_redis().hset(CHANNEL_REQUESTS_KEY, field, json.dumps(request))
     return request
 

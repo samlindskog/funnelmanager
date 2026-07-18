@@ -15,12 +15,16 @@
  *   agent for harnesses whose native tool path cannot rewrite arguments
  *   (e.g. Codex-native MCP projection) — the agent passes the returned value
  *   as `session_token` explicitly.
- * - `channel_pairing_requested`: reports new unpaired DM senders as pending
- *   channel requests so admins see them before any tool call happens.
+ * - `channel_pairing_requested`: reports new unpaired DM senders — including
+ *   the pairing code — as pending channel requests, so the whole onboarding
+ *   (approve pairing + assign profile) can happen in the hub UI.
  * - `message_received`: additionally reports the sender's identity (throttled
  *   per identity) so channels that were paired with OpenClaw before this
  *   plugin existed — and therefore never fire a pairing event — still show up
  *   as pending channel requests without waiting for a tool call.
+ * - HTTP route `POST /api/funnelmanager/pairing/approve` (gateway-token auth):
+ *   called by the auth service when an admin approves a pairing in the hub;
+ *   applies the same approval as `openclaw pairing approve <code>`.
  *
  * The token is minted by the auth service for the linked profile; the MCP
  * server forwards it to the search/leads backends, which enforce the OPA
@@ -241,20 +245,100 @@ export default definePluginEntry({
       }
     });
 
-    // Surface unpaired DM senders as pending channel requests immediately.
+    // Surface unpaired DM senders as pending channel requests immediately,
+    // carrying the pairing code so an admin can approve the pairing from the
+    // hub (no CLI needed).
     api.on("channel_pairing_requested", async (event: any) => {
       try {
         const channel = String(event?.channel ?? "").toLowerCase();
         const senderId = String(event?.senderId ?? "");
         if (!channel || !senderId) return;
+        const code = String(event?.code ?? "").trim();
+        const meta = event?.metadata ?? {};
+        const displayName = String(
+          meta?.displayName ?? meta?.name ?? meta?.username ?? "",
+        );
+        if (code) {
+          await fetch(`${authBackendUrl}/internal/openclaw/pairing-request`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              channel,
+              device_id: senderId,
+              code,
+              display_name: displayName,
+            }),
+          });
+          return;
+        }
+        // No code on the event — fall back to recording a plain channel request.
         await fetch(`${authBackendUrl}/internal/openclaw/session`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ channel, device_id: senderId, display_name: "" }),
+          body: JSON.stringify({ channel, device_id: senderId, display_name: displayName }),
         });
       } catch (error) {
         log.warn?.(`funnelmanager-auth: pairing report failed: ${String(error)}`);
       }
+    });
+
+    // Hub-driven pairing approval: the auth service calls this route (gateway
+    // token auth) when an admin approves a pairing request in the hub. It
+    // performs the same approval as `openclaw pairing approve <code>`.
+    api.registerHttpRoute({
+      path: "/api/funnelmanager/pairing/approve",
+      auth: "gateway",
+      match: "exact",
+      handler: async (req: any, res: any) => {
+        const respond = (status: number, payload: Record<string, unknown>) => {
+          res.statusCode = status;
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.end(JSON.stringify(payload));
+        };
+        if (String(req?.method ?? "").toUpperCase() !== "POST") {
+          respond(405, { approved: false, reason: "POST only" });
+          return;
+        }
+        let body: any = null;
+        try {
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const chunk of req) {
+            size += chunk.length;
+            if (size > 64 * 1024) throw new Error("body too large");
+            chunks.push(chunk);
+          }
+          body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        } catch (error) {
+          respond(400, { approved: false, reason: `invalid body: ${String(error)}` });
+          return;
+        }
+        const channel = String(body?.channel ?? "").toLowerCase().trim();
+        const code = String(body?.code ?? "").trim();
+        if (!channel || !code) {
+          respond(422, { approved: false, reason: "channel and code are required" });
+          return;
+        }
+        try {
+          const { approveChannelPairingCode } = await import(
+            "openclaw/plugin-sdk/conversation-runtime"
+          );
+          const result = await approveChannelPairingCode({ channel, code });
+          if (!result) {
+            respond(200, {
+              approved: false,
+              reason: "pairing code not found (expired or already approved)",
+            });
+            return;
+          }
+          log.info?.(
+            `funnelmanager-auth: pairing approved via hub (${channel}:${String(result.id)})`,
+          );
+          respond(200, { approved: true, id: String(result.id) });
+        } catch (error) {
+          respond(500, { approved: false, reason: String(error) });
+        }
+      },
     });
 
     // Inject the sender's session token into funnelmanager MCP tool calls.

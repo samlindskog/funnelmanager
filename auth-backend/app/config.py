@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # unreachable OPA fails closed (requests are denied).
     opa_url: str = "http://opa:8181"
 
+    # OpenClaw gateway — used to approve Telegram DM pairing requests from the
+    # hub (the funnelmanager-auth plugin registers the HTTP route; the gateway
+    # authenticates the call with its own token).
+    openclaw_gateway_url: str = "http://openclaw:18789"
+    openclaw_gateway_token: str = ""
+
     # JSON list of web apps shown on the post-login hub page:
     # [{"name": "...", "description": "...", "url": "..."}]
     # Blank (the compose default) falls back to DEFAULT_WEB_APPS.

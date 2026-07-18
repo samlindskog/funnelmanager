@@ -9,7 +9,7 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app import opa, store
+from app import opa, openclaw_gateway, store
 from app.routers import internal
 from app.schemas import (
     AccountRef,
@@ -259,6 +259,47 @@ async def list_channel_requests() -> list[dict]:
     return await store.list_channel_requests()
 
 
+async def _approve_pairing_if_pending(request: dict) -> None:
+    """Complete the OpenClaw DM pairing step if the request still carries a
+    pairing code. No-op otherwise."""
+    code = str(request.get("pairing_code") or "")
+    if not code:
+        return
+    await openclaw_gateway.approve_pairing(
+        str(request.get("channel") or ""), code
+    )
+    await store.clear_channel_request_pairing(
+        str(request.get("channel") or ""), str(request.get("device_id") or "")
+    )
+
+
+@router.post("/channel-requests/approve-pairing")
+async def approve_channel_pairing(body: ChannelRef) -> dict:
+    """Approve the OpenClaw DM pairing for a pending channel request (the
+    sender can then talk to the agent; profile assignment is a separate step
+    unless done via /assign, which also completes pairing)."""
+    channel = (body.channel or "").strip().lower()
+    device_id = str(body.device_id or "").strip()
+    request = await store.get_channel_request(channel, device_id)
+    if not request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Request not found"
+        )
+    if not request.get("pairing_code"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No pairing approval pending for this channel",
+        )
+    await _approve_pairing_if_pending(request)
+    # If the channel is already linked to a profile, pairing was the only
+    # outstanding step — drop the request row entirely.
+    if await store.get_channel_link(channel, device_id):
+        await store.delete_channel_request(channel, device_id)
+        return {"channel": channel, "device_id": device_id, "paired": True, "linked": True}
+    updated = await store.get_channel_request(channel, device_id) or {}
+    return {**updated, "paired": True, "linked": False}
+
+
 @router.post("/channel-requests/assign", response_model=UserDetail)
 async def assign_channel_request(body: AssignChannelIn) -> UserDetail:
     channel = (body.channel or "").strip().lower()
@@ -300,6 +341,10 @@ async def assign_channel_request(body: AssignChannelIn) -> UserDetail:
             detail="Provide username (existing user) or new_user",
         )
     request = await store.get_channel_request(channel, device_id) or {}
+    # One-stop onboarding: if the OpenClaw DM pairing is still pending, approve
+    # it first (failure aborts the assign, so the row keeps its code and the
+    # admin can retry).
+    await _approve_pairing_if_pending(request)
     # If the channel was previously linked to another user, kill that user's
     # cached OpenClaw session before re-linking.
     await internal.revoke_channel_session(channel, device_id)

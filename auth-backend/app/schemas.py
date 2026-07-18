@@ -105,6 +105,15 @@ class OpenClawSessionIn(BaseModel):
     display_name: str = ""
 
 
+class OpenClawPairingRequestIn(BaseModel):
+    """DM pairing request reported by the funnelmanager-auth plugin."""
+
+    channel: str
+    device_id: str
+    code: str
+    display_name: str = ""
+
+
 class OpenClawSessionOut(Token):
     username: str
     role: str

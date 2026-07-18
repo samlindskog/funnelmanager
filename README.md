@@ -162,7 +162,7 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `MONGODB_DB` | MongoDB database name for leads |
 | `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads-backend:8001`) |
 | `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp-server:8003,localhost:8003,127.0.0.1:8003`) |
-| `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API |
+| `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API (the auth backend also uses it to approve DM pairings from the hub) |
 | `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json`); OpenAI is used until then |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for the OpenClaw Telegram channel |
 | `DOMAIN` | Production hostname for nginx `server_name` |
@@ -297,6 +297,8 @@ Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP).
 The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json`, `skills/`, and `extensions/` are versioned; runtime state is gitignored) plus a named volume for auth-profile encryption keys.
 
 **Channel identity → profile:** the versioned `funnelmanager-auth` plugin (`openclaw/extensions/funnelmanager-auth/`) resolves each conversation's channel + sender id, fetches a session token for the linked profile from the auth service's internal endpoint (`POST /internal/openclaw/session`), and injects it as `session_token` into funnelmanager MCP tool calls (`before_tool_call`). For harnesses whose native MCP path cannot rewrite tool arguments, it also registers a `funnelmanager_session_token` agent tool the model can call and pass along explicitly. Unlinked senders are blocked and recorded as **pending channel requests**, which admins assign to a new or existing user from the hub's admin panel. Inbound messages also report the sender's identity (throttled per identity), so a chat that was paired with OpenClaw before the plugin existed still surfaces as a pending request without waiting for a tool call.
+
+**Hub-driven pairing (one-stop onboarding):** when a new DM sender triggers OpenClaw's pairing flow, the plugin reports the pairing **code** to the auth service (`POST /internal/openclaw/pairing-request`), so the request shows up in the hub with a "pairing pending" badge. The plugin also registers `POST /api/funnelmanager/pairing/approve` on the OpenClaw gateway (gateway-token auth); the auth service calls it when an admin clicks **Approve pairing** — or **Approve & assign**, which completes the pairing and links the profile in one step. This is the same approval `openclaw pairing approve <code>` performs, so no CLI is needed. Requires `OPENCLAW_GATEWAY_TOKEN` (and optionally `OPENCLAW_GATEWAY_URL`) on the auth backend. Pairing codes expire — if approval reports the code is gone, have the sender message the bot again.
 
 Skills (in `openclaw/skills/`):
 
