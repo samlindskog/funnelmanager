@@ -1,0 +1,22 @@
+# mongo: leads is its only client; it initiates nothing itself.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo
+  labels:
+    app.kubernetes.io/name: mongo
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mongo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads
+      ports:
+        - protocol: TCP
+          port: 27017

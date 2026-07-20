@@ -1,0 +1,15 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: kc-db-daily
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: kc-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  # CNPG cron has a leading seconds field: daily at 04:00.
+  schedule: "0 0 4 * * *"
+  immediate: true
+  backupOwnerReference: self
+  cluster:
+    name: kc-db

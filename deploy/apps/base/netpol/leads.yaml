@@ -1,0 +1,65 @@
+# leads: reached from search and mcp, plus the ingress gateway (only the
+# /api/leads/webhooks/ route is published there); talks to mongo, milvus,
+# Keycloak, and the public internet on 443 (Apollo + OpenAI). DNS via allow-dns.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: leads
+  labels:
+    app.kubernetes.io/name: leads
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: leads
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 8001
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mongo
+      ports:
+        - protocol: TCP
+          port: 27017
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: milvus
+      ports:
+        - protocol: TCP
+          port: 19530
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Apollo + OpenAI live on the public internet. 0.0.0.0/0:443 also matches
+    # in-cluster 443 targets, which is acceptable — everything sensitive
+    # in-cluster is further gated by its own ingress policy + mesh authz.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

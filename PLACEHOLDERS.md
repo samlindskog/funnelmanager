@@ -1,6 +1,9 @@
 # PLACEHOLDERS — values you must supply
 
-Everything the restructure could not infer from the repo. Each item lists
+Everything the restructure could not infer from the repo. In manifests,
+placeholder hostnames are schema-valid sentinels ending in `.example.com`
+(`replace-app`, `replace-dev`, `replace-kc`) — grep for `example.com` and
+`REPLACE_` to find every substitution point. Each item lists
 where the value is consumed. Nothing here is invented elsewhere — manifests
 and configs reference these names symbolically (env vars / secret refs).
 

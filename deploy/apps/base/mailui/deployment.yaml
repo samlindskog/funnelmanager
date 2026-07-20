@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailui
+  labels:
+    app.kubernetes.io/name: mailui
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mailui
+        app.kubernetes.io/part-of: funnelmanager
+    spec:
+      serviceAccountName: mailui
+      nodeSelector:
+        role: worker
+      # No runAsNonRoot here: the current image is stock nginx whose master
+      # process starts as root (binds :80, then drops privileges for workers).
+      # Follow-up: switch the image to nginxinc/nginx-unprivileged:1.27-alpine
+      # (listens on 8080) and restore the full non-root securityContext.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mailui
+          # Tag is pinned only in overlays via the images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/mailui
+          ports:
+            - name: http
+              containerPort: 80
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FRONTEND_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FRONTEND_OIDC_CLIENT_ID
+              value: frontend

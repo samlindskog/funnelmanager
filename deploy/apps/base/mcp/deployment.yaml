@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp
+  labels:
+    app.kubernetes.io/name: mcp
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp
+        app.kubernetes.io/part-of: funnelmanager
+    spec:
+      serviceAccountName: mcp
+      nodeSelector:
+        role: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          # Tag is pinned only in overlays via the images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/mcp
+          ports:
+            - name: http
+              containerPort: 8003
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: mcp
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FM_OIDC_CLIENT_ID
+              value: mcp
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-mcp
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            - name: LEADS_BACKEND_URL
+              value: http://leads:8001
+            # Tokenless tool calls must fail outside dev-compose; every caller
+            # supplies the acting principal's token.
+            - name: MCP_SHARED_LOGIN_FALLBACK
+              value: "false"
+            # Host-header allowlist (DNS-rebinding protection): in-cluster
+            # clients dial the Service name, plus loopback for port-forwards.
+            - name: MCP_ALLOWED_HOSTS
+              value: "mcp:8003,localhost:8003,127.0.0.1:8003"

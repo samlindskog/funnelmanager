@@ -1,0 +1,112 @@
+# OPA runs on EVERY node (tolerations for the control-plane and edge taints)
+# so each Envoy calls its node-local instance — the Service below uses
+# internalTrafficPolicy: Local. All instances load the identical bundle from
+# the fm-policy ConfigMap (GitOps-delivered), so decisions are uniform
+# regardless of node.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: opa
+  namespace: opa-system
+  labels:
+    app.kubernetes.io/name: opa
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opa
+        app.kubernetes.io/part-of: funnelmanager
+    spec:
+      serviceAccountName: opa
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: role
+          operator: Equal
+          value: edge
+          effect: NoSchedule
+      containers:
+        - name: opa
+          image: openpolicyagent/opa:1.6.0-envoy
+          args:
+            - run
+            - --server
+            - --addr=0.0.0.0:8181
+            - --diagnostic-addr=0.0.0.0:8282
+            - --set=plugins.envoy_ext_authz_grpc.addr=:9191
+            - --set=plugins.envoy_ext_authz_grpc.path=funnelmanager/envoy/result
+            - --set=decision_logs.console=true
+            - --set=status.console=true
+            - /policy
+          ports:
+            - name: grpc-authz
+              containerPort: 9191
+            - name: http
+              containerPort: 8181
+            - name: diag
+              containerPort: 8282
+          readinessProbe:
+            httpGet:
+              path: /health?bundles
+              port: 8282
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8282
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - name: policy
+              mountPath: /policy
+              readOnly: true
+      volumes:
+        - name: policy
+          configMap:
+            name: fm-policy
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opa
+  namespace: opa-system
+  labels:
+    app.kubernetes.io/name: opa
+    app.kubernetes.io/part-of: funnelmanager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa
+  namespace: opa-system
+  labels:
+    app.kubernetes.io/name: opa
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  # Every Envoy resolves this Service to the OPA on its own node.
+  internalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: opa
+  ports:
+    - name: grpc-authz
+      port: 9191
+      targetPort: 9191
+    - name: http
+      port: 8181
+      targetPort: 8181

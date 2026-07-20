@@ -1,0 +1,92 @@
+# The single public entry. Attaches to the manually-deployed istio-ingress
+# gateway (spec.addresses -> its Service) pinned to the edge node with
+# hostPorts 80/443 — only `edge` exposes anything publicly.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: fm-gateway
+  namespace: istio-ingress
+spec:
+  gatewayClassName: istio
+  addresses:
+    - type: Hostname
+      value: istio-ingress.istio-ingress.svc.cluster.local
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same # ACME solver routes + the redirect route live here
+    - name: https-app
+      port: 443
+      protocol: HTTPS
+      hostname: replace-app.example.com # PLACEHOLDERS.md
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: fm-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https-dev
+      port: 443
+      protocol: HTTPS
+      hostname: replace-dev.example.com # PLACEHOLDERS.md (e.g. dev.<domain>)
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: fm-dev-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https-kc
+      port: 443
+      protocol: HTTPS
+      hostname: replace-kc.example.com # PLACEHOLDERS.md (host only, e.g. kc.<domain>)
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: kc-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fm-tls
+  namespace: istio-ingress
+spec:
+  secretName: fm-tls
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - replace-app.example.com
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fm-dev-tls
+  namespace: istio-ingress
+spec:
+  secretName: fm-dev-tls
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - replace-dev.example.com
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kc-tls
+  namespace: istio-ingress
+spec:
+  secretName: kc-tls
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - replace-kc.example.com

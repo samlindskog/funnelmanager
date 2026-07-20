@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: milvus
+  labels:
+    app.kubernetes.io/name: milvus
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  serviceName: milvus
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: milvus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: milvus
+        app.kubernetes.io/part-of: funnelmanager
+    spec:
+      serviceAccountName: milvus
+      nodeSelector:
+        role: worker
+      containers:
+        - name: milvus
+          image: milvusdb/milvus:v2.5.4
+          command: ["milvus", "run", "standalone"]
+          # Mirrors the compose file's seccomp:unconfined — Milvus standalone
+          # trips the default runtime seccomp profile.
+          securityContext:
+            seccompProfile:
+              type: Unconfined
+          env:
+            - name: ETCD_ENDPOINTS
+              value: etcd:2379
+            - name: MINIO_ADDRESS
+              value: minio:9000
+            - name: MINIO_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: milvus-minio
+                  key: access-key
+            - name: MINIO_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: milvus-minio
+                  key: secret-key
+          ports:
+            - name: grpc
+              containerPort: 19530
+            - name: metrics
+              containerPort: 9091
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1500m
+              memory: 2560Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/milvus
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi

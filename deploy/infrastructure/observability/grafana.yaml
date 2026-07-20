@@ -1,0 +1,66 @@
+# Grafana: stateless (no persistence — datasources are provisioned, dashboards
+# to follow the same way), admin creds from the bootstrap-provided
+# `grafana-admin` Secret. ClusterIP only; exposed later via the ingress gateway.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: grafana
+      version: "8.10.1"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: monitoring
+  values:
+    nodeSelector:
+      role: worker
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+    persistence:
+      enabled: false
+
+    admin:
+      existingSecret: grafana-admin
+      userKey: admin-user
+      passwordKey: admin-password
+
+    service:
+      type: ClusterIP
+      port: 3000
+
+    sidecar:
+      dashboards:
+        enabled: false
+      datasources:
+        enabled: false
+
+    testFramework:
+      enabled: false
+
+    datasources:
+      datasources.yaml:
+        apiVersion: 1
+        datasources:
+          - name: Prometheus
+            type: prometheus
+            access: proxy
+            url: http://prometheus-server.monitoring.svc
+            isDefault: true
+          - name: Loki
+            type: loki
+            access: proxy
+            url: http://loki.monitoring.svc:3100

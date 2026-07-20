@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: frontend
+  ports:
+    # Service exposes the conventions port 8080; the stock nginx image still
+    # listens on 80 (see the deployment note about nginx-unprivileged).
+    - name: http
+      port: 8080
+      targetPort: 80

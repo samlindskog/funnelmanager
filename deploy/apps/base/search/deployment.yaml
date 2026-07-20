@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search
+  labels:
+    app.kubernetes.io/name: search
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: search
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: search
+        app.kubernetes.io/part-of: funnelmanager
+    spec:
+      serviceAccountName: search
+      nodeSelector:
+        role: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: search
+          # Tag is pinned only in overlays via the images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/search
+          ports:
+            - name: http
+              containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: search
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FM_OIDC_CLIENT_ID
+              value: search
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-search
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            # CNPG's generated `app-db-app` secret has key `uri` — use it directly.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-db-app
+                  key: uri
+            - name: LEADS_BACKEND_URL
+              value: http://leads:8001
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: cors-origins

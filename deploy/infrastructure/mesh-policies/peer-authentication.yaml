@@ -1,0 +1,11 @@
+# Mesh-wide STRICT mTLS: every workload gets (and must present) a SPIFFE
+# identity. Applied in the root namespace, so it covers prod, dev, identity —
+# any injected namespace.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT

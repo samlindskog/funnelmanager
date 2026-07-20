@@ -1,0 +1,48 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kc-db
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: kc-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  # Single instance today; anti-affinity is already in place so flipping
+  # instances to 2 spreads replicas across workers with no other change.
+  instances: 1
+  inheritedMetadata:
+    labels:
+      app.kubernetes.io/name: kc-db
+      app.kubernetes.io/part-of: funnelmanager
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak
+  storage:
+    size: 2Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  affinity:
+    nodeSelector:
+      role: worker
+    enablePodAntiAffinity: true
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+  backup:
+    retentionPolicy: "14d"
+    barmanObjectStore:
+      destinationPath: s3://REPLACE_BUCKET_CNPG/kc-db
+      endpointURL: https://REPLACE_REGION.linodeobjects.com
+      s3Credentials:
+        accessKeyId:
+          name: objectstore-backups
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: objectstore-backups
+          key: ACCESS_SECRET_KEY

@@ -1,0 +1,141 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dev
+resources:
+  - ../../base/search
+  - ../../base/leads
+  - ../../base/mail
+  - ../../base/mcp
+  - ../../base/frontend
+  - ../../base/mailui
+  # Data stack (CNPG clusters, mongo, milvus, etcd, minio) — authored under
+  # base/data; this overlay just instantiates it in the dev namespace.
+  - ../../base/data
+  - ../../base/netpol
+
+# sha-PINME is a placeholder: replace with the deployed image tag
+# (sha-<gitsha>). Never :latest.
+images:
+  - name: ghcr.io/samlindskog/funnelmanager/search
+    newTag: sha-PINME
+  - name: ghcr.io/samlindskog/funnelmanager/leads
+    newTag: sha-PINME
+  - name: ghcr.io/samlindskog/funnelmanager/mail
+    newTag: sha-PINME
+  - name: ghcr.io/samlindskog/funnelmanager/mcp
+    newTag: sha-PINME
+  - name: ghcr.io/samlindskog/funnelmanager/frontend
+    newTag: sha-PINME
+  - name: ghcr.io/samlindskog/funnelmanager/mailui
+    newTag: sha-PINME
+
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: fm-oidc
+    literals:
+      # Dev uses the funnelmanager-dev realm on the shared Keycloak.
+      - issuer=https://replace-kc.example.com/realms/funnelmanager-dev
+  - name: fm-web
+    literals:
+      - domain=replace-app.example.com
+      - cors-origins=https://replace-app.example.com
+      - public-base-url=https://replace-app.example.com
+      - web-apps=
+
+patches:
+  # Every dev pod runs at the fm-dev PriorityClass (see CONVENTIONS.md);
+  # the placeholder metadata.name is ignored — the target selector applies
+  # the patch to all Deployments/StatefulSets.
+  - target:
+      kind: Deployment
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ignored-by-target-selector
+      spec:
+        template:
+          spec:
+            priorityClassName: fm-dev
+  - target:
+      kind: StatefulSet
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: ignored-by-target-selector
+      spec:
+        template:
+          spec:
+            priorityClassName: fm-dev
+  # Dev halves app requests, keeps limits (CONVENTIONS.md).
+  - target:
+      kind: Deployment
+      name: search
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 25m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 64Mi
+  - target:
+      kind: Deployment
+      name: leads
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 50m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 128Mi
+  - target:
+      kind: Deployment
+      name: mail
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 25m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 64Mi
+  - target:
+      kind: Deployment
+      name: mcp
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 25m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 64Mi
+  - target:
+      kind: Deployment
+      name: frontend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 5m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 8Mi
+  - target:
+      kind: Deployment
+      name: mailui
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 5m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 8Mi
+  # Private GHCR images: every workload SA carries the pull secret
+  # (created at bootstrap — see deploy/bootstrap/README.md).
+  - target:
+      kind: ServiceAccount
+    patch: |-
+      - op: add
+        path: /imagePullSecrets
+        value:
+          - name: ghcr-pull

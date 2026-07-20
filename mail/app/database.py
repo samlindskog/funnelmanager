@@ -12,8 +12,16 @@ class Base(DeclarativeBase):
     pass
 
 
+def _async_url(url: str) -> str:
+    """Force the asyncpg driver: CNPG's generated connection secrets (and
+    most external tooling) hand out plain postgresql:// URLs."""
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
 settings = get_settings()
-engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
+engine = create_async_engine(_async_url(settings.database_url), echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

@@ -1,0 +1,22 @@
+# etcd (milvus metadata store): milvus is its only client.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: etcd
+  labels:
+    app.kubernetes.io/name: etcd
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: etcd
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: milvus
+      ports:
+        - protocol: TCP
+          port: 2379

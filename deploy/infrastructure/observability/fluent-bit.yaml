@@ -1,0 +1,67 @@
+# Fluent Bit DaemonSet: tails CRI container logs on every node (tolerates
+# the cp and edge taints) and ships them to Loki with low-cardinality labels.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: fluent-bit
+      version: "0.48.9"
+      sourceRef:
+        kind: HelmRepository
+        name: fluent
+        namespace: monitoring
+  values:
+    kind: DaemonSet
+
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: role
+        operator: Equal
+        value: edge
+        effect: NoSchedule
+
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+    config:
+      inputs: |
+        [INPUT]
+            Name tail
+            Path /var/log/containers/*.log
+            multiline.parser cri
+            Tag kube.*
+            Mem_Buf_Limit 5MB
+            Skip_Long_Lines On
+
+      filters: |
+        [FILTER]
+            Name kubernetes
+            Match kube.*
+            Merge_Log On
+            Keep_Log Off
+            K8S-Logging.Parser On
+            K8S-Logging.Exclude On
+
+      outputs: |
+        [OUTPUT]
+            Name loki
+            Match kube.*
+            Host loki.monitoring.svc
+            Port 3100
+            Labels job=fluent-bit, namespace=$kubernetes['namespace_name'], pod=$kubernetes['pod_name'], container=$kubernetes['container_name']
+            Auto_Kubernetes_Labels Off
+            Line_Format json

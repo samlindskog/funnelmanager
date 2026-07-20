@@ -1,6 +1,15 @@
 # Deploy
 
-## Topology
+> **k3s restructure:** the target deployment is now the 3-node k3s cluster
+> defined in this directory — `bootstrap/` (install runbook + script),
+> `clusters/prod/` (Flux entrypoint), `infrastructure/` (Istio, OPA,
+> Keycloak, CNPG, gateway, observability), `apps/` (Kustomize base +
+> dev/prod overlays), `keycloak/` (realm), `policy/` (OPA bundle, pending
+> the Rego stop-gate), with conventions in `CONVENTIONS.md`. Everything
+> below this banner documents the **legacy Docker-Compose deployment**,
+> which remains the running interim until the cluster is bootstrapped.
+
+## Topology (legacy compose)
 
 Two boxes, one role each (both Debian 13, identical hardening — `sam` + key-only
 sshd, ufw 22/443/mosh, fail2ban, unattended-upgrades, swapfile):

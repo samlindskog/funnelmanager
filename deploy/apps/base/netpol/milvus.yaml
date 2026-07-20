@@ -1,0 +1,47 @@
+# milvus: leads is its only client (gRPC 19530); Prometheus scrapes its
+# metrics port (9091). Milvus itself depends on etcd + minio (nested
+# dependencies — their own policies admit only milvus).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: milvus
+  labels:
+    app.kubernetes.io/name: milvus
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: milvus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads
+      ports:
+        - protocol: TCP
+          port: 19530
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: etcd
+      ports:
+        - protocol: TCP
+          port: 2379
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: minio
+      ports:
+        - protocol: TCP
+          port: 9000

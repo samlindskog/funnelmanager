@@ -1,0 +1,47 @@
+# mcp is internal-only: never routed from the gateway and, for now, with no
+# ingress allowlist at all (default-deny keeps it dark; only the monitoring
+# scrape policy reaches it). When in-cluster agent clients arrive, grant them
+# ingress explicitly by label, e.g.:
+#
+#   ingress:
+#     - from:
+#         - podSelector:
+#             matchLabels:
+#               app.kubernetes.io/name: agent-runner
+#       ports:
+#         - protocol: TCP
+#           port: 8003
+#
+# Egress: leads (the only backend it fronts) and Keycloak. DNS via allow-dns.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp
+  labels:
+    app.kubernetes.io/name: mcp
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads
+      ports:
+        - protocol: TCP
+          port: 8001
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080

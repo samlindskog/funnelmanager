@@ -1,0 +1,137 @@
+# Three layers, evaluated by Envoy in order CUSTOM -> DENY -> ALLOW:
+#
+# 1. CUSTOM: every request in the app namespaces (and at the gateway) is
+#    checked by OPA over ext_authz. OPA sees both identities — the mTLS
+#    workload principal and the JWT — and implements default-deny with the
+#    generated allowlists (deploy/policy). OPA unreachable => fail closed
+#    (Envoy denies when the provider errors).
+# 2. DENY: requests with no *validated* principal are rejected outright
+#    except the public-anonymous allowlist (mirrors the @anonymous
+#    annotations; OPA enforces the same list authoritatively).
+#
+# Keycloak (identity ns) is deliberately outside the OPA gate: it must be
+# reachable pre-auth to issue tokens; its own login/console do the vetting,
+# and NetworkPolicies restrict everything else about it.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: opa-ext-authz
+  namespace: prod
+spec:
+  action: CUSTOM
+  provider:
+    name: opa-ext-authz
+  rules:
+    - {} # every request, every workload in the namespace
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: opa-ext-authz
+  namespace: dev
+spec:
+  action: CUSTOM
+  provider:
+    name: opa-ext-authz
+  rules:
+    - {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: opa-ext-authz
+  namespace: istio-ingress
+spec:
+  action: CUSTOM
+  provider:
+    name: opa-ext-authz
+  rules:
+    - {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-principal
+  namespace: prod
+spec:
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notRequestPrincipals: ["*"]
+      to:
+        - operation:
+            # Scope to the HTTP app ports: an HTTP-attribute DENY would
+            # otherwise blackhole raw-TCP traffic (Postgres/Mongo/Milvus)
+            # in the namespace (istioctl IST0133). TCP callers are gated by
+            # OPA (workload identity) + the L4 policies + NetworkPolicies.
+            ports: ["8000", "8001", "8003", "8004", "8080", "80"]
+            notPaths:
+              # The security-reviewed public-anonymous allowlist (Phase 0).
+              - "/api/leads/webhooks/apollo"
+              - "/api/leads/webhooks/apollo/*"
+              - "/api/mail/oauth/callback"
+              # Probes/metrics (kubelet + Prometheus are not mesh clients,
+              # but keep intent explicit) and legacy compose health paths.
+              - "/healthz"
+              - "/readyz"
+              - "/metrics"
+              - "/api/search/health"
+              - "/api/leads/health"
+              - "/api/mail/health"
+              - "/health"
+              # MCP transport: the principal token rides inside tool calls;
+              # OPA still gates on the calling workload identity.
+              - "/mcp"
+              - "/mcp/*"
+              # Static SPA assets (frontend/mailui) are pre-auth by design.
+              - "/"
+              - "/assets/*"
+              - "/config.js"
+              - "/favicon.svg"
+              - "/icons.svg"
+              - "/login"
+              - "/callback"
+              - "/search"
+              - "/mail/*"
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-principal
+  namespace: dev
+spec:
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notRequestPrincipals: ["*"]
+      to:
+        - operation:
+            # Scope to the HTTP app ports: an HTTP-attribute DENY would
+            # otherwise blackhole raw-TCP traffic (Postgres/Mongo/Milvus)
+            # in the namespace (istioctl IST0133). TCP callers are gated by
+            # OPA (workload identity) + the L4 policies + NetworkPolicies.
+            ports: ["8000", "8001", "8003", "8004", "8080", "80"]
+            notPaths:
+              - "/api/leads/webhooks/apollo"
+              - "/api/leads/webhooks/apollo/*"
+              - "/api/mail/oauth/callback"
+              - "/healthz"
+              - "/readyz"
+              - "/metrics"
+              - "/api/search/health"
+              - "/api/leads/health"
+              - "/api/mail/health"
+              - "/health"
+              - "/mcp"
+              - "/mcp/*"
+              - "/"
+              - "/assets/*"
+              - "/config.js"
+              - "/favicon.svg"
+              - "/icons.svg"
+              - "/login"
+              - "/callback"
+              - "/search"
+              - "/mail/*"

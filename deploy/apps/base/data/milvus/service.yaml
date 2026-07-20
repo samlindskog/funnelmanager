@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: milvus
+  labels:
+    app.kubernetes.io/name: milvus
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: milvus
+  ports:
+    - name: grpc
+      port: 19530
+      targetPort: 19530

@@ -1,0 +1,50 @@
+# search: reached only from the ingress gateway; talks to leads, its own
+# Postgres (app-db), and Keycloak (token exchange). DNS via allow-dns.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search
+  labels:
+    app.kubernetes.io/name: search
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: search
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads
+      ports:
+        - protocol: TCP
+          port: 8001
+    # CNPG labels instance pods with cnpg.io/cluster, not app.kubernetes.io/name.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: app-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080

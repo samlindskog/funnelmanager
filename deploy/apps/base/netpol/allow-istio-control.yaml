@@ -1,0 +1,40 @@
+# Mesh plumbing common to every sidecar-injected pod:
+# - egress to istiod (xDS 15012, monitoring 15014) in istio-system
+# - egress to the OPA ext_authz Service (:9191) in opa-system — the sidecar
+#   calls the node-local OPA over its Service, it is not in-pod
+# - ingress from istio-system (istiod health/debug reach-in)
+# Note: mesh mTLS between workloads travels on the app port itself (the
+# sidecar intercepts transparently), so no extra data ports are needed here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-istio-control
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012
+        - protocol: TCP
+          port: 15014
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: opa-system
+      ports:
+        - protocol: TCP
+          port: 9191

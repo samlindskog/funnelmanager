@@ -1,0 +1,65 @@
+# Manual gateway deployment (chart `gateway`) pinned to the edge node.
+# Publicly exposed via hostPorts 80/443 on `edge` only — k3s servicelb and
+# traefik are disabled, so nothing else binds public ports anywhere.
+# The Gateway API resource (infrastructure/gateway) attaches to this
+# deployment via spec.addresses -> the Service hostname.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: istio-ingress
+  namespace: istio-ingress
+spec:
+  interval: 30m
+  dependsOn:
+    - name: istiod
+      namespace: istio-system
+  chart:
+    spec:
+      chart: gateway
+      version: "1.24.3"
+      sourceRef:
+        kind: HelmRepository
+        name: istio
+        namespace: istio-system
+  values:
+    name: istio-ingress
+    replicaCount: 1
+    service:
+      # No LoadBalancer: exposure is hostPort on the edge node (patched below).
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: 80
+        - name: https
+          port: 443
+          targetPort: 443
+    nodeSelector:
+      role: edge
+    tolerations:
+      - key: role
+        operator: Equal
+        value: edge
+        effect: NoSchedule
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: 1000m, memory: 512Mi }
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              kind: Deployment
+              name: istio-ingress
+            patch: |
+              - op: add
+                path: /spec/template/spec/containers/0/ports
+                value:
+                  - containerPort: 80
+                    hostPort: 80
+                    protocol: TCP
+                  - containerPort: 443
+                    hostPort: 443
+                    protocol: TCP
+                  - containerPort: 15090
+                    protocol: TCP
+                    name: http-envoy-prom

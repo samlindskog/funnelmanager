@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-system
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-ingress
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+    # The gateway is its own mesh member (no sidecar injection here; the
+    # gateway chart runs the proxy as the main container).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: identity
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+    # Deliberately NOT injected: Keycloak is the trust root the mesh's JWT
+    # validation depends on (bootstrapping order), and CNPG's init jobs fight
+    # sidecars. Isolation here is NetworkPolicy + its own TLS.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opa-system
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+    # No injection: OPA is the decision point the sidecars call.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-system
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+    istio-injection: enabled
+    env: prod
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+    istio-injection: enabled
+    env: dev

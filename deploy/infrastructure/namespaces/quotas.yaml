@@ -1,0 +1,26 @@
+# Per-env ceilings. Prod's request quota is the worker1 budget share for the
+# app namespace (the observability stack lives in `monitoring`, outside it);
+# dev is deliberately small — it may lose scheduling races, never prod.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: fm-quota
+  namespace: prod
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 6Gi
+    limits.memory: 14Gi
+    pods: "60"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: fm-quota
+  namespace: dev
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 3Gi
+    limits.memory: 8Gi
+    pods: "40"

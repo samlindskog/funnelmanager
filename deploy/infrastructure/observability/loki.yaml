@@ -1,0 +1,108 @@
+# Loki single-binary: local 5Gi PVC is a working cache; chunks live in
+# Linode Object Storage (bucket REPLACE_BUCKET_LOKI — see PLACEHOLDERS.md).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: loki
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: loki
+      version: "6.29.0"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: monitoring
+  values:
+    deploymentMode: SingleBinary
+
+    loki:
+      auth_enabled: false
+      commonConfig:
+        replication_factor: 1
+      limits_config:
+        retention_period: 168h
+      compactor:
+        retention_enabled: true
+        delete_request_store: s3
+      schemaConfig:
+        configs:
+          - from: "2024-01-01"
+            store: tsdb
+            object_store: s3
+            schema: v13
+            index:
+              prefix: loki_index_
+              period: 24h
+      storage:
+        type: s3
+        bucketNames:
+          chunks: REPLACE_BUCKET_LOKI
+          ruler: REPLACE_BUCKET_LOKI
+          admin: REPLACE_BUCKET_LOKI
+        s3:
+          endpoint: https://REPLACE_REGION.linodeobjects.com
+          region: REPLACE_REGION
+          s3ForcePathStyle: false
+          insecure: false
+
+    singleBinary:
+      replicas: 1
+      nodeSelector:
+        role: worker
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      persistence:
+        enabled: true
+        size: 5Gi
+        storageClass: local-path
+      extraEnv:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: objectstore-loki
+              key: ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: objectstore-loki
+              key: ACCESS_SECRET_KEY
+
+    # SingleBinary mode: scalable targets must be zeroed.
+    write:
+      replicas: 0
+    read:
+      replicas: 0
+    backend:
+      replicas: 0
+
+    # Minimal footprint: no memcached caches, no canary, no gateway, no test.
+    chunksCache:
+      enabled: false
+    resultsCache:
+      enabled: false
+    lokiCanary:
+      enabled: false
+    gateway:
+      enabled: false
+    test:
+      enabled: false
+    monitoring:
+      selfMonitoring:
+        enabled: false
+        grafanaAgent:
+          installOperator: false
+      serviceMonitor:
+        enabled: false
+    sidecar:
+      rules:
+        enabled: false

@@ -1,0 +1,11 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cnpg
+  namespace: cnpg-system
+  labels:
+    app.kubernetes.io/name: cnpg
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  interval: 1h
+  url: https://cloudnative-pg.github.io/charts

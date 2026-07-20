@@ -1,0 +1,47 @@
+# mail-db (CNPG Postgres): mail is its only client. Same operator/backup/API
+# carve-outs as app-db. NetworkPolicy is layer 3 of 3 (OPA pairing + Istio
+# L4 AuthorizationPolicy also apply).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mail-db
+  labels:
+    app.kubernetes.io/name: mail-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  # CNPG labels instance pods with cnpg.io/cluster, not app.kubernetes.io/name.
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: mail-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mail
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Operator reach-in: 5432 plus the instance manager's status port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+  egress:
+    # Backups/WAL archiving to the object store (HTTPS).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    # Instance manager → Kubernetes API server (leader election, status
+    # patching). k3s serves the API on the node IP:6443.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443

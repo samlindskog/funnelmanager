@@ -1,0 +1,42 @@
+# JWT validation. The gateway validates end-user tokens at the edge; every
+# sidecar validates again (exchanged per-hop tokens included). Tokens are
+# FORWARDED to the app so fm_runtime can hand the principal to handlers and
+# use it as the RFC 8693 subject for the next hop.
+#
+# A RequestAuthentication only *validates present* tokens; rejection of
+# token-less requests is the DENY policy in authorization-policies.yaml.
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: keycloak-jwt
+  namespace: istio-ingress
+spec:
+  jwtRules:
+    - issuer: https://replace-kc.example.com/realms/funnelmanager # PLACEHOLDERS.md
+      jwksUri: https://replace-kc.example.com/realms/funnelmanager/protocol/openid-connect/certs
+      forwardOriginalToken: true
+    - issuer: https://replace-kc.example.com/realms/funnelmanager-dev
+      jwksUri: https://replace-kc.example.com/realms/funnelmanager-dev/protocol/openid-connect/certs
+      forwardOriginalToken: true
+---
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: keycloak-jwt
+  namespace: prod
+spec:
+  jwtRules:
+    - issuer: https://replace-kc.example.com/realms/funnelmanager
+      jwksUri: https://replace-kc.example.com/realms/funnelmanager/protocol/openid-connect/certs
+      forwardOriginalToken: true
+---
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: keycloak-jwt
+  namespace: dev
+spec:
+  jwtRules:
+    - issuer: https://replace-kc.example.com/realms/funnelmanager-dev
+      jwksUri: https://replace-kc.example.com/realms/funnelmanager-dev/protocol/openid-connect/certs
+      forwardOriginalToken: true
