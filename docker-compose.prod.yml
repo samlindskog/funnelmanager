@@ -162,6 +162,29 @@ services:
     expose:
       - "8001"
 
+  mail:
+    image: ghcr.io/samlindskog/funnelmanager/mail:${IMAGE_TAG:-prod}
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      # Own database on the shared Postgres — created by the service on boot.
+      DATABASE_URL: ${MAIL_DATABASE_URL}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Blank = derived from PUBLIC_BASE_URL (https://domain/api/mail/oauth/callback);
+      # either way it must be an authorized redirect URI on the OAuth client.
+      OAUTH_REDIRECT_URL: ${MAIL_OAUTH_REDIRECT_URL:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_started
+    expose:
+      - "8004"
+
   # Authorization decision point. Runs bare — the auth backend pushes the Rego
   # policy and role-grant data into it at startup and on every role change.
   opa:
@@ -269,6 +292,7 @@ services:
       - search
       - leads
       - auth
+      - mail
 
 volumes:
   postgres_data:

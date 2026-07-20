@@ -8,6 +8,7 @@ Apollo person/company search + enrichment platform, driven primarily through an 
 - **OPA:** Open Policy Agent — the authorization decision point; the auth backend pushes the Rego policy and role grants into it (fail closed when unreachable)
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; authorizes every request via the auth backend; relays searches to leads with the caller's token
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
+- **Mail backend:** FastAPI, SQLAlchemy (own Postgres database) — archives every message from connected Gmail/Workspace mailboxes (any number of domains, OAuth per mailbox), keeps them in sync in the background, and sends mail via the Gmail API
 - **MCP server:** Python MCP SDK (streamable HTTP) — internal-only read-only tools over the leads backend for agents; every tool call carries a per-profile session token that is forwarded upstream
 - **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with a funnel-activity skill and a `funnelmanager-auth` plugin that maps channel senders to profiles
 - **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
@@ -21,13 +22,14 @@ Apollo person/company search + enrichment platform, driven primarily through an 
 - Every API endpoint — public or internal — validates the session token and checks the caller's role against the OPA policy
 - OpenClaw channel identities (e.g. Telegram sender ids) are linked to profiles; the agent acts with the linked user's authority
 - Leads service: store Apollo people/org search hits in MongoDB (deduped by `apollo_id`), embed in Milvus in the background, and enrich via Complete Person/Organization Info
+- Mail service: connect Gmail/Workspace mailboxes across any domains via OAuth, archive all their mail in Postgres (kept in sync incrementally), browse inbox/sent per mailbox in the hub Mail app, and send email as any connected mailbox
 
 ## Authorization model
 
 The full endpoint-by-endpoint reference (access tiers, internal `/internal/*` surface, OPA mechanics, and how the browser / internal services / the agent interface with auth) lives in [`docs/authentication.md`](docs/authentication.md).
 
 - **Profiles** live in the auth backend (Redis): username, bcrypt password hash, one **role**, linked channels.
-- **Roles** carry **grants**: `{service, methods, path_prefix}` rows (service is `auth` / `search` / `leads` / `*`). The built-in `admin` role grants everything and cannot be deleted; more roles can be created in the hub UI.
+- **Roles** carry **grants**: `{service, methods, path_prefix}` rows (service is `auth` / `search` / `leads` / `mail` / `*`). The built-in `admin` role grants everything and cannot be deleted; more roles can be created in the hub UI.
 - The auth backend pushes the Rego policy + role grants to **OPA** at startup, on every role change, and periodically (self-heals OPA restarts).
 - Every service resolves each request with one call — `POST /api/auth/authorize` `{token, service, method, path}` → `401` (bad token), `{allowed: false}` (deny → 403), or `{allowed: true, username, role}`. OPA unreachable ⇒ deny (fail closed).
 - Auth's own surface: `login` / `request-account` are anonymous; `me`, `logout`, `apps`, `validate`, `authorize` are open to any valid profile; everything else under `/api/auth/admin/*` requires a role whose grants cover the `auth` service.
@@ -130,6 +132,18 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8002
 ```
 
+### Mail backend
+
+```bash
+cd mail
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# Set DATABASE_URL, AUTH_BACKEND_URL, GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET,
+# and OAUTH_REDIRECT_URL (must be registered on the Google OAuth client).
+uvicorn app.main:app --reload --port 8004
+```
+
 ### MCP server
 
 ```bash
@@ -161,7 +175,10 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `SESSION_TTL_SECONDS` | Session token lifetime (auth backend; default `86400` = 1 day) |
 | `REDIS_URL` | Redis URL for the auth backend profile + session store (e.g. `redis://redis:6379/0`) |
 | `OPA_URL` | OPA decision service URL (auth backend; default `http://opa:8181`) |
-| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + OpenClaw entries |
+| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + Mail (`/mail`) + OpenClaw entries |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Web application type, Gmail API enabled) used by the mail backend to connect mailboxes — scopes `gmail.readonly` + `gmail.send` |
+| `MAIL_OAUTH_REDIRECT_URL` | Authorized redirect URI registered on the OAuth client; blank = derived from `PUBLIC_BASE_URL`, dev default `http://localhost:8000/api/mail/oauth/callback` |
+| `MAIL_DATABASE_URL` | Mail backend Postgres URL (prod compose; own `funnelmanager_mail` database, created by the service on first boot) |
 | `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth:8002`) |
 | `MCP_SHARED_LOGIN_FALLBACK` | MCP server: allow tokenless tool calls to fall back to the shared login (dev compose: `true`; prod default: `false`) |
 | `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |
@@ -224,6 +241,24 @@ Internal (Docker network only — nginx never routes `/internal/*`):
 | `GET` | `/api/search/leads/{mongo_id}` | Hydrate one lead by Mongo `_id` |
 | `POST` | `/api/search/people/{apollo_id}/enrich` | Proxy to leads complete-person enrich |
 | `POST` | `/api/search/organizations/{apollo_id}/enrich` | Proxy to leads complete-organization enrich |
+
+### Mail backend
+
+nginx routes `/api/mail/*` here. Every route requires a bearer session token authorized against the auth service + OPA (service `mail`), except `GET /api/mail/health` and the OAuth callback (validated by a single-use `state` bound to the user who started the flow). Mailbox OAuth refresh tokens are stored in the mail database — treat that Postgres instance as secret material.
+
+Connecting a mailbox: hit **Connect** in the Mail app → Google consent (offline access) → callback stores tokens and starts syncing. The background loop (every `SYNC_INTERVAL_SECONDS`, default 180) backfills the whole mailbox newest-first (`BACKFILL_PAGES_PER_CYCLE` pages of 100 per cycle) and applies Gmail history increments (new mail, deletions → `is_deleted` flag, label changes). Messages deleted on Google's side stay archived here.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/mail/accounts` | Connected mailboxes with sync status + inbox/sent/total counts |
+| `DELETE` | `/api/mail/accounts/{id}` | Remove a mailbox and its stored messages |
+| `POST` | `/api/mail/accounts/{id}/sync` | Trigger a sync cycle now (202) |
+| `GET` | `/api/mail/oauth/url` | Mint the Google consent URL (single-use state) |
+| `GET` | `/api/mail/oauth/callback` | OAuth redirect target — bounces back to `/mail?connected=…` or `?error=…` |
+| `GET` | `/api/mail/accounts/{id}/messages` | Paged list; `label=INBOX\|SENT\|ALL` (any Gmail label id), `q=` substring filter, `page`/`per_page` |
+| `GET` | `/api/mail/messages/{id}` | Full message (text + HTML bodies, attachment metadata) |
+| `GET` | `/api/mail/messages/{id}/attachments/{attachment_id}` | Attachment bytes (proxied live from Gmail) |
+| `POST` | `/api/mail/accounts/{id}/send` | `{to, cc, bcc, subject, body_text, body_html?, reply_to_message_id?}` — sends via Gmail and stores the sent message immediately |
 
 ### Leads backend (internal)
 

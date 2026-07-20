@@ -156,6 +156,32 @@ services:
       milvus:
         condition: service_healthy
 
+  mail:
+    build:
+      context: ./mail
+      dockerfile: Dockerfile.dev
+    mem_limit: 512m
+    env_file:
+      - .env
+    environment:
+      # Own database on the shared Postgres — created by the service on boot.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@db:5432/funnelmanager_mail
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Must match an authorized redirect URI on the Google OAuth client.
+      OAUTH_REDIRECT_URL: ${MAIL_OAUTH_REDIRECT_URL:-http://localhost:8000/api/mail/oauth/callback}
+    volumes:
+      - ./mail:/app
+    expose:
+      - "8004"
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_started
+
   # Authorization decision point. Runs bare — the auth backend pushes the Rego
   # policy and role-grant data into it at startup and on every role change.
   opa:
@@ -279,6 +305,7 @@ services:
       - search
       - leads
       - auth
+      - mail
 
 volumes:
   postgres_data_dev:

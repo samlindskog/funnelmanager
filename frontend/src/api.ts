@@ -5,6 +5,11 @@ import type {
   ChannelRequest,
   EntityType,
   Grant,
+  MailAccount,
+  MailAttachment,
+  MailMessageDetail,
+  MailMessagePage,
+  MailSendRequest,
   Role,
   SearchHistoryDetail,
   SearchHistorySummary,
@@ -845,4 +850,84 @@ export async function runSimilaritySearch(
       limit: params.limit ?? 25,
     }),
   })
+}
+
+// ---------------------------------------------------------------------------
+// Mail
+// ---------------------------------------------------------------------------
+
+export async function fetchMailAccounts(): Promise<MailAccount[]> {
+  return request<MailAccount[]>('/api/mail/accounts')
+}
+
+export async function deleteMailAccount(accountId: number): Promise<void> {
+  await request<void>(`/api/mail/accounts/${accountId}`, { method: 'DELETE' })
+}
+
+export async function triggerMailSync(accountId: number): Promise<void> {
+  await request<{ status: string }>(`/api/mail/accounts/${accountId}/sync`, {
+    method: 'POST',
+  })
+}
+
+/** Start the Google consent flow: the caller navigates to the returned URL. */
+export async function fetchMailOauthUrl(): Promise<string> {
+  const data = await request<{ url: string }>('/api/mail/oauth/url')
+  return data.url
+}
+
+export type MailListParams = {
+  accountId: number
+  label: string
+  q?: string
+  page?: number
+  perPage?: number
+}
+
+export async function fetchMailMessages(params: MailListParams): Promise<MailMessagePage> {
+  const search = new URLSearchParams()
+  search.set('label', params.label)
+  if (params.q) search.set('q', params.q)
+  search.set('page', String(params.page ?? 1))
+  search.set('per_page', String(params.perPage ?? 50))
+  return request<MailMessagePage>(`/api/mail/accounts/${params.accountId}/messages?${search}`)
+}
+
+export async function fetchMailMessage(messageId: number): Promise<MailMessageDetail> {
+  return request<MailMessageDetail>(`/api/mail/messages/${messageId}`)
+}
+
+export async function sendMailMessage(
+  accountId: number,
+  body: MailSendRequest,
+): Promise<MailMessageDetail> {
+  return request<MailMessageDetail>(`/api/mail/accounts/${accountId}/send`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/** Authenticated attachment download: fetch as a blob and trigger a save. */
+export async function downloadMailAttachment(
+  messageId: number,
+  attachment: MailAttachment,
+): Promise<void> {
+  const token = getToken()
+  const response = await fetch(
+    `/api/mail/messages/${messageId}/attachments/${encodeURIComponent(attachment.attachment_id)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : undefined },
+  )
+  if (response.status === 401 && token) throw handleUnauthorized()
+  if (!response.ok) {
+    throw new ApiError(response.status, 'Download failed', `Download failed (${response.status})`)
+  }
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = attachment.filename || 'attachment'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
 }

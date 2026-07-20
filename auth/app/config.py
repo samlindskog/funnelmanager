@@ -9,6 +9,8 @@ ENV_FILE = BACKEND_ROOT / ".env"
 DEFAULT_WEB_APPS = (
     '[{"name": "Search", "description": "Apollo person/company search", '
     '"url": "/search"}, '
+    '{"name": "Mail", "description": "Google Workspace inboxes & sending", '
+    '"url": "/mail"}, '
     '{"name": "OpenClaw", "description": "Agent chat & control UI", '
     '"url": "http://localhost:18789/"}]'
 )
