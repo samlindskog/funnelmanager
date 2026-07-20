@@ -35,7 +35,6 @@ import {
   Typography,
 } from '@mui/material'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link as RouterLink, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   deleteMailAccount,
@@ -44,17 +43,18 @@ import {
   fetchMailMessage,
   fetchMailMessages,
   fetchMailOauthUrl,
+  logout,
   sendMailMessage,
   triggerMailSync,
-} from '../api'
-import { useAuth } from '../auth'
-import { ColorModeToggle } from '../components/ColorModeToggle'
+} from './api'
+import { ColorModeToggle } from './ColorModeToggle'
 import type {
   MailAccount,
   MailMessageDetail,
   MailMessagePage,
   MailMessageSummary,
-} from '../types'
+  User,
+} from './types'
 
 const LABELS = ['INBOX', 'SENT', 'ALL'] as const
 type MailLabel = (typeof LABELS)[number]
@@ -99,10 +99,7 @@ interface ComposeState {
   replyToMessageId: number | null
 }
 
-export function MailPage() {
-  const { user, logout } = useAuth()
-  const [searchParams, setSearchParams] = useSearchParams()
-
+export function MailApp({ user }: { user: User }) {
   const [accounts, setAccounts] = useState<MailAccount[] | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [label, setLabel] = useState<MailLabel>('INBOX')
@@ -141,14 +138,17 @@ export function MailPage() {
     }
   }, [])
 
-  // OAuth round-trip lands back here with ?connected= / ?error=.
+  // The OAuth round-trip lands back on /mail/?connected= or ?error=.
   useEffect(() => {
-    const connected = searchParams.get('connected')
-    const error = searchParams.get('error')
+    const params = new URLSearchParams(window.location.search)
+    const connected = params.get('connected')
+    const error = params.get('error')
     if (connected) setNotice({ text: `Connected ${connected}`, severity: 'success' })
     if (error) setNotice({ text: error, severity: 'error' })
-    if (connected || error) setSearchParams({}, { replace: true })
-  }, [searchParams, setSearchParams])
+    if (connected || error) {
+      window.history.replaceState(null, '', window.location.pathname)
+    }
+  }, [])
 
   useEffect(() => {
     void refreshAccounts()
@@ -293,17 +293,15 @@ export function MailPage() {
             </Typography>
           </Box>
           <Divider orientation="vertical" flexItem sx={{ my: 1.5 }} />
-          <Button component={RouterLink} to="/" color="inherit" size="small">
+          <Button component="a" href="/" color="inherit" size="small">
             Hub
           </Button>
           <Box sx={{ flex: 1 }} />
-          {user && (
-            <Typography variant="body2" color="text.secondary">
-              {user.username}
-            </Typography>
-          )}
+          <Typography variant="body2" color="text.secondary">
+            {user.username}
+          </Typography>
           <ColorModeToggle />
-          <Button color="inherit" size="small" startIcon={<LogoutIcon />} onClick={logout}>
+          <Button color="inherit" size="small" startIcon={<LogoutIcon />} onClick={() => void logout()}>
             Log out
           </Button>
         </Toolbar>
@@ -553,6 +551,7 @@ export function MailPage() {
                               {message.snippet}
                             </Typography>
                           }
+                          disableTypography
                         />
                       </ListItemButton>
                     ))}

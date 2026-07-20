@@ -162,12 +162,30 @@ services:
     expose:
       - "8001"
 
+  # Dedicated Postgres for the mail archive — the mail service is the only
+  # consumer; the shared `db` stays search-only.
+  mail-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: funnelmanager_mail
+    volumes:
+      - mail_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d funnelmanager_mail"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   mail:
     image: ghcr.io/samlindskog/funnelmanager/mail:${IMAGE_TAG:-prod}
     restart: unless-stopped
     mem_limit: 512m
     environment:
-      # Own database on the shared Postgres — created by the service on boot.
+      # Dedicated mail-db container above.
       DATABASE_URL: ${MAIL_DATABASE_URL}
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
       CORS_ORIGINS: ${CORS_ORIGINS}
@@ -178,12 +196,23 @@ services:
       OAUTH_REDIRECT_URL: ${MAIL_OAUTH_REDIRECT_URL:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     depends_on:
-      db:
+      mail-db:
         condition: service_healthy
       auth:
         condition: service_started
     expose:
       - "8004"
+
+  # Standalone mail UI — static app served same-origin at /mail/ behind the
+  # frontend nginx so it shares the hub's session token.
+  mailui:
+    image: ghcr.io/samlindskog/funnelmanager/mailui:${IMAGE_TAG:-prod}
+    restart: unless-stopped
+    mem_limit: 128m
+    expose:
+      - "80"
+    depends_on:
+      - mail
 
   # Authorization decision point. Runs bare — the auth backend pushes the Rego
   # policy and role-grant data into it at startup and on every role change.
@@ -293,9 +322,11 @@ services:
       - leads
       - auth
       - mail
+      - mailui
 
 volumes:
   postgres_data:
+  mail_postgres_data:
   mongo_data:
   redis_data:
   etcd_data:

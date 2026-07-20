@@ -32,7 +32,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [search, leads, auth, mcp, mail, frontend]
+        service: [search, leads, auth, mcp, mail, mailui, frontend]
     steps:
       - uses: actions/checkout@v4
         with:

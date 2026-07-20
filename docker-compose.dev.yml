@@ -156,6 +156,23 @@ services:
       milvus:
         condition: service_healthy
 
+  # Dedicated Postgres for the mail archive — the mail service is the only
+  # consumer; the shared `db` stays search-only.
+  mail-db:
+    image: postgres:16-alpine
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-funnel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-funnel}
+      POSTGRES_DB: funnelmanager_mail
+    volumes:
+      - mail_postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-funnel} -d funnelmanager_mail"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   mail:
     build:
       context: ./mail
@@ -164,8 +181,7 @@ services:
     env_file:
       - .env
     environment:
-      # Own database on the shared Postgres — created by the service on boot.
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@db:5432/funnelmanager_mail
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@mail-db:5432/funnelmanager_mail
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -177,10 +193,30 @@ services:
     expose:
       - "8004"
     depends_on:
-      db:
+      mail-db:
         condition: service_healthy
       auth:
         condition: service_started
+
+  # Standalone mail UI (React + MUI, own app) — served same-origin at /mail/
+  # behind nginx so it shares the hub's session token.
+  mailui:
+    build:
+      context: ./mailui
+      dockerfile: Dockerfile.dev
+    mem_limit: 1g
+    environment:
+      VITE_API_PROXY_TARGET: http://nginx:80
+      VITE_HMR_CLIENT_PORT: ${VITE_HMR_CLIENT_PORT:-5173}
+      VITE_HMR_PROTOCOL: ${VITE_HMR_PROTOCOL:-}
+      VITE_ALLOWED_HOSTS: ${VITE_ALLOWED_HOSTS:-}
+    volumes:
+      - ./mailui:/app
+      - mailui_node_modules:/app/node_modules
+    expose:
+      - "5173"
+    depends_on:
+      - mail
 
   # Authorization decision point. Runs bare — the auth backend pushes the Rego
   # policy and role-grant data into it at startup and on every role change.
@@ -306,13 +342,16 @@ services:
       - leads
       - auth
       - mail
+      - mailui
 
 volumes:
   postgres_data_dev:
+  mail_postgres_data_dev:
   mongo_data_dev:
   redis_data_dev:
   etcd_data_dev:
   minio_data_dev:
   milvus_data_dev:
   frontend_node_modules:
+  mailui_node_modules:
   openclaw_auth_dev:

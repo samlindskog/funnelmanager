@@ -27,10 +27,10 @@ class Settings(BaseSettings):
     # this backend validates incoming session tokens and issues none.
     auth_backend_url: str = "http://auth:8002"
 
-    # This service owns its own database on the shared Postgres instance.
-    # Created at startup if missing (see database.init_db) — Postgres init
-    # scripts only run on fresh volumes.
-    database_url: str = "postgresql+asyncpg://funnel:funnel@db:5432/funnelmanager_mail"
+    # This service owns a dedicated Postgres container (mail-db). The database
+    # is also created at startup if missing (see database.init_db), so pointing
+    # this at any Postgres instance works too.
+    database_url: str = "postgresql+asyncpg://funnel:funnel@mail-db:5432/funnelmanager_mail"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost"
 
     # Google OAuth client ("Web application" type). Connecting mailboxes is

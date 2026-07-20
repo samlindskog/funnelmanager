@@ -4,7 +4,6 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth'
 import { HubPage } from './pages/HubPage'
 import { LandingPage } from './pages/LandingPage'
-import { MailPage } from './pages/MailPage'
 import { SearchPage } from './pages/SearchPage'
 import { ProgressCircles, ProgressProvider } from './progress'
 import { theme } from './theme'
@@ -44,14 +43,6 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <SearchPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/mail"
-                element={
-                  <ProtectedRoute>
-                    <MailPage />
                   </ProtectedRoute>
                 }
               />

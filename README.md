@@ -8,7 +8,8 @@ Apollo person/company search + enrichment platform, driven primarily through an 
 - **OPA:** Open Policy Agent — the authorization decision point; the auth backend pushes the Rego policy and role grants into it (fail closed when unreachable)
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; authorizes every request via the auth backend; relays searches to leads with the caller's token
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
-- **Mail backend:** FastAPI, SQLAlchemy (own Postgres database) — archives every message from connected Gmail/Workspace mailboxes (any number of domains, OAuth per mailbox), keeps them in sync in the background, and sends mail via the Gmail API
+- **Mail backend:** FastAPI, SQLAlchemy (dedicated `mail-db` Postgres container) — archives every message from connected Gmail/Workspace mailboxes (any number of domains, OAuth per mailbox), keeps them in sync in the background, and sends mail via the Gmail API
+- **Mail UI:** its own React + TypeScript + Material UI app (`mailui/`, separate container) served same-origin at `/mail/` — appears on the hub as an app tile and shares the hub's session token; no code shared with the search frontend
 - **MCP server:** Python MCP SDK (streamable HTTP) — internal-only read-only tools over the leads backend for agents; every tool call carries a per-profile session token that is forwarded upstream
 - **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with a funnel-activity skill and a `funnelmanager-auth` plugin that maps channel senders to profiles
 - **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
@@ -166,6 +167,16 @@ npm run dev
 
 Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8000`). In Docker Compose, nginx is the public entry and routes `/api/search` traffic to the search backend.
 
+### Mail UI
+
+```bash
+cd mailui
+npm install
+npm run dev   # serves at http://localhost:5173/mail/ (base /mail/)
+```
+
+Standalone app — same MUI theme, no shared code with `frontend/`. It expects the hub session token in `localStorage` (log in via the hub first) and proxies `/api` to `VITE_API_PROXY_TARGET` (default `http://127.0.0.1:8004`).
+
 ## Environment
 
 | Variable | Description |
@@ -178,7 +189,7 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + Mail (`/mail`) + OpenClaw entries |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Web application type, Gmail API enabled) used by the mail backend to connect mailboxes — scopes `gmail.readonly` + `gmail.send` |
 | `MAIL_OAUTH_REDIRECT_URL` | Authorized redirect URI registered on the OAuth client; blank = derived from `PUBLIC_BASE_URL`, dev default `http://localhost:8000/api/mail/oauth/callback` |
-| `MAIL_DATABASE_URL` | Mail backend Postgres URL (prod compose; own `funnelmanager_mail` database, created by the service on first boot) |
+| `MAIL_DATABASE_URL` | Mail backend Postgres URL (prod compose; the dedicated `mail-db` container) |
 | `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth:8002`) |
 | `MCP_SHARED_LOGIN_FALLBACK` | MCP server: allow tokenless tool calls to fall back to the shared login (dev compose: `true`; prod default: `false`) |
 | `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |
@@ -244,7 +255,7 @@ Internal (Docker network only — nginx never routes `/internal/*`):
 
 ### Mail backend
 
-nginx routes `/api/mail/*` here. Every route requires a bearer session token authorized against the auth service + OPA (service `mail`), except `GET /api/mail/health` and the OAuth callback (validated by a single-use `state` bound to the user who started the flow). Mailbox OAuth refresh tokens are stored in the mail database — treat that Postgres instance as secret material.
+nginx routes `/api/mail/*` here and `/mail/` to the standalone mail UI (`mailui`, its own React app + container; same origin as the hub, so it reuses the hub session — unauthenticated visits bounce to `/login`). Every API route requires a bearer session token authorized against the auth service + OPA (service `mail`), except `GET /api/mail/health` and the OAuth callback (validated by a single-use `state` bound to the user who started the flow). Data lives in the dedicated `mail-db` Postgres container; mailbox OAuth refresh tokens are stored there too — treat it as secret material.
 
 Connecting a mailbox: hit **Connect** in the Mail app → Google consent (offline access) → callback stores tokens and starts syncing. The background loop (every `SYNC_INTERVAL_SECONDS`, default 180) backfills the whole mailbox newest-first (`BACKFILL_PAGES_PER_CYCLE` pages of 100 per cycle) and applies Gmail history increments (new mail, deletions → `is_deleted` flag, label changes). Messages deleted on Google's side stay archived here.
 

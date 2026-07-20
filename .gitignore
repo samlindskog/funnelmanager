@@ -13,6 +13,8 @@ frontend/node_modules/
 frontend/dist/
 frontend/.env
 frontend/.env.local
+mailui/node_modules/
+mailui/dist/
 
 # Docker / env
 .env
