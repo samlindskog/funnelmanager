@@ -107,8 +107,8 @@ services:
 
   search:
     build:
-      context: ./search
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: search/Dockerfile.dev
     mem_limit: 512m
     env_file:
       - .env
@@ -119,6 +119,7 @@ services:
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
     volumes:
       - ./search:/app
+      - ./libs/fm_runtime:/libs/fm_runtime
     expose:
       - "8000"
     depends_on:
@@ -131,8 +132,8 @@ services:
 
   leads:
     build:
-      context: ./leads
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: leads/Dockerfile.dev
     # Highest app cap: serializing enriched Apollo docs (~5MB JSON per 100
     # leads) through pydantic spikes well past idle usage.
     mem_limit: 1g
@@ -148,6 +149,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
     volumes:
       - ./leads:/app
+      - ./libs/fm_runtime:/libs/fm_runtime
     expose:
       - "8001"
     depends_on:
@@ -175,8 +177,8 @@ services:
 
   mail:
     build:
-      context: ./mail
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: mail/Dockerfile.dev
     mem_limit: 512m
     env_file:
       - .env
@@ -190,6 +192,7 @@ services:
       OAUTH_REDIRECT_URL: ${MAIL_OAUTH_REDIRECT_URL:-http://localhost:8000/api/mail/oauth/callback}
     volumes:
       - ./mail:/app
+      - ./libs/fm_runtime:/libs/fm_runtime
     expose:
       - "8004"
     depends_on:
@@ -252,8 +255,8 @@ services:
 
   mcp:
     build:
-      context: ./mcp
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: mcp/Dockerfile.dev
     # Parses full lead payloads before summarizing for agents; give it spike room.
     mem_limit: 768m
     env_file:
@@ -266,6 +269,7 @@ services:
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-true}
     volumes:
       - ./mcp:/app
+      - ./libs/fm_runtime:/libs/fm_runtime
     # Internal MCP endpoint (streamable HTTP at /mcp) for AI-agent clients.
     # Published for host-local MCP clients in dev; never routed through nginx.
     ports:

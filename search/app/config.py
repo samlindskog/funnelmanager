@@ -16,9 +16,8 @@ class Settings(BaseSettings):
 
     app_name: str = "Funnel Manager"
 
-    # Request auth is delegated to the auth service; this backend validates
-    # incoming session tokens against it and issues no tokens of its own.
-    auth_backend_url: str = "http://auth:8002"
+    # Identity/authz plumbing (JWT parsing, token exchange) is configured via
+    # the FM_* env vars read by fm_runtime, not here.
 
     # Internal URL for the leads service (Apollo lives there).
     leads_backend_url: str = "http://leads:8001"

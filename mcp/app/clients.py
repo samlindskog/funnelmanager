@@ -1,22 +1,27 @@
 """HTTP client for the leads backend.
 
-The leads backend authorizes every request against the central auth service +
-OPA, so every call here carries a bearer token. The token is per tool call:
-the MCP client passes the acting profile's session token with each request;
-this server forwards it upstream unchanged.
+Every tool call carries the acting principal's token (the `session_token`
+argument or the Authorization header on the /mcp request). It is the
+*subject* token: fm_runtime's TokenBroker exchanges it (RFC 8693, cached) for
+a leads-audience token on every upstream call, so leads sees the original
+principal with this server in the `act` chain.
 
-``AuthSession`` remains as an optional dev fallback (MCP_SHARED_LOGIN_FALLBACK)
-that logs in with shared credentials when a tool call arrives with no token.
+With MCP_SHARED_LOGIN_FALLBACK=true (dev only), tokenless calls act as the
+MCP server's own service identity via a client-credentials token instead.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import httpx
 
+from fm_runtime import ExchangeError, get_broker
+from fm_runtime.context import current_trace_headers
+
 from app.config import Settings
+
+LEADS_AUDIENCE = "leads"
 
 
 class UpstreamError(RuntimeError):
@@ -24,20 +29,18 @@ class UpstreamError(RuntimeError):
 
 
 MISSING_TOKEN_MESSAGE = (
-    "No session token was provided for this tool call. Pass session_token "
-    "explicitly or send an Authorization: Bearer header. Tokens expire — "
-    "fetch a fresh one if this keeps failing."
+    "No token was provided for this tool call. Pass session_token explicitly "
+    "or send an Authorization: Bearer header on the MCP request. Tokens "
+    "expire — fetch a fresh one if this keeps failing."
 )
 
 INVALID_TOKEN_MESSAGE = (
-    "The session token was rejected (expired or revoked). Fetch a fresh one "
-    "with funnelmanager_session_token and retry."
+    "The token was rejected (expired or revoked). Fetch a fresh one and retry."
 )
 
 FORBIDDEN_MESSAGE = (
-    "The profile behind this session token is not authorized for this action "
-    "(OPA policy denied it). An admin can adjust the profile's role/grants in "
-    "the Funnel Manager hub."
+    "The principal behind this token is not authorized for this action (the "
+    "policy denied it). An admin can adjust the principal's permissions."
 )
 
 
@@ -56,63 +59,27 @@ def _raise_for_auth(response: httpx.Response, context: str) -> None:
         raise UpstreamError(f"{context}: {FORBIDDEN_MESSAGE}")
 
 
-class AuthSession:
-    """Shared-credential session cache (dev fallback only)."""
+class TokenResolver:
+    """Explicit per-call subject token, else (dev fallback only) the server's
+    own service identity via client credentials."""
 
     def __init__(self, settings: Settings):
         self._settings = settings
-        self._token: str | None = None
-        self._lock = asyncio.Lock()
 
-    @property
-    def enabled(self) -> bool:
-        return bool(self._settings.mcp_shared_login_fallback)
-
-    async def token(self, *, force_refresh: bool = False) -> str:
-        async with self._lock:
-            if self._token and not force_refresh:
-                return self._token
-            url = f"{self._settings.auth_backend_url.rstrip('/')}/api/auth/login"
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    url,
-                    data={
-                        "username": self._settings.auth_username,
-                        "password": self._settings.auth_password,
-                    },
-                )
-            if response.status_code >= 400:
-                raise UpstreamError(
-                    f"Auth login failed ({response.status_code}): {_error_detail(response)}"
-                )
-            token = response.json().get("access_token")
-            if not token:
-                raise UpstreamError("Auth login returned no access_token")
-            self._token = str(token)
-            return self._token
-
-
-class TokenResolver:
-    """Explicit per-call token, else the shared-login fallback (when enabled)."""
-
-    def __init__(self, auth: AuthSession):
-        self._auth = auth
-
-    async def resolve(self, explicit: str | None) -> tuple[str, bool]:
-        """Returns (token, is_fallback)."""
-        cleaned = (explicit or "").strip()
-        if cleaned:
-            return cleaned, False
-        if self._auth.enabled:
-            return await self._auth.token(), True
-        raise UpstreamError(MISSING_TOKEN_MESSAGE)
-
-    async def refresh_fallback(self) -> str:
-        return await self._auth.token(force_refresh=True)
+    async def resolve(self, explicit: str | None) -> str:
+        """Returns the *outbound* leads-audience bearer."""
+        subject = (explicit or "").strip() or None
+        if subject is None and not self._settings.mcp_shared_login_fallback:
+            raise UpstreamError(MISSING_TOKEN_MESSAGE)
+        try:
+            # subject=None -> client-credentials (service identity, dev only).
+            return await get_broker().token_for(LEADS_AUDIENCE, subject)
+        except ExchangeError as exc:
+            raise UpstreamError(f"Token exchange failed: {exc}") from exc
 
 
 class LeadsBackendClient:
-    """Calls the internal leads backend (bearer token, like every service now)."""
+    """Calls the internal leads backend with an exchanged bearer token."""
 
     def __init__(self, settings: Settings, tokens: TokenResolver):
         self._settings = settings
@@ -131,22 +98,18 @@ class LeadsBackendClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
     ) -> Any:
-        bearer, is_fallback = await self._tokens.resolve(token)
-        response: httpx.Response | None = None
-        for attempt in (0, 1):
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                response = await client.request(
-                    method,
-                    self._url(path),
-                    params=params,
-                    json=json_body,
-                    headers={"Authorization": f"Bearer {bearer}"},
-                )
-            if response.status_code == 401 and is_fallback and attempt == 0:
-                bearer = await self._tokens.refresh_fallback()
-                continue
-            break
-        assert response is not None
+        bearer = await self._tokens.resolve(token)
+        headers = current_trace_headers()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.request(
+                method,
+                self._url(path),
+                params=params,
+                json=json_body,
+                headers=headers,
+            )
         _raise_for_auth(response, f"Leads backend {method} {path}")
         if response.status_code >= 400:
             raise UpstreamError(

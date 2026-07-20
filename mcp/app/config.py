@@ -16,17 +16,14 @@ class Settings(BaseSettings):
 
     app_name: str = "Funnel Manager MCP"
 
-    # Internal service URLs on the compose network.
+    # Internal service URL for the leads backend.
     leads_backend_url: str = "http://leads:8001"
-    auth_backend_url: str = "http://auth:8002"
 
-    # Optional shared-login fallback for tool calls that arrive WITHOUT a
-    # session token (host-local MCP clients in dev). When disabled (default),
-    # tokenless calls fail — production clients must supply a per-profile
-    # session token with every call.
+    # Optional dev fallback for tool calls that arrive WITHOUT a token: act
+    # as this server's own service identity (client-credentials token). When
+    # disabled (default), tokenless calls fail — production clients must
+    # supply the acting principal's token with every call.
     mcp_shared_login_fallback: bool = False
-    auth_username: str = "admin"
-    auth_password: str = "admin"
 
     # Host headers accepted by the MCP transport's DNS-rebinding protection.
     # Must cover every name clients dial: the compose service name (other

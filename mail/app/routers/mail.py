@@ -1,9 +1,10 @@
 """Mail API: connected Google mailboxes, their synced messages, and sending.
 
-Every route is authorized through the central auth service (service="mail")
-except the OAuth callback, which authenticates with the single-use state row
-minted by ``GET /oauth/url`` (Google cannot send a bearer token), and the
-health probe in ``main.py``.
+Authorization is enforced by the mesh (Istio + OPA) plus fm_runtime's
+principal middleware; the only anonymous routes are the OAuth callback
+(annotated below — it authenticates with the single-use state row minted by
+``GET /oauth/url``, since Google cannot send a bearer token) and the health
+probes in ``main.py``.
 """
 
 import asyncio
@@ -17,6 +18,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import delete, func, or_, select
+
+from fm_runtime import anonymous
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import gmail
@@ -212,6 +215,11 @@ async def oauth_url(
 
 
 @router.get("/oauth/callback")
+@anonymous(
+    "Google OAuth redirect target — Google cannot send our bearer token; "
+    "authenticated by a single-use MailOauthState row (10-min TTL) bound to "
+    "the user who minted it via GET /api/mail/oauth/url"
+)
 async def oauth_callback(
     state: str = "",
     code: str = "",

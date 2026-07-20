@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.apollo import ApolloLeadsClient
-from app.auth import enforce_authorization
+from fm_runtime import anonymous
 from app.apollo_endpoints import (
     ORG_BY_ID,
     ORG_SEARCH,
@@ -62,13 +62,11 @@ from app.stream_jobs import (
 
 logger = logging.getLogger(__name__)
 
-# Every route is authorized against the auth service + OPA; the dependency
-# itself exempts the Apollo webhooks (secret-in-path) and the health probe.
-router = APIRouter(
-    prefix="/api/leads",
-    tags=["leads"],
-    dependencies=[Depends(enforce_authorization)],
-)
+# Authorization is enforced by the mesh (Istio + OPA ext_authz) and by
+# fm_runtime's PrincipalMiddleware (401 without a leads-audience JWT) — the
+# only routes reachable without a principal are the ones annotated @anonymous
+# below (Apollo webhooks: secret-in-path, and the legacy health probe).
+router = APIRouter(prefix="/api/leads", tags=["leads"])
 
 
 def _serialize_responses(responses: dict[str, Any]) -> dict[str, ApolloEndpointResponseOut]:
@@ -420,6 +418,7 @@ async def _upsert_enriched_record(
 
 
 @router.get("/health")
+@anonymous("legacy health path (compose-era); k8s probes use /healthz + /readyz")
 async def leads_health(settings: Settings = Depends(get_settings)) -> dict[str, object]:
     return {
         "status": "ok",
@@ -1575,6 +1574,11 @@ def _merge_async_person_into_match_data(
 
 @router.post("/webhooks/apollo")
 @router.post("/webhooks/apollo/{secret}")
+@anonymous(
+    "Apollo async webhook delivery — Apollo cannot send bearer tokens; "
+    "authenticated by a constant-time secret-in-path/query compare, 503s "
+    "when the secret is unconfigured"
+)
 async def apollo_people_match_webhook(
     request: Request,
     secret: str | None = None,

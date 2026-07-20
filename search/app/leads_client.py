@@ -10,6 +10,9 @@ from urllib.parse import quote
 import httpx
 from fastapi import HTTPException, status
 
+from fm_runtime import get_broker
+from fm_runtime.context import current_trace_headers
+
 from app.config import Settings
 
 APOLLO_MAX_PER_PAGE = 100
@@ -345,22 +348,33 @@ def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
 class LeadsClient:
     """Relay to /api/leads — never calls Apollo directly.
 
-    The caller's session token is forwarded on every call: the leads backend
-    authorizes each request against the auth service + OPA, same as any other
-    service.
+    ``token`` is the caller's *subject* token: on every outbound call it is
+    exchanged (RFC 8693, cached) for a token whose audience is the leads
+    service, so leads sees the same originating principal with this service
+    in the ``act`` chain. Detached ingest jobs capture the subject token for
+    their lifetime — exactly the old session-lifetime semantics. Without a
+    subject token the exchange falls back to this service's own
+    client-credentials identity.
     """
+
+    AUDIENCE = "leads"
 
     def __init__(self, settings: Settings, token: str | None = None):
         self.settings = settings
-        self.token = token
+        self.subject_token = token
+        # Trace context is captured at construction (request scope) so
+        # detached jobs keep correlating with the request that started them.
+        self._trace_headers = current_trace_headers()
 
-    def _headers(self) -> dict[str, str]:
+    async def _headers(self) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            **self._trace_headers,
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        outbound = await get_broker().token_for(self.AUDIENCE, self.subject_token)
+        if outbound:
+            headers["Authorization"] = f"Bearer {outbound}"
         return headers
 
     def _url(self, path: str) -> str:
@@ -379,7 +393,7 @@ class LeadsClient:
             response = await client.request(
                 method,
                 self._url(path),
-                headers=self._headers(),
+                headers=await self._headers(),
                 json=json_body,
                 params=params,
             )
@@ -534,7 +548,7 @@ class LeadsClient:
         if not cleaned:
             return
         headers = {
-            **self._headers(),
+            **await self._headers(),
             "Accept": "application/x-ndjson",
         }
         timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)

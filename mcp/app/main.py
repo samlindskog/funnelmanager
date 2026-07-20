@@ -6,13 +6,15 @@ routes to it. All tools read stored Apollo leads + enrichment state via
 the leads backend; nothing here calls Apollo, spends credits, or touches the
 search backend (searches are run by humans in the search app).
 
-Every backend enforces per-profile authorization (auth service + OPA), so
-each tool call must carry a session token. Priority order:
+Every tool call must carry the acting principal's token, which this server
+exchanges (RFC 8693) for a leads-audience token per upstream call. Priority
+order:
 
 1. the ``session_token`` tool argument (the agent's harness supplies the
-   linked profile's session token),
+   acting principal's token),
 2. an ``Authorization: Bearer`` header on the MCP HTTP request,
-3. the optional shared-login dev fallback (MCP_SHARED_LOGIN_FALLBACK).
+3. the optional dev fallback (MCP_SHARED_LOGIN_FALLBACK): act as the MCP
+   server's own service identity via client credentials.
 """
 
 from __future__ import annotations
@@ -22,15 +24,20 @@ from typing import Any, Literal
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
-from app.clients import AuthSession, LeadsBackendClient, TokenResolver
+from fm_runtime import configure_logging
+from fm_runtime.middleware import PrincipalMiddleware
+from fm_runtime.settings import get_runtime_settings
+
+from app.clients import LeadsBackendClient, TokenResolver
 from app.config import get_settings
 from app.summarize import summarize_lead
 
 settings = get_settings()
-tokens = TokenResolver(AuthSession(settings))
+tokens = TokenResolver(settings)
 leads_backend = LeadsBackendClient(settings, tokens)
 
 mcp = FastMCP(
@@ -181,5 +188,40 @@ async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "mcp"})
 
 
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
+@mcp.custom_route("/readyz", methods=["GET"])
+async def readyz(_: Request) -> JSONResponse:
+    # Stateless server: ready as soon as it serves HTTP (leads reachability
+    # is surfaced per tool call, not here).
+    return JSONResponse({"status": "ready"})
+
+
+@mcp.custom_route("/metrics", methods=["GET"])
+async def metrics(_: Request) -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 # Served by uvicorn (see Dockerfile); streamable HTTP endpoint mounts at /mcp.
 app = mcp.streamable_http_app()
+
+configure_logging("mcp", get_runtime_settings().log_level)
+# The /mcp transport is principal-optional at the HTTP layer: tools receive
+# the acting principal's token as a call argument (or the Authorization
+# header, which this middleware parses into context when present). Probe and
+# metrics endpoints are cluster-internal. Everything else 401s without a
+# valid mcp-audience JWT.
+app.add_middleware(
+    PrincipalMiddleware,
+    service="mcp",
+    extra_anonymous=(
+        r"^/mcp(/.*)?$",
+        r"^/health$",
+        r"^/healthz$",
+        r"^/readyz$",
+        r"^/metrics$",
+    ),
+)

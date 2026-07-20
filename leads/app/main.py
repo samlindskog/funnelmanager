@@ -5,12 +5,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from fm_runtime import install
+
 from app.config import get_settings
-from app.database import close_db, init_db
+from app.database import close_db, get_client, init_db
 from app.milvus_client import close_milvus, ensure_collection_async
 from app.routers import leads
 
 logger = logging.getLogger(__name__)
+
+
+async def _mongo_ready() -> None:
+    await get_client().admin.command("ping")
 
 
 @asynccontextmanager
@@ -27,6 +33,10 @@ async def lifespan(_: FastAPI):
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+# Milvus is deliberately not a readiness gate — the service degrades
+# gracefully without it (similarity search unavailable).
+install(app, service="leads", ready_checks={"mongo": _mongo_ready})
 
 app.add_middleware(
     CORSMiddleware,

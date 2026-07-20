@@ -23,9 +23,8 @@ class Settings(BaseSettings):
 
     app_name: str = "Funnel Manager Mail"
 
-    # Request auth is delegated to the auth service (service name "mail");
-    # this backend validates incoming session tokens and issues none.
-    auth_backend_url: str = "http://auth:8002"
+    # Identity/authz plumbing (JWT parsing, audience checks) is configured
+    # via the FM_* env vars read by fm_runtime, not here.
 
     # This service owns a dedicated Postgres container (mail-db). The database
     # is also created at startup if missing (see database.init_db), so pointing

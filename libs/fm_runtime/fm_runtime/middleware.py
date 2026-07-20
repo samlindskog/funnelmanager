@@ -52,17 +52,30 @@ def _header(scope: dict, name: bytes) -> str | None:
 
 
 class PrincipalMiddleware:
-    def __init__(self, app, service: str, settings: RuntimeSettings | None = None) -> None:
+    def __init__(
+        self,
+        app,
+        service: str,
+        settings: RuntimeSettings | None = None,
+        extra_anonymous: tuple[str, ...] = (),
+    ) -> None:
+        """extra_anonymous: path regexes admitted without a principal in
+        addition to @anonymous-annotated routes — for mounts that carry the
+        principal inside their own protocol layer (e.g. the /mcp transport,
+        whose tools pass the token as a call argument)."""
         self.app = app
         self.service = service
         self.settings = settings or get_runtime_settings()
         self._anonymous: list[tuple[frozenset[str], re.Pattern[str]]] | None = None
+        self._extra = tuple(re.compile(p) for p in extra_anonymous)
 
     def _is_anonymous(self, scope: dict) -> bool:
+        path = scope.get("path", "")
+        if any(pattern.match(path) for pattern in self._extra):
+            return True
         if self._anonymous is None:
             self._anonymous = build_matchers(scope["app"])
         method = scope.get("method", "GET")
-        path = scope.get("path", "")
         return any(
             method in methods and pattern.match(path)
             for methods, pattern in self._anonymous

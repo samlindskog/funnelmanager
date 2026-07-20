@@ -1,68 +1,34 @@
-"""Request auth for the mail backend.
+"""Request identity for the mail backend.
 
-Every request's bearer token is sent to the central auth service's
-``/api/auth/authorize`` endpoint, which validates the session AND evaluates
-the OPA policy for (service="mail", method, path). 401 -> invalid/expired
-token, 403 -> valid token but the caller's role has no grant covering this
-call.
+Authorization is enforced by the mesh (Istio mTLS + OPA ext_authz) before a
+request reaches this process; fm_runtime's PrincipalMiddleware has already
+parsed the forwarded JWT and 401-ed non-anonymous routes without one. This
+dependency hands handlers the acting principal in the legacy ``UserOut``
+shape (``username`` is recorded as ``connected_by`` on mailbox connects).
 
-The only unauthenticated routes are the health probe and the Google OAuth
+The only anonymous routes are the health probes and the Google OAuth
 callback — Google cannot send a bearer token, so the callback authenticates
-with a single-use ``state`` row minted by ``GET /api/mail/oauth/url`` instead.
+with a single-use ``state`` row minted by ``GET /api/mail/oauth/url``.
 """
 
-import httpx
-from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import HTTPException, status
 
-from app.config import Settings, get_settings
+from fm_runtime import current_principal
+
 from app.schemas import UserOut
 
 SERVICE_NAME = "mail"
 
-# Login/refresh live on the auth service (nginx routes /api/auth/* there). This
-# scheme only extracts the bearer token from the request for authorization.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-
-async def get_current_user(
-    request: Request,
-    token: str = Depends(oauth2_scheme),
-    settings: Settings = Depends(get_settings),
-) -> UserOut:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+async def get_current_user() -> UserOut:
+    principal = current_principal()
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return UserOut(
+        username=principal.username,
+        role="admin" if "admin" in principal.roles else "",
     )
-    url = f"{settings.auth_backend_url.rstrip('/')}/api/auth/authorize"
-    body = {
-        "token": token,
-        "service": SERVICE_NAME,
-        "method": request.method,
-        "path": request.url.path,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json=body)
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Auth service unavailable",
-        ) from exc
-    if response.status_code == status.HTTP_401_UNAUTHORIZED:
-        raise credentials_exception
-    if response.status_code >= 400:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Auth service error",
-        )
-    payload = response.json()
-    if not isinstance(payload, dict) or not payload.get("username"):
-        raise credentials_exception
-    if not payload.get("allowed"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized",
-        )
-    return UserOut(username=str(payload["username"]), role=str(payload.get("role") or ""))
