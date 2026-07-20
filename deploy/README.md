@@ -40,12 +40,16 @@ To enable it, give prod its own `TELEGRAM_BOT_TOKEN` in `.env.prod` and run
 
 Because prod has no source checkout, the OpenClaw container's bind-mount
 (`${OPENCLAW_STATE_DIR:-./openclaw}`) must be seeded on the host with the
-**versioned** parts of `openclaw/` before enabling the profile: `openclaw.json`,
-`skills/`, and `extensions/` (the `funnelmanager-auth` plugin lives here and is
-what links Telegram senders to Funnel Manager profiles). Copy that subtree from
-the repo to the host's `OPENCLAW_STATE_DIR`; everything else there is runtime
-state OpenClaw creates on first run. Without `extensions/`, agent tool calls
-have no session token and every Funnel Manager tool fails authorization.
+**versioned** parts of `openclaw/` before enabling the profile:
+`openclaw.json.example`, `skills/`, and `extensions/` (the `funnelmanager-auth`
+plugin lives here and is what links Telegram senders to Funnel Manager
+profiles). Copy that subtree from the repo to the host's `OPENCLAW_STATE_DIR`;
+the `openclaw-init` compose service copies the template to `openclaw.json` on
+first start, and from then on the live config is runtime state (the gateway
+writes per-user agents/bindings into it) — never overwrite it with the
+template on an established deployment. Everything else there is runtime state
+OpenClaw creates on first run. Without `extensions/`, agent tool calls have no
+session token and every Funnel Manager tool fails authorization.
 
 ## CI/CD (GitHub Actions)
 

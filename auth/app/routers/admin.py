@@ -138,6 +138,23 @@ async def delete_user(
         )
     async with _write_lock:
         await _guard_last_admin(username)
+        # Strip the user's OpenClaw peer bindings and revoke their senders' DM
+        # pairing before dropping the channel links (the agent's workspace is
+        # intentionally retained on disk). Runs even when no local links remain
+        # — a partially-failed assign can leave gateway bindings without a
+        # local link, and delete is the last chance to reconcile them. A
+        # gateway failure aborts the delete so the admin can retry.
+        target = store.normalize_username(username)
+        if await store.get_user(target):
+            links = await store.channels_for_user(target)
+            await openclaw_gateway.sync_agent(
+                target,
+                [],
+                removed=[
+                    {"channel": link["channel"], "device_id": link["device_id"]}
+                    for link in links
+                ],
+            )
         if not await store.delete_user(username):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
@@ -147,15 +164,38 @@ async def delete_user(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def unlink_user_channel(username: str, channel: str, device_id: str) -> None:
-    link = await store.get_channel_link(channel, device_id)
-    if not link or link.get("username") != store.normalize_username(username):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Channel link not found"
+    # The whole read-compute-sync-mutate sequence holds the write lock: the
+    # gateway sync has full-sync semantics, so a concurrent link change for the
+    # same user racing this read would silently drop its binding.
+    async with _write_lock:
+        link = await store.get_channel_link(channel, device_id)
+        if not link or link.get("username") != store.normalize_username(username):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Channel link not found"
+            )
+        # Sync the user's OpenClaw agent bindings to the post-unlink sender set
+        # and revoke the removed sender's DM pairing, before mutating local
+        # state (a gateway failure aborts the unlink so the admin can retry).
+        target = store.normalize_username(username)
+        remaining = [
+            {"channel": other["channel"], "device_id": other["device_id"]}
+            for other in await store.channels_for_user(target)
+            if not (
+                other.get("channel") == link.get("channel")
+                and other.get("device_id") == link.get("device_id")
+            )
+        ]
+        await openclaw_gateway.sync_agent(
+            target,
+            remaining,
+            removed=[
+                {"channel": link["channel"], "device_id": link["device_id"]}
+            ],
         )
-    await store.unlink_channel(channel, device_id)
-    # Revoke the channel's cached OpenClaw session so the sender loses access
-    # now, not when the session TTL expires.
-    await internal.revoke_channel_session(channel, device_id)
+        await store.unlink_channel(channel, device_id)
+        # Revoke the channel's cached OpenClaw session so the sender loses
+        # access now, not when the session TTL expires.
+        await internal.revoke_channel_session(channel, device_id)
 
 
 # ---------------------------------------------------------------------------
@@ -343,15 +383,39 @@ async def assign_channel_request(body: AssignChannelIn) -> UserDetail:
     request = await store.get_channel_request(channel, device_id) or {}
     # One-stop onboarding: if the OpenClaw DM pairing is still pending, approve
     # it first (failure aborts the assign, so the row keeps its code and the
-    # admin can retry).
+    # admin can retry). Kept outside the write lock — it doesn't touch the
+    # synced binding state.
     await _approve_pairing_if_pending(request)
-    # If the channel was previously linked to another user, kill that user's
-    # cached OpenClaw session before re-linking.
-    await internal.revoke_channel_session(channel, device_id)
-    await store.link_channel(
-        channel, device_id, str(user["username"]), str(request.get("display_name") or "")
-    )
-    await store.delete_channel_request(channel, device_id)
+    # The read-compute-sync-mutate sequence holds the write lock: the gateway
+    # sync has full-sync semantics, so two concurrent assigns for the same user
+    # would each read a stale sender set and the loser's binding would be
+    # silently pruned; a racing user delete could resurrect the agent.
+    async with _write_lock:
+        user = await store.get_user(str(user["username"]))
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+        # Sync the user's OpenClaw agent + peer bindings to the prospective
+        # sender set (existing links plus the one being assigned) before
+        # mutating local state — a gateway failure aborts the assign so the
+        # admin can retry.
+        prospective = {
+            (str(other.get("channel") or ""), str(other.get("device_id") or ""))
+            for other in await store.channels_for_user(str(user["username"]))
+        }
+        prospective.add((channel, device_id))
+        await openclaw_gateway.sync_agent(
+            str(user["username"]),
+            [{"channel": c, "device_id": d} for c, d in sorted(prospective)],
+        )
+        # If the channel was previously linked to another user, kill that
+        # user's cached OpenClaw session before re-linking.
+        await internal.revoke_channel_session(channel, device_id)
+        await store.link_channel(
+            channel, device_id, str(user["username"]), str(request.get("display_name") or "")
+        )
+        await store.delete_channel_request(channel, device_id)
     return await _user_detail(user)
 
 

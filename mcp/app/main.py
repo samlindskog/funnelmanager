@@ -9,8 +9,8 @@ search backend (searches are run by humans in the search app).
 Every backend enforces per-profile authorization (auth service + OPA), so
 each tool call must carry a session token. Priority order:
 
-1. the ``session_token`` tool argument (the OpenClaw harness plugin injects it
-   or the agent passes the value from ``funnelmanager_session_token``),
+1. the ``session_token`` tool argument (the agent passes the value from
+   ``funnelmanager_session_token``; the OpenClaw plugin validates it per call),
 2. an ``Authorization: Bearer`` header on the MCP HTTP request,
 3. the optional shared-login dev fallback (MCP_SHARED_LOGIN_FALLBACK).
 """
@@ -41,10 +41,10 @@ mcp = FastMCP(
         "read-only and free — they inspect leads already stored by the "
         "platform and never call Apollo or spend credits. New Apollo "
         "searches/enrichment happen in the Funnel Manager search app, not "
-        "through this server. AUTH: every tool accepts session_token — the "
-        "OpenClaw harness injects it automatically; if a call fails with a "
-        "missing/expired token, pass the value from the "
-        "funnelmanager_session_token tool. Never invent a token."
+        "through this server. AUTH: every tool call must pass session_token "
+        "explicitly — fetch it with the funnelmanager_session_token tool "
+        "first and include it in every call. Tokens expire: on an auth or "
+        "policy error, fetch a fresh one and retry. Never invent a token."
     ),
     stateless_http=True,
     json_response=True,
