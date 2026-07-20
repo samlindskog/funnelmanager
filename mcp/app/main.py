@@ -1,16 +1,16 @@
 """Internal MCP server for Funnel Manager.
 
 Exposes read-only inspection tools over MCP streamable HTTP (endpoint ``/mcp``)
-for internal agents (e.g. OpenClaw). Runs only on the compose network — nginx
-never routes to it. All tools read stored Apollo leads + enrichment state via
+for internal AI-agent clients. Runs only on the compose network — nginx never
+routes to it. All tools read stored Apollo leads + enrichment state via
 the leads backend; nothing here calls Apollo, spends credits, or touches the
 search backend (searches are run by humans in the search app).
 
 Every backend enforces per-profile authorization (auth service + OPA), so
 each tool call must carry a session token. Priority order:
 
-1. the ``session_token`` tool argument (the agent passes the value from
-   ``funnelmanager_session_token``; the OpenClaw plugin validates it per call),
+1. the ``session_token`` tool argument (the agent's harness supplies the
+   linked profile's session token),
 2. an ``Authorization: Bearer`` header on the MCP HTTP request,
 3. the optional shared-login dev fallback (MCP_SHARED_LOGIN_FALLBACK).
 """
@@ -42,9 +42,9 @@ mcp = FastMCP(
         "platform and never call Apollo or spend credits. New Apollo "
         "searches/enrichment happen in the Funnel Manager search app, not "
         "through this server. AUTH: every tool call must pass session_token "
-        "explicitly — fetch it with the funnelmanager_session_token tool "
-        "first and include it in every call. Tokens expire: on an auth or "
-        "policy error, fetch a fresh one and retry. Never invent a token."
+        "explicitly (or send it as an Authorization: Bearer header). Tokens "
+        "expire: on an auth or policy error, fetch a fresh one and retry. "
+        "Never invent a token."
     ),
     stateless_http=True,
     json_response=True,

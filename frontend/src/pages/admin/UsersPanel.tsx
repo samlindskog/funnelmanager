@@ -1,6 +1,5 @@
 import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined'
 import KeyIcon from '@mui/icons-material/Key'
-import LinkOffIcon from '@mui/icons-material/LinkOff'
 import {
   Alert,
   Button,
@@ -25,7 +24,7 @@ import {
   Typography,
 } from '@mui/material'
 import { useCallback, useEffect, useState } from 'react'
-import { createUser, deleteUser, listUsers, unlinkChannel, updateUser } from '../../api'
+import { createUser, deleteUser, listUsers, updateUser } from '../../api'
 import { useAuth } from '../../auth'
 import type { Role, UserDetail } from '../../types'
 import { RoleSelect } from './RequestsPanel'
@@ -78,7 +77,6 @@ export function UsersPanel({ roles }: { roles: Role[] }) {
               <TableRow>
                 <TableCell>Username</TableCell>
                 <TableCell>Role</TableCell>
-                <TableCell>Channels</TableCell>
                 <TableCell align="right" />
               </TableRow>
             </TableHead>
@@ -103,30 +101,6 @@ export function UsersPanel({ roles }: { roles: Role[] }) {
                         </MenuItem>
                       ))}
                     </Select>
-                  </TableCell>
-                  <TableCell>
-                    <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: 'wrap' }}>
-                      {user.channels.length === 0 && (
-                        <Typography variant="body2" color="text.secondary">
-                          —
-                        </Typography>
-                      )}
-                      {user.channels.map((link) => (
-                        <Chip
-                          key={`${link.channel}|${link.device_id}`}
-                          size="small"
-                          label={`${link.channel}:${link.device_id}`}
-                          onDelete={() =>
-                            act(() => unlinkChannel(user.username, link.channel, link.device_id))
-                          }
-                          deleteIcon={
-                            <Tooltip title="Unlink channel">
-                              <LinkOffIcon />
-                            </Tooltip>
-                          }
-                        />
-                      ))}
-                    </Stack>
                   </TableCell>
                   <TableCell align="right">
                     <Tooltip title="Set password">

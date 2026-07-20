@@ -13,7 +13,7 @@ nginx is the only public entry:
 | `/api/leads/webhooks/` | `leads:8001` (the *only* leads path exposed) |
 | `/` | frontend (Vite in dev, built SPA in prod) |
 
-Deliberately **never routed**: auth's `/internal/*`, the rest of `/api/leads/*`, OPA, Redis, and `/mcp` (published on host `:8003` in dev, loopback-only in prod).
+Deliberately **never routed**: the rest of `/api/leads/*`, OPA, Redis, and `/mcp` (published on host `:8003` in dev, loopback-only in prod).
 
 ## Endpoint inventory
 
@@ -32,21 +32,16 @@ Deliberately **never routed**: auth's `/internal/*`, the rest of `/api/leads/*`,
 | Endpoint | What it does |
 |---|---|
 | `GET /api/auth/me` | Token → `{username, role}` |
-| `GET /api/auth/apps` | Hub app list from `WEB_APPS` (default: Search at `/search` + OpenClaw) |
+| `GET /api/auth/apps` | Hub app list from `WEB_APPS` (default: Search at `/search` + Mail at `/mail/`) |
 | `POST /api/auth/logout` | Deletes the Redis session key — instant revocation |
 | `POST /api/auth/validate` | Body `{token}` → introspection for other backends |
 | **`POST /api/auth/authorize`** | **The** endpoint: `{token, service, method, path}` → resolve session (401 if dead/expired) → OPA decision → `{allowed, username, role}`; **503 when OPA is unreachable (fail closed)** |
 
 **Tier 3 — OPA-gated admin** (`require_authorized` in `auth/app/security.py` — auth gates *itself* through the same authorize mechanism, service `"auth"`):
 
-- Users: `GET|POST /api/auth/admin/users`, `PATCH|DELETE .../users/{username}` (self-delete + last-admin guards serialized under a write lock), `DELETE .../users/{u}/channels/{channel}/{device_id}` (unlink + immediate revocation of the cached agent session)
+- Users: `GET|POST /api/auth/admin/users`, `PATCH|DELETE .../users/{username}` (self-delete + last-admin guards serialized under a write lock)
 - Roles: `GET|POST /api/auth/admin/roles`, `DELETE .../roles/{name}` (admin role undeletable; in-use undeletable; every change re-pushed to OPA)
-- Requests: `GET .../account-requests` + `approve`/`deny`; `GET .../channel-requests` + `approve-pairing` (calls the OpenClaw gateway), `assign` (auto-completes a pending pairing, revokes any prior session, links channel→user), `deny`
-
-### Auth service — internal-only (`/internal/*`, compose network; nginx never routes it)
-
-- `POST /internal/openclaw/session` — channel identity → session token for the linked profile (one cached session per identity under `openclaw_token:<channel>|<device_id>`); unlinked → 403 `{pending: true}` + a pending channel request is recorded
-- `POST /internal/openclaw/pairing-request` — records a Telegram DM pairing code so admins can approve it from the hub
+- Requests: `GET .../account-requests` + `approve`/`deny`
 
 ### OPA (`:8181`, auth-only client — `auth/app/opa.py`)
 
@@ -60,10 +55,9 @@ All routes carry `Depends(get_current_user)` (`search/app/auth.py`): extract bea
 
 One **router-level** dependency (`enforce_authorization`, `leads/app/auth.py`) covers every route: missing bearer → 401, else `authorize(service="leads")`. The dependency itself exempts exactly `GET /api/leads/health` and `/api/leads/webhooks/*`. The webhook (`POST /api/leads/webhooks/apollo[/{secret}]`) refuses to serve (503) unless `APOLLO_WEBHOOK_SECRET` is configured, and does a constant-time compare of the path/query secret — Apollo cannot send bearer tokens, so this is the one secret-in-path exception.
 
-### MCP server (`:8003`) and the OpenClaw gateway
+### MCP server (`:8003`)
 
-- `/mcp` is the MCP protocol mount (not REST; Host-header allowlist `mcp:8003,localhost:8003,127.0.0.1:8003`); `GET /health` anonymous. Per-tool-call token priority: ① `session_token` tool argument → ② `Authorization: Bearer` on the `/mcp` request → ③ shared-login fallback **only** when `MCP_SHARED_LOGIN_FALLBACK=true` (dev). The fallback token is transparently re-minted on 401; explicit tokens never are — those errors surface to the agent with instructions to fetch a fresh one.
-- OpenClaw gateway `:18789`: the `funnelmanager-auth` plugin registers `POST /api/funnelmanager/pairing/approve` (gateway-token auth). Only the auth service calls it (`auth/app/openclaw_gateway.py`, using `OPENCLAW_GATEWAY_TOKEN`) to complete hub-approved pairings.
+`/mcp` is the MCP protocol mount (not REST; Host-header allowlist `mcp:8003,localhost:8003,127.0.0.1:8003`); `GET /health` anonymous. Per-tool-call token priority: ① `session_token` tool argument → ② `Authorization: Bearer` on the `/mcp` request → ③ shared-login fallback **only** when `MCP_SHARED_LOGIN_FALLBACK=true` (dev). The fallback token is transparently re-minted on 401; explicit tokens never are — those errors surface to the agent with instructions to fetch a fresh one.
 
 ## How each client type interfaces
 
@@ -71,8 +65,8 @@ One **router-level** dependency (`enforce_authorization`, `leads/app/auth.py`) c
 
 **Internal services:** one uniform pattern everywhere — forward the caller's bearer, ask `authorize` with your own service name + method + path. A single browser action that reaches leads is authorized **twice** (search's check, then leads' check) — deliberate defense in depth; internal ≠ trusted.
 
-**Agent (OpenClaw):** two-layer onboarding — OpenClaw DM pairing (code approvable from the hub via the gateway route) and profile linking (pending channel requests → admin assigns). At runtime the `funnelmanager-auth` plugin resolves each conversation's channel + sender, fetches a session from `/internal/openclaw/session`, and injects it as `session_token` on every funnelmanager tool call (unlinked senders are blocked with a "pending" message); the `funnelmanager_session_token` tool exists for harnesses that can't rewrite tool args. The agent therefore acts with **exactly the linked profile's role**, and unlinking revokes its cached session immediately.
+**MCP clients:** pass the acting profile's session token on every tool call (`session_token` argument or `Authorization: Bearer` header); the MCP server forwards it to the leads backend, which re-authorizes it, so the client acts with **exactly that profile's role**.
 
 ## Session semantics
 
-Sessions store **only the username**; role and existence are re-resolved on every check — so role changes and user deletions bite live sessions instantly, and logout/unlink are instant revocations. No refresh tokens: expiry means the browser re-logs-in and the agent re-mints internally. `AUTH_USERNAME`/`AUTH_PASSWORD` only bootstrap the first admin user (created if missing, never updated).
+Sessions store **only the username**; role and existence are re-resolved on every check — so role changes and user deletions bite live sessions instantly, and logout is an instant revocation. No refresh tokens: expiry means the browser re-logs-in. `AUTH_USERNAME`/`AUTH_PASSWORD` only bootstrap the first admin user (created if missing, never updated).

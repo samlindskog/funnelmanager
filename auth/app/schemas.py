@@ -1,5 +1,3 @@
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 
@@ -15,7 +13,6 @@ class UserOut(BaseModel):
 
 class UserDetail(UserOut):
     created_at: str | None = None
-    channels: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidateRequest(BaseModel):
@@ -77,47 +74,6 @@ class ApproveAccountRequestIn(BaseModel):
     username: str
     password: str
     role: str
-
-
-class NewUserIn(BaseModel):
-    username: str
-    password: str
-    role: str
-
-
-class AssignChannelIn(BaseModel):
-    channel: str
-    device_id: str
-    # Assign to an existing user...
-    username: str | None = None
-    # ...or create a new one in the same step.
-    new_user: NewUserIn | None = None
-
-
-class ChannelRef(BaseModel):
-    channel: str
-    device_id: str
-
-
-class OpenClawSessionIn(BaseModel):
-    channel: str
-    device_id: str
-    display_name: str = ""
-
-
-class OpenClawPairingRequestIn(BaseModel):
-    """DM pairing request reported by the funnelmanager-auth plugin."""
-
-    channel: str
-    device_id: str
-    code: str
-    display_name: str = ""
-
-
-class OpenClawSessionOut(Token):
-    username: str
-    role: str
-    expires_in: int
 
 
 class AppLink(BaseModel):

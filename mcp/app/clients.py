@@ -2,9 +2,8 @@
 
 The leads backend authorizes every request against the central auth service +
 OPA, so every call here carries a bearer token. The token is per tool call:
-the OpenClaw harness fetches a session token for the profile linked to the
-channel it is acting for and passes it with each MCP request; this server
-forwards it upstream unchanged.
+the MCP client passes the acting profile's session token with each request;
+this server forwards it upstream unchanged.
 
 ``AuthSession`` remains as an optional dev fallback (MCP_SHARED_LOGIN_FALLBACK)
 that logs in with shared credentials when a tool call arrives with no token.
@@ -26,9 +25,8 @@ class UpstreamError(RuntimeError):
 
 MISSING_TOKEN_MESSAGE = (
     "No session token was provided for this tool call. Pass session_token "
-    "(the OpenClaw harness injects it, or fetch one with the "
-    "funnelmanager_session_token tool). Tokens expire — fetch a fresh one if "
-    "this keeps failing."
+    "explicitly or send an Authorization: Bearer header. Tokens expire — "
+    "fetch a fresh one if this keeps failing."
 )
 
 INVALID_TOKEN_MESSAGE = (

@@ -2,7 +2,6 @@ import type {
   AccountRequest,
   ApolloRecord,
   AppLink,
-  ChannelRequest,
   EntityType,
   Grant,
   Role,
@@ -183,17 +182,6 @@ export async function deleteUser(username: string): Promise<void> {
   })
 }
 
-export async function unlinkChannel(
-  username: string,
-  channel: string,
-  deviceId: string,
-): Promise<void> {
-  await request<void>(
-    `/api/auth/admin/users/${encodeURIComponent(username)}/channels/${encodeURIComponent(channel)}/${encodeURIComponent(deviceId)}`,
-    { method: 'DELETE' },
-  )
-}
-
 // ---------------------------------------------------------------------------
 // Admin — roles
 // ---------------------------------------------------------------------------
@@ -243,47 +231,6 @@ export async function denyAccountRequest(username: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ username }),
   })
-}
-
-export async function listChannelRequests(): Promise<ChannelRequest[]> {
-  return request<ChannelRequest[]>('/api/auth/admin/channel-requests')
-}
-
-export async function assignChannelRequest(payload: {
-  channel: string
-  device_id: string
-  username?: string
-  new_user?: { username: string; password: string; role: string }
-}): Promise<UserDetail> {
-  return request<UserDetail>('/api/auth/admin/channel-requests/assign', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-}
-
-export async function denyChannelRequest(
-  channel: string,
-  deviceId: string,
-): Promise<void> {
-  await request<void>('/api/auth/admin/channel-requests/deny', {
-    method: 'POST',
-    body: JSON.stringify({ channel, device_id: deviceId }),
-  })
-}
-
-/** Approve the OpenClaw DM pairing for a pending channel request (the sender
- * can then talk to the agent; profile assignment stays a separate step). */
-export async function approveChannelPairing(
-  channel: string,
-  deviceId: string,
-): Promise<ChannelRequest & { paired: boolean; linked: boolean }> {
-  return request<ChannelRequest & { paired: boolean; linked: boolean }>(
-    '/api/auth/admin/channel-requests/approve-pairing',
-    {
-      method: 'POST',
-      body: JSON.stringify({ channel, device_id: deviceId }),
-    },
-  )
 }
 
 // ---------------------------------------------------------------------------

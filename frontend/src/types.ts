@@ -22,35 +22,14 @@ export interface Role {
   created_at?: string | null
 }
 
-export interface ChannelLink {
-  channel: string
-  device_id: string
-  username: string
-  display_name?: string
-  linked_at?: string
-}
-
 export interface UserDetail extends User {
   created_at?: string | null
-  channels: ChannelLink[]
 }
 
 export interface AccountRequest {
   username: string
   requested_at?: string
   last_seen_at?: string
-}
-
-export interface ChannelRequest {
-  channel: string
-  device_id: string
-  display_name?: string
-  requested_at?: string
-  last_seen_at?: string
-  /** OpenClaw DM pairing code — present while the pairing still needs admin
-   * approval (approve from the hub; assigning also completes it). */
-  pairing_code?: string
-  pairing_requested_at?: string
 }
 
 // ---------------------------------------------------------------------------

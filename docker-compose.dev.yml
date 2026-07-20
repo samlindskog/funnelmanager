@@ -238,10 +238,6 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       OPA_URL: ${OPA_URL:-http://opa:8181}
-      # Lets the hub approve OpenClaw DM pairing requests (route registered
-      # by the funnelmanager-auth plugin, authenticated with the gateway token).
-      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-http://openclaw:18789}
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       WEB_APPS: ${WEB_APPS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
     volumes:
@@ -270,55 +266,13 @@ services:
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-true}
     volumes:
       - ./mcp:/app
-    # Internal MCP endpoint (streamable HTTP at /mcp) for agents like OpenClaw.
+    # Internal MCP endpoint (streamable HTTP at /mcp) for AI-agent clients.
     # Published for host-local MCP clients in dev; never routed through nginx.
     ports:
       - "${HOST_BIND:-}8003:8003"
     depends_on:
       - leads
       - auth
-
-  # Seeds openclaw.json from the versioned template when missing. The live
-  # config is runtime state (the gateway writes per-user agents/bindings into
-  # it via the funnelmanager-auth sync route) and is gitignored.
-  openclaw-init:
-    image: busybox:stable
-    # Match the openclaw container's node uid so the seeded file stays
-    # writable by the gateway.
-    user: "1000:1000"
-    volumes:
-      - ./openclaw:/state
-    command: sh -c 'test -f /state/openclaw.json || cp /state/openclaw.json.example /state/openclaw.json'
-
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
-    restart: unless-stopped
-    mem_limit: 2g
-    # Deliberately no env_file: OpenClaw gets only the secrets it needs, not
-    # the whole stack's (.env holds Apollo/OpenAI/DB credentials).
-    environment:
-      OPENCLAW_GATEWAY_BIND: lan
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
-      # Agent model: OpenAI today; Anthropic stays wired in openclaw.json for
-      # when ANTHROPIC_API_KEY is available.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-    volumes:
-      # Template + skills + extensions are versioned in ./openclaw; the live
-      # openclaw.json and everything else there is runtime state (gitignored).
-      - ./openclaw:/home/node/.openclaw
-      # Auth-profile encryption keys — keep out of the repo dir entirely.
-      - openclaw_auth_dev:/home/node/.config/openclaw
-    # Control UI / gateway WebSocket. Reaches funnelmanager MCP at
-    # http://mcp:8003/mcp over the compose network.
-    ports:
-      - "${HOST_BIND:-}18789:18789"
-    depends_on:
-      mcp:
-        condition: service_started
-      openclaw-init:
-        condition: service_completed_successfully
 
   frontend:
     build:
@@ -369,4 +323,3 @@ volumes:
   milvus_data_dev:
   frontend_node_modules:
   mailui_node_modules:
-  openclaw_auth_dev:

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import opa, store
 from app.config import get_settings
-from app.routers import admin, auth, internal
+from app.routers import admin, auth
 from app.security import hash_or_keep
 from app.sessions import close_redis, get_redis
 
@@ -19,7 +19,7 @@ async def bootstrap() -> None:
 
     The admin user is created from AUTH_USERNAME/AUTH_PASSWORD only when
     missing — existing users are never overwritten from env. Everything else
-    (more users, roles, channel links) is managed through the admin API/UI.
+    (more users, roles) is managed through the admin API/UI.
     """
     settings = get_settings()
     if not await store.get_role(store.ADMIN_ROLE):
@@ -64,6 +64,5 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(admin.router)
-app.include_router(internal.router)
 # Health lives at /api/auth/health (auth.router) so every public route stays
 # under the service's /api/auth prefix.

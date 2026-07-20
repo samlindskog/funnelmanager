@@ -22,15 +22,15 @@ class Settings(BaseSettings):
 
     # Optional shared-login fallback for tool calls that arrive WITHOUT a
     # session token (host-local MCP clients in dev). When disabled (default),
-    # tokenless calls fail — production identity comes from the OpenClaw
-    # harness, which fetches per-profile session tokens from the auth service.
+    # tokenless calls fail — production clients must supply a per-profile
+    # session token with every call.
     mcp_shared_login_fallback: bool = False
     auth_username: str = "admin"
     auth_password: str = "admin"
 
     # Host headers accepted by the MCP transport's DNS-rebinding protection.
     # Must cover every name clients dial: the compose service name (other
-    # containers, e.g. OpenClaw) and loopback (host-local clients).
+    # containers) and loopback (host-local clients).
     mcp_allowed_hosts: str = "mcp:8003,localhost:8003,127.0.0.1:8003"
 
     @property

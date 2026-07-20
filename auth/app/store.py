@@ -1,12 +1,10 @@
-"""Redis-backed profile store: users, roles, channel links, pending requests.
+"""Redis-backed profile store: users, roles, pending account requests.
 
 Everything lives in a handful of Redis hashes so listing is one HGETALL:
 
 - ``users``            field ``<username>``            -> user JSON
 - ``roles``            field ``<name>``                -> role JSON
-- ``channel_links``    field ``<channel>|<device_id>`` -> link JSON (has username)
 - ``account_requests`` field ``<username>``            -> pending account request JSON
-- ``channel_requests`` field ``<channel>|<device_id>`` -> pending channel request JSON
 
 Sessions stay in ``sessions.py`` (per-token keys with native TTLs). Sessions
 store only the username; role and existence are resolved from ``users`` on
@@ -25,9 +23,7 @@ from app.sessions import get_redis
 
 USERS_KEY = "users"
 ROLES_KEY = "roles"
-CHANNEL_LINKS_KEY = "channel_links"
 ACCOUNT_REQUESTS_KEY = "account_requests"
-CHANNEL_REQUESTS_KEY = "channel_requests"
 
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,31}$")
 ROLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
@@ -53,10 +49,6 @@ def valid_username(value: str) -> bool:
 
 def valid_role_name(value: str) -> bool:
     return bool(ROLE_NAME_RE.fullmatch(value))
-
-
-def channel_key(channel: str, device_id: str) -> str:
-    return f"{channel.strip().lower()}|{str(device_id).strip()}"
 
 
 def _loads(raw: str | None) -> dict[str, Any] | None:
@@ -122,13 +114,7 @@ async def update_user(username: str, **fields: Any) -> dict[str, Any] | None:
 
 async def delete_user(username: str) -> bool:
     username = normalize_username(username)
-    removed = await get_redis().hdel(USERS_KEY, username)
-    if removed:
-        # Drop channel links pointing at the deleted user.
-        for link in await list_channel_links():
-            if link.get("username") == username:
-                await unlink_channel(link.get("channel", ""), link.get("device_id", ""))
-    return bool(removed)
+    return bool(await get_redis().hdel(USERS_KEY, username))
 
 
 async def count_users_with_role(role: str) -> int:
@@ -209,46 +195,6 @@ async def roles_as_opa_data() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Channel links (channel device id -> profile)
-# ---------------------------------------------------------------------------
-
-
-async def get_channel_link(channel: str, device_id: str) -> dict[str, Any] | None:
-    return await _hget(CHANNEL_LINKS_KEY, channel_key(channel, device_id))
-
-
-async def list_channel_links() -> list[dict[str, Any]]:
-    return await _hall(CHANNEL_LINKS_KEY)
-
-
-async def link_channel(
-    channel: str, device_id: str, username: str, display_name: str = ""
-) -> dict[str, Any]:
-    link = {
-        "channel": channel.strip().lower(),
-        "device_id": str(device_id).strip(),
-        "username": normalize_username(username),
-        "display_name": display_name.strip(),
-        "linked_at": _now(),
-    }
-    await get_redis().hset(
-        CHANNEL_LINKS_KEY, channel_key(channel, device_id), json.dumps(link)
-    )
-    return link
-
-
-async def unlink_channel(channel: str, device_id: str) -> bool:
-    return bool(
-        await get_redis().hdel(CHANNEL_LINKS_KEY, channel_key(channel, device_id))
-    )
-
-
-async def channels_for_user(username: str) -> list[dict[str, Any]]:
-    username = normalize_username(username)
-    return [link for link in await list_channel_links() if link.get("username") == username]
-
-
-# ---------------------------------------------------------------------------
 # Pending account requests (public "request an account" form)
 # ---------------------------------------------------------------------------
 
@@ -275,64 +221,4 @@ async def list_account_requests() -> list[dict[str, Any]]:
 async def delete_account_request(username: str) -> bool:
     return bool(
         await get_redis().hdel(ACCOUNT_REQUESTS_KEY, normalize_username(username))
-    )
-
-
-# ---------------------------------------------------------------------------
-# Pending channel requests (unlinked channel device ids seen by OpenClaw)
-# ---------------------------------------------------------------------------
-
-
-async def get_channel_request(channel: str, device_id: str) -> dict[str, Any] | None:
-    return await _hget(CHANNEL_REQUESTS_KEY, channel_key(channel, device_id))
-
-
-async def upsert_channel_request(
-    channel: str,
-    device_id: str,
-    display_name: str = "",
-    pairing_code: str | None = None,
-) -> dict[str, Any]:
-    field = channel_key(channel, device_id)
-    existing = await _hget(CHANNEL_REQUESTS_KEY, field)
-    request = existing or {
-        "channel": channel.strip().lower(),
-        "device_id": str(device_id).strip(),
-        "requested_at": _now(),
-    }
-    if display_name.strip():
-        request["display_name"] = display_name.strip()
-    if pairing_code is not None and pairing_code.strip():
-        # OpenClaw DM pairing code reported by the plugin: while present, the
-        # sender cannot talk to the agent until an admin approves the pairing.
-        request["pairing_code"] = pairing_code.strip()
-        request["pairing_requested_at"] = _now()
-    request["last_seen_at"] = _now()
-    await get_redis().hset(CHANNEL_REQUESTS_KEY, field, json.dumps(request))
-    return request
-
-
-async def clear_channel_request_pairing(
-    channel: str, device_id: str
-) -> dict[str, Any] | None:
-    """Drop the pairing code after approval (the request row may remain,
-    awaiting profile assignment)."""
-    field = channel_key(channel, device_id)
-    request = await _hget(CHANNEL_REQUESTS_KEY, field)
-    if not request:
-        return None
-    request.pop("pairing_code", None)
-    request.pop("pairing_requested_at", None)
-    await get_redis().hset(CHANNEL_REQUESTS_KEY, field, json.dumps(request))
-    return request
-
-
-async def list_channel_requests() -> list[dict[str, Any]]:
-    requests = await _hall(CHANNEL_REQUESTS_KEY)
-    return sorted(requests, key=lambda r: str(r.get("requested_at") or ""))
-
-
-async def delete_channel_request(channel: str, device_id: str) -> bool:
-    return bool(
-        await get_redis().hdel(CHANNEL_REQUESTS_KEY, channel_key(channel, device_id))
     )

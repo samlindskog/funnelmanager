@@ -33,24 +33,6 @@ The `prod` image tag is a moving tag advanced on every deploy; each build also
 pushes an immutable `sha-<sha>` tag (and `v*` on release tags) for pinning and
 rollback.
 
-The OpenClaw agent is **off in prod** (it sits behind the `agent` Compose
-profile) so it doesn't run a second Telegram poller against dev's bot token.
-To enable it, give prod its own `TELEGRAM_BOT_TOKEN` in `.env.prod` and run
-`docker compose --profile agent -f docker-compose.prod.yml --env-file .env.prod up -d`.
-
-Because prod has no source checkout, the OpenClaw container's bind-mount
-(`${OPENCLAW_STATE_DIR:-./openclaw}`) must be seeded on the host with the
-**versioned** parts of `openclaw/` before enabling the profile:
-`openclaw.json.example`, `skills/`, and `extensions/` (the `funnelmanager-auth`
-plugin lives here and is what links Telegram senders to Funnel Manager
-profiles). Copy that subtree from the repo to the host's `OPENCLAW_STATE_DIR`;
-the `openclaw-init` compose service copies the template to `openclaw.json` on
-first start, and from then on the live config is runtime state (the gateway
-writes per-user agents/bindings into it) — never overwrite it with the
-template on an established deployment. Everything else there is runtime state
-OpenClaw creates on first run. Without `extensions/`, agent tool calls have no
-session token and every Funnel Manager tool fails authorization.
-
 ## CI/CD (GitHub Actions)
 
 - **`.github/workflows/ci.yml`** — runs on every PR and push to main: frontend
@@ -144,5 +126,4 @@ Defenses now in place:
   (default assumes ~50% of host RAM per mongod). Milvus reads its cgroup limit
   and scales its internal watermarks accordingly.
 - Dev (usfr3, 4GB) keeps the tighter caps from `docker-compose.dev.yml`; the 6GB
-  swapfile absorbs single-user dev spikes. `docker compose stop openclaw` if the
-  agent's 2G is not needed while developing.
+  swapfile absorbs single-user dev spikes.

@@ -1,35 +1,33 @@
 # Funnel Manager — Apollo Inspector
 
-Apollo person/company search + enrichment platform, driven primarily through an AI agent (OpenClaw over Telegram / web UI) and gated by a central auth service with per-user profiles, roles, and OPA-backed authorization on every API endpoint. The search backend stores history and Mongo lead `_id`s in Postgres; the leads backend is the only service that talks to Apollo and stores full records in MongoDB.
+Apollo person/company search + enrichment platform, gated by a central auth service with per-user profiles, roles, and OPA-backed authorization on every API endpoint. The search backend stores history and Mongo lead `_id`s in Postgres; the leads backend is the only service that talks to Apollo and stores full records in MongoDB.
 
 ## Stack
 
-- **Auth backend:** FastAPI + Redis — user profiles (bcrypt), roles, channel links, pending account/channel requests, and opaque session tokens (1-day TTL); owns the OPA policy + role data and answers `POST /api/auth/authorize` for every service
+- **Auth backend:** FastAPI + Redis — user profiles (bcrypt), roles, pending account requests, and opaque session tokens (1-day TTL); owns the OPA policy + role data and answers `POST /api/auth/authorize` for every service
 - **OPA:** Open Policy Agent — the authorization decision point; the auth backend pushes the Rego policy and role grants into it (fail closed when unreachable)
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; authorizes every request via the auth backend; relays searches to leads with the caller's token
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
 - **Mail backend:** FastAPI, SQLAlchemy (dedicated `mail-db` Postgres container) — archives every message from connected Gmail/Workspace mailboxes (any number of domains, OAuth per mailbox), keeps them in sync in the background, and sends mail via the Gmail API
 - **Mail UI:** its own React + TypeScript + Material UI app (`mailui/`, separate container) served same-origin at `/mail/` — appears on the hub as an app tile and shares the hub's session token; no code shared with the search frontend
 - **MCP server:** Python MCP SDK (streamable HTTP) — internal-only read-only tools over the leads backend for agents; every tool call carries a per-profile session token that is forwarded upstream
-- **OpenClaw agent:** personal AI agent (Telegram + web Control UI) wired to the MCP server, with a funnel-activity skill and a `funnelmanager-auth` plugin that maps channel senders to profiles
 - **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
 - **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis, OPA
 
 ## Features
 
 - Minimal landing page (no product info) with sign-in and "request access" (username only)
-- Post-login hub: current profile (username + role), configured web apps (e.g. OpenClaw Control UI)
-- Admin panels (admin role only): pending channel requests (assign a Telegram sender to a new/existing user), pending account requests, user management, role management with per-service grants
+- Post-login hub: current profile (username + role), configured web apps (Search, Mail)
+- Admin panels (admin role only): pending account requests, user management, role management with per-service grants
 - Every API endpoint — public or internal — validates the session token and checks the caller's role against the OPA policy
-- OpenClaw channel identities (e.g. Telegram sender ids) are linked to profiles; the agent acts with the linked user's authority
 - Leads service: store Apollo people/org search hits in MongoDB (deduped by `apollo_id`), embed in Milvus in the background, and enrich via Complete Person/Organization Info
 - Mail service: connect Gmail/Workspace mailboxes across any domains via OAuth, archive all their mail in Postgres (kept in sync incrementally), browse inbox/sent per mailbox in the hub Mail app, and send email as any connected mailbox
 
 ## Authorization model
 
-The full endpoint-by-endpoint reference (access tiers, internal `/internal/*` surface, OPA mechanics, and how the browser / internal services / the agent interface with auth) lives in [`docs/authentication.md`](docs/authentication.md).
+The full endpoint-by-endpoint reference (access tiers, OPA mechanics, and how the browser / internal services interface with auth) lives in [`docs/authentication.md`](docs/authentication.md).
 
-- **Profiles** live in the auth backend (Redis): username, bcrypt password hash, one **role**, linked channels.
+- **Profiles** live in the auth backend (Redis): username, bcrypt password hash, one **role**.
 - **Roles** carry **grants**: `{service, methods, path_prefix}` rows (service is `auth` / `search` / `leads` / `mail` / `*`). The built-in `admin` role grants everything and cannot be deleted; more roles can be created in the hub UI.
 - The auth backend pushes the Rego policy + role grants to **OPA** at startup, on every role change, and periodically (self-heals OPA restarts).
 - Every service resolves each request with one call — `POST /api/auth/authorize` `{token, service, method, path}` → `401` (bad token), `{allowed: false}` (deny → 403), or `{allowed: true, username, role}`. OPA unreachable ⇒ deny (fail closed).
@@ -47,14 +45,14 @@ docker compose -f docker-compose.dev.yml up --build
 
 - App (nginx → Vite): http://localhost:5173
 - APIs (nginx → backends): http://localhost:8000/api
-  - `/api/auth/…` → auth backend (login, profiles, authorization; `/internal/*` is **not** routed)
+  - `/api/auth/…` → auth backend (login, profiles, authorization)
   - `/api/search/…` → search backend (search/history/enrich)
   - Leads is internal-only (`LEADS_BACKEND_URL`); the browser does not call it
 - Postgres: localhost:5432
 - MongoDB: localhost:27017
 - Redis: localhost:6379
 
-nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (`/api/search/…`). The leads backend, OPA, and Redis are reached only by other services on the Docker network; the auth backend's `/internal/*` routes (OpenClaw session minting) are likewise unreachable from outside.
+nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (`/api/search/…`). The leads backend, OPA, and Redis are reached only by other services on the Docker network.
 
 The MCP server listens at `http://localhost:8003/mcp` in dev (streamable HTTP). nginx never routes to it; in prod it is published on loopback only (`127.0.0.1:8003`).
 
@@ -186,7 +184,7 @@ Standalone app — same MUI theme, no shared code with `frontend/`. It expects t
 | `SESSION_TTL_SECONDS` | Session token lifetime (auth backend; default `86400` = 1 day) |
 | `REDIS_URL` | Redis URL for the auth backend profile + session store (e.g. `redis://redis:6379/0`) |
 | `OPA_URL` | OPA decision service URL (auth backend; default `http://opa:8181`) |
-| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + Mail (`/mail`) + OpenClaw entries |
+| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + Mail (`/mail`) entries |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Web application type, Gmail API enabled) used by the mail backend to connect mailboxes — scopes `gmail.readonly` + `gmail.send` |
 | `MAIL_OAUTH_REDIRECT_URL` | Authorized redirect URI registered on the OAuth client; blank = derived from `PUBLIC_BASE_URL`, dev default `http://localhost:8000/api/mail/oauth/callback` |
 | `MAIL_DATABASE_URL` | Mail backend Postgres URL (prod compose; the dedicated `mail-db` container) |
@@ -199,9 +197,6 @@ Standalone app — same MUI theme, no shared code with `frontend/`. It expects t
 | `MONGODB_DB` | MongoDB database name for leads |
 | `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads:8001`) |
 | `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp:8003,localhost:8003,127.0.0.1:8003`) |
-| `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API (the auth backend also uses it to approve DM pairings from the hub) |
-| `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json.example`); OpenAI is used until then |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token for the OpenClaw Telegram channel |
 | `DOMAIN` | Production hostname for nginx `server_name` |
 
 ## API
@@ -228,16 +223,8 @@ Admin (role grants must cover the `auth` service):
 |---|---|---|
 | `GET/POST` | `/api/auth/admin/users` | List / create users (`{username, password, role}`) |
 | `PATCH/DELETE` | `/api/auth/admin/users/{username}` | Change role/password; delete (guards the last admin) |
-| `DELETE` | `/api/auth/admin/users/{u}/channels/{channel}/{device_id}` | Unlink a channel identity |
 | `GET/POST` | `/api/auth/admin/roles`, `DELETE /roles/{name}` | Roles with grants; changes are pushed to OPA |
 | `GET` | `/api/auth/admin/account-requests` (+ `/approve`, `/deny`) | Pending account requests |
-| `GET` | `/api/auth/admin/channel-requests` (+ `/assign`, `/deny`) | Pending channel requests; assign to an existing or new user |
-
-Internal (Docker network only — nginx never routes `/internal/*`):
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/internal/openclaw/session` | `{ channel, device_id, display_name? }` → session token for the linked profile, or 403 `{pending: true}` after recording a pending channel request |
 
 ### Search backend
 
@@ -324,9 +311,9 @@ Enrichment updates an existing document when `apollo_id` already exists (no dupl
 
 ### MCP server (internal)
 
-[MCP](https://modelcontextprotocol.io) server for internal agents (e.g. OpenClaw) — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only).
+[MCP](https://modelcontextprotocol.io) server for internal AI-agent clients — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only).
 
-**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is forwarded unchanged to the leads backend, which authorizes it per request against the auth service + OPA — so the agent acts with the authority of the profile behind the token. The OpenClaw `funnelmanager-auth` plugin fetches these tokens per channel sender. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls fall back to a shared `AUTH_USERNAME`/`AUTH_PASSWORD` login.
+**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is forwarded unchanged to the leads backend, which authorizes it per request against the auth service + OPA — so the agent acts with the authority of the profile behind the token. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls fall back to a shared `AUTH_USERNAME`/`AUTH_PASSWORD` login.
 
 All tools are read-only inspection over the leads backend (free, no Apollo calls — new searches/enrichment happen in the search app):
 
@@ -339,7 +326,7 @@ All tools are read-only inspection over the leads backend (free, no Apollo calls
 
 The transport's DNS-rebinding protection allows `mcp:8003`, `localhost:8003`, and `127.0.0.1:8003` by default — extend via `MCP_ALLOWED_HOSTS` if clients dial another hostname.
 
-Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP). Example OpenClaw/Claude-style config:
+Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP). Example config:
 
 ```json
 {
@@ -348,26 +335,3 @@ Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP).
   }
 }
 ```
-
-## OpenClaw agent
-
-The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json.example`, `skills/`, and `extensions/` are versioned; the live `openclaw.json` is seeded from the template by the `openclaw-init` compose service and then owned by the gateway — like all other runtime state it is gitignored) plus a named volume for auth-profile encryption keys.
-
-**Channel identity → profile:** the versioned `funnelmanager-auth` plugin (`openclaw/extensions/funnelmanager-auth/`) resolves each conversation's channel + sender id, fetches a session token for the linked profile from the auth service's internal endpoint (`POST /internal/openclaw/session`), and injects it as `session_token` into funnelmanager MCP tool calls (`before_tool_call`). For harnesses whose native MCP path cannot rewrite tool arguments, it also registers a `funnelmanager_session_token` agent tool the model can call and pass along explicitly. Unlinked senders are blocked and recorded as **pending channel requests**, which admins assign to a new or existing user from the hub's admin panel. Inbound messages also report the sender's identity (throttled per identity), so a chat that was paired with OpenClaw before the plugin existed still surfaces as a pending request without waiting for a tool call.
-
-**Hub-driven pairing (one-stop onboarding):** when a new DM sender triggers OpenClaw's pairing flow, the plugin reports the pairing **code** to the auth service (`POST /internal/openclaw/pairing-request`), so the request shows up in the hub with a "pairing pending" badge. The plugin also registers `POST /api/funnelmanager/pairing/approve` on the OpenClaw gateway (gateway-token auth); the auth service calls it when an admin clicks **Approve pairing** — or **Approve & assign**, which completes the pairing and links the profile in one step. This is the same approval `openclaw pairing approve <code>` performs, so no CLI is needed. Requires `OPENCLAW_GATEWAY_TOKEN` (and optionally `OPENCLAW_GATEWAY_URL`) on the auth backend. Pairing codes expire — if approval reports the code is gone, have the sender message the bot again.
-
-Skills (in `openclaw/skills/`):
-
-- `funnel-activity` — read-only activity/inspection over stored leads: recent enrichment, stats, similarity search
-- `csv`, `web-research` — ClawHub community skills (verified with `openclaw skills verify` before install) for lead-list CSV handling and cited prospect research
-
-First-run setup:
-
-1. Set in `.env` (see `.env.example`): `OPENCLAW_GATEWAY_TOKEN` (generate: `openssl rand -hex 32`) and `TELEGRAM_BOT_TOKEN` (from `@BotFather` → `/newbot`). The agent model runs on `OPENAI_API_KEY` (`openai/gpt-5.6`); Anthropic stays wired in `openclaw/openclaw.json` — set `ANTHROPIC_API_KEY` and flip `model.primary` to `anthropic/claude-opus-4-8` when you have a key.
-2. `docker compose -f docker-compose.dev.yml up -d openclaw`
-3. Web UI: open `http://localhost:18789` and paste the gateway token.
-4. Telegram: DM your bot, then approve the pairing code:
-   `docker exec funnelmanager-openclaw-1 openclaw pairing approve telegram <CODE>`
-
-Manage skills inside the container: `docker exec funnelmanager-openclaw-1 openclaw skills list|search|verify|install …` (installs land in `openclaw/skills/` and persist).

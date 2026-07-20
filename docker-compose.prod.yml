@@ -235,10 +235,6 @@ services:
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OPA_URL: ${OPA_URL:-http://opa:8181}
-      # Lets the hub approve OpenClaw DM pairing requests (route registered
-      # by the funnelmanager-auth plugin, authenticated with the gateway token).
-      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-http://openclaw:18789}
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       # JSON list of hub apps: [{"name": ..., "description": ..., "url": ...}]
       WEB_APPS: ${WEB_APPS:-}
       CORS_ORIGINS: ${CORS_ORIGINS}
@@ -257,14 +253,14 @@ services:
     mem_limit: 1g
     environment:
       # Shared-login fallback for tokenless MCP calls is OFF by default in
-      # prod — identity comes from the OpenClaw harness's per-profile session
-      # tokens. Set MCP_SHARED_LOGIN_FALLBACK=true to restore the old behavior.
+      # prod — clients must pass a per-profile session token. Set
+      # MCP_SHARED_LOGIN_FALLBACK=true to restore the old behavior.
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-false}
       AUTH_USERNAME: ${AUTH_USERNAME}
       AUTH_PASSWORD: ${AUTH_PASSWORD}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
       AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
-    # Loopback-only publish: host-local MCP clients (e.g. OpenClaw) can reach
+    # Loopback-only publish: host-local MCP clients can reach
     # http://127.0.0.1:8003/mcp, the internet cannot. Drop the ports block to
     # keep it Docker-network-only; nginx never routes to it. PROD_MCP_PORT lets a
     # second (coexisting) stack avoid a host-port clash with another deployment.
@@ -275,55 +271,6 @@ services:
     depends_on:
       - leads
       - auth
-
-  # Seeds openclaw.json from the template when missing. The live config is
-  # runtime state (the gateway writes per-user agents/bindings into it via the
-  # funnelmanager-auth sync route); the state dir must carry
-  # openclaw.json.example alongside skills/ and extensions/ (see
-  # deploy/README.md).
-  openclaw-init:
-    image: busybox:stable
-    profiles:
-      - agent
-    # Match the openclaw container's node uid so the seeded file stays
-    # writable by the gateway.
-    user: "1000:1000"
-    volumes:
-      - ${OPENCLAW_STATE_DIR:-./openclaw}:/state
-    command: sh -c 'test -f /state/openclaw.json || cp /state/openclaw.json.example /state/openclaw.json'
-
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
-    restart: unless-stopped
-    mem_limit: 3g
-    # Opt-in in prod: `docker compose --profile agent up -d` starts the agent.
-    # Kept off by default so a coexisting stack does not run a second Telegram
-    # poller against the same bot token. Give prod its own TELEGRAM_BOT_TOKEN
-    # before enabling.
-    profiles:
-      - agent
-    environment:
-      OPENCLAW_GATEWAY_BIND: lan
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
-      # Agent model: OpenAI today; Anthropic stays wired in openclaw.json for
-      # when ANTHROPIC_API_KEY is available.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-    volumes:
-      # State dir must exist next to this compose file (or point elsewhere via
-      # OPENCLAW_STATE_DIR) — there is no source checkout to provide it.
-      - ${OPENCLAW_STATE_DIR:-./openclaw}:/home/node/.openclaw
-      - openclaw_auth:/home/node/.config/openclaw
-    # Loopback-only: open the Control UI via an SSH tunnel or put a TLS
-    # reverse proxy in front. Telegram is outbound-only and needs no port.
-    ports:
-      - "${HOST_BIND:-127.0.0.1:}${PROD_OPENCLAW_PORT:-18789}:18789"
-    depends_on:
-      mcp:
-        condition: service_started
-      openclaw-init:
-        condition: service_completed_successfully
 
   frontend:
     image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}
@@ -351,4 +298,3 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
-  openclaw_auth:
