@@ -18,10 +18,10 @@ class Settings(BaseSettings):
 
     # Request auth is delegated to the auth service; this backend validates
     # incoming session tokens against it and issues no tokens of its own.
-    auth_backend_url: str = "http://auth-backend:8002"
+    auth_backend_url: str = "http://auth:8002"
 
     # Internal URL for the leads service (Apollo lives there).
-    leads_backend_url: str = "http://leads-backend:8001"
+    leads_backend_url: str = "http://leads:8001"
     database_url: str = "postgresql+asyncpg://funnel:funnel@localhost:5432/funnelmanager"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost"
 

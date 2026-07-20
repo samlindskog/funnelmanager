@@ -41,7 +41,7 @@ const EMPTY_OBJECT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-const DEFAULT_AUTH_BACKEND_URL = "http://auth-backend:8002";
+const DEFAULT_AUTH_BACKEND_URL = "http://auth:8002";
 
 // Tool names served by the funnelmanager MCP server. Projections may prefix
 // them (server name, mcp__ namespace, ...), so matching also accepts known

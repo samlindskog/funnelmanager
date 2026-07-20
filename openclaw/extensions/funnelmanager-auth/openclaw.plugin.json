@@ -14,7 +14,7 @@
     "properties": {
       "authBackendUrl": {
         "type": "string",
-        "description": "Base URL of the Funnel Manager auth service (internal endpoint). Default: http://auth-backend:8002"
+        "description": "Base URL of the Funnel Manager auth service (internal endpoint). Default: http://auth:8002"
       }
     }
   }

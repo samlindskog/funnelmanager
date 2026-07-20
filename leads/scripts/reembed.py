@@ -1,8 +1,8 @@
 """Rebuild the Milvus collection from Mongo docs already marked embedding=True.
 
-Run inside the leads-backend container (CWD /app):
+Run inside the leads container (CWD /app):
 
-    docker compose ... exec leads-backend python scripts/reembed.py
+    docker compose ... exec leads python scripts/reembed.py
 
 Drops and recreates the collection, then re-embeds every lead whose Mongo doc
 has ``embedding: true``. Mongo is the source of truth, so this is safe to run

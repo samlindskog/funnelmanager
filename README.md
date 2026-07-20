@@ -24,6 +24,8 @@ Apollo person/company search + enrichment platform, driven primarily through an 
 
 ## Authorization model
 
+The full endpoint-by-endpoint reference (access tiers, internal `/internal/*` surface, OPA mechanics, and how the browser / internal services / the agent interface with auth) lives in [`docs/authentication.md`](docs/authentication.md).
+
 - **Profiles** live in the auth backend (Redis): username, bcrypt password hash, one **role**, linked channels.
 - **Roles** carry **grants**: `{service, methods, path_prefix}` rows (service is `auth` / `search` / `leads` / `*`). The built-in `admin` role grants everything and cannot be deleted; more roles can be created in the hub UI.
 - The auth backend pushes the Rego policy + role grants to **OPA** at startup, on every role change, and periodically (self-heals OPA restarts).
@@ -53,12 +55,19 @@ nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth
 
 The MCP server listens at `http://localhost:8003/mcp` in dev (streamable HTTP). nginx never routes to it; in prod it is published on loopback only (`127.0.0.1:8003`).
 
+One short name per backend is used everywhere — source directory, compose
+service, container / DNS name, GHCR image, and API prefix all match: `auth`
+(`/api/auth`), `search` (`/api/search`), `leads` (`/api/leads`), and `mcp`
+(internal `/mcp`).
+
 Source is bind-mounted:
 
-- `./backend` → search backend container
-- `./leads-backend` → leads backend container
-- `./frontend` → frontend container (with a named volume for `node_modules`)
-- `./frontend/nginx.dev.conf` → nginx container
+- `./search` → `search` container
+- `./leads` → `leads` container
+- `./auth` → `auth` container
+- `./mcp` → `mcp` container
+- `./frontend` → `frontend` container (with a named volume for `node_modules`)
+- `./frontend/nginx.dev.conf` → `nginx` container
 
 Default login: `admin` / `admin` (the bootstrap admin user — created on first
 startup from `AUTH_USERNAME` / `AUTH_PASSWORD`, then managed like any other
@@ -87,7 +96,7 @@ Point your DNS A/AAAA record for `${DOMAIN}` at the host. Put TLS in front (Clou
 ### Search backend
 
 ```bash
-cd backend
+cd search
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -100,7 +109,7 @@ uvicorn app.main:app --reload --port 8000
 ### Leads backend
 
 ```bash
-cd leads-backend
+cd leads
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -112,7 +121,7 @@ uvicorn app.main:app --reload --port 8001
 ### Auth backend
 
 ```bash
-cd auth-backend
+cd auth
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -124,7 +133,7 @@ uvicorn app.main:app --reload --port 8002
 ### MCP server
 
 ```bash
-cd mcp-server
+cd mcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -153,15 +162,15 @@ Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default 
 | `REDIS_URL` | Redis URL for the auth backend profile + session store (e.g. `redis://redis:6379/0`) |
 | `OPA_URL` | OPA decision service URL (auth backend; default `http://opa:8181`) |
 | `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + OpenClaw entries |
-| `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth-backend:8002`) |
+| `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth:8002`) |
 | `MCP_SHARED_LOGIN_FALLBACK` | MCP server: allow tokenless tool calls to fall back to the shared login (dev compose: `true`; prod default: `false`) |
 | `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |
 | `DATABASE_URL` | Async SQLAlchemy URL (`postgresql+asyncpg://...`) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres bootstrap (compose) |
 | `MONGODB_URL` | MongoDB connection URL |
 | `MONGODB_DB` | MongoDB database name for leads |
-| `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads-backend:8001`) |
-| `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp-server:8003,localhost:8003,127.0.0.1:8003`) |
+| `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads:8001`) |
+| `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp:8003,localhost:8003,127.0.0.1:8003`) |
 | `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API (the auth backend also uses it to approve DM pairings from the hub) |
 | `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json`); OpenAI is used until then |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for the OpenClaw Telegram channel |
@@ -280,7 +289,7 @@ All tools are read-only inspection over the leads backend (free, no Apollo calls
 | `get_leads` | leads `POST /api/leads` | Batch hydrate by Mongo `_id` (compact summaries; `include_raw` for full docs) |
 | `similarity_search` | leads `POST /api/leads/similarity-search` | Semantic search over stored leads (no Apollo call, no history row) |
 
-The transport's DNS-rebinding protection allows `mcp-server:8003`, `localhost:8003`, and `127.0.0.1:8003` by default — extend via `MCP_ALLOWED_HOSTS` if clients dial another hostname.
+The transport's DNS-rebinding protection allows `mcp:8003`, `localhost:8003`, and `127.0.0.1:8003` by default — extend via `MCP_ALLOWED_HOSTS` if clients dial another hostname.
 
 Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP). Example OpenClaw/Claude-style config:
 

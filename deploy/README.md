@@ -113,7 +113,7 @@ scripts (untracked, present on both boxes) reconcile them:
   the other box whose vector never synced, AND `embedding:false` docs never
   embedded anywhere. Marks each `embedding:true` afterward. Bounded by local Milvus
   membership, so it's idempotent and only spends OpenAI on true gaps. Contrast
-  `leads-backend/scripts/reembed.py`, which DROPS and rebuilds the whole collection.
+  `leads/scripts/reembed.py`, which DROPS and rebuilds the whole collection.
 
 `mongo-union-sync.sh` **auto-runs `embed-reconcile.sh`** on whichever box(es)
 received data (local for `pull`, peer for `push`, both for `both`); set
@@ -136,7 +136,7 @@ Defenses now in place:
   container gets OOM-killed inside its cgroup (and restarted by its restart
   policy) instead of stalling the host.
 - Prod (usfr2, sole stack) caps are sized up for the 8GB box: Milvus 3G,
-  Mongo/leads-backend 1.5G, MCP 1G, etc. Mongo runs `--wiredTigerCacheSizeGB 0.5`
+  Mongo/leads 1.5G, MCP 1G, etc. Mongo runs `--wiredTigerCacheSizeGB 0.5`
   (default assumes ~50% of host RAM per mongod). Milvus reads its cgroup limit
   and scales its internal watermarks accordingly.
 - Dev (usfr3, 4GB) keeps the tighter caps from `docker-compose.dev.yml`; the 6GB

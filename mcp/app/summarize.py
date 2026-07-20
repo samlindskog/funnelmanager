@@ -1,4 +1,4 @@
-"""Compact summaries of leads-backend documents for MCP tool output.
+"""Compact summaries of leads-service documents for MCP tool output.
 
 Raw ``LeadOut`` docs carry every endpoint-keyed Apollo payload and can run to
 hundreds of KB per lead. Tools return these summaries by default and only

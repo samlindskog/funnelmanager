@@ -21,7 +21,7 @@
   "mcp": {
     "servers": {
       "funnelmanager": {
-        "url": "http://mcp-server:8003/mcp",
+        "url": "http://mcp:8003/mcp",
         "transport": "streamable-http",
         "supportsParallelToolCalls": true
       }
@@ -32,7 +32,7 @@
       "funnelmanager-auth": {
         "enabled": true,
         "config": {
-          "authBackendUrl": "http://auth-backend:8002"
+          "authBackendUrl": "http://auth:8002"
         }
       }
     }

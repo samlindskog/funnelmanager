@@ -13,7 +13,7 @@ server {
 
     # Apollo async webhooks → leads directly (secret-authenticated; no JWT).
     location /api/leads/webhooks/ {
-        proxy_pass http://leads-backend:8001/api/leads/webhooks/;
+        proxy_pass http://leads:8001/api/leads/webhooks/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -25,7 +25,7 @@ server {
 
     # Auth/login/session issuance → auth backend (longest-prefix wins over /api/).
     location /api/auth/ {
-        proxy_pass http://auth-backend:8002/api/auth/;
+        proxy_pass http://auth:8002/api/auth/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -37,7 +37,7 @@ server {
 
     # Search backend routes live under /api/search/. Remaining leads routes stay internal.
     location /api/search/ {
-        proxy_pass http://backend:8000/api/search/;
+        proxy_pass http://search:8000/api/search/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

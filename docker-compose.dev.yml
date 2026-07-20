@@ -105,9 +105,9 @@ services:
       - etcd
       - minio
 
-  backend:
+  search:
     build:
-      context: ./backend
+      context: ./search
       dockerfile: Dockerfile.dev
     mem_limit: 512m
     env_file:
@@ -115,23 +115,23 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@db:5432/${POSTGRES_DB:-funnelmanager}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
-      LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
+      LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
     volumes:
-      - ./backend:/app
+      - ./search:/app
     expose:
       - "8000"
     depends_on:
       db:
         condition: service_healthy
-      leads-backend:
+      leads:
         condition: service_started
-      auth-backend:
+      auth:
         condition: service_started
 
-  leads-backend:
+  leads:
     build:
-      context: ./leads-backend
+      context: ./leads
       dockerfile: Dockerfile.dev
     # Highest app cap: serializing enriched Apollo docs (~5MB JSON per 100
     # leads) through pydantic spikes well past idle usage.
@@ -141,13 +141,13 @@ services:
     environment:
       MONGODB_URL: mongodb://mongo:27017
       MONGODB_DB: ${MONGODB_DB:-funnelmanager_leads}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       MILVUS_COLLECTION: ${MILVUS_COLLECTION:-leads_people}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
     volumes:
-      - ./leads-backend:/app
+      - ./leads:/app
     expose:
       - "8001"
     depends_on:
@@ -165,9 +165,9 @@ services:
     expose:
       - "8181"
 
-  auth-backend:
+  auth:
     build:
-      context: ./auth-backend
+      context: ./auth
       dockerfile: Dockerfile.dev
     mem_limit: 256m
     env_file:
@@ -183,7 +183,7 @@ services:
       WEB_APPS: ${WEB_APPS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
     volumes:
-      - ./auth-backend:/app
+      - ./auth:/app
     expose:
       - "8002"
     depends_on:
@@ -192,29 +192,29 @@ services:
       opa:
         condition: service_started
 
-  mcp-server:
+  mcp:
     build:
-      context: ./mcp-server
+      context: ./mcp
       dockerfile: Dockerfile.dev
     # Parses full lead payloads before summarizing for agents; give it spike room.
     mem_limit: 768m
     env_file:
       - .env
     environment:
-      LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads-backend:8001}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth-backend:8002}
+      LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
+      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
       # Dev convenience: tool calls without a session token fall back to the
       # shared AUTH_USERNAME/AUTH_PASSWORD login. Keep off in prod.
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-true}
     volumes:
-      - ./mcp-server:/app
+      - ./mcp:/app
     # Internal MCP endpoint (streamable HTTP at /mcp) for agents like OpenClaw.
     # Published for host-local MCP clients in dev; never routed through nginx.
     ports:
       - "${HOST_BIND:-}8003:8003"
     depends_on:
-      - leads-backend
-      - auth-backend
+      - leads
+      - auth
 
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
@@ -237,11 +237,11 @@ services:
       # Auth-profile encryption keys — keep out of the repo dir entirely.
       - openclaw_auth_dev:/home/node/.config/openclaw
     # Control UI / gateway WebSocket. Reaches funnelmanager MCP at
-    # http://mcp-server:8003/mcp over the compose network.
+    # http://mcp:8003/mcp over the compose network.
     ports:
       - "${HOST_BIND:-}18789:18789"
     depends_on:
-      - mcp-server
+      - mcp
 
   frontend:
     build:
@@ -261,8 +261,8 @@ services:
     expose:
       - "5173"
     depends_on:
-      - backend
-      - leads-backend
+      - search
+      - leads
 
   nginx:
     image: nginx:1.27-alpine
@@ -276,9 +276,9 @@ services:
       - "${HOST_BIND:-}8000:80"
     depends_on:
       - frontend
-      - backend
-      - leads-backend
-      - auth-backend
+      - search
+      - leads
+      - auth
 
 volumes:
   postgres_data_dev:
