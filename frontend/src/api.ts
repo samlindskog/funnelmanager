@@ -1,26 +1,16 @@
+import { clearTokens, config, getAccessToken } from './oidc'
 import type {
-  AccountRequest,
   ApolloRecord,
   AppLink,
   EntityType,
-  Grant,
-  Role,
   SearchHistoryDetail,
   SearchHistorySummary,
   SearchResponse,
-  User,
-  UserDetail,
 } from './types'
 
-const TOKEN_KEY = 'fm_token'
-
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
-}
-
-export function setToken(token: string | null) {
-  if (token) localStorage.setItem(TOKEN_KEY, token)
-  else localStorage.removeItem(TOKEN_KEY)
+/** Current access token (transparently refreshed via the OIDC session). */
+export function getToken(): Promise<string | null> {
+  return getAccessToken()
 }
 
 type UnauthorizedListener = () => void
@@ -37,7 +27,7 @@ export function onUnauthorized(listener: UnauthorizedListener): () => void {
 }
 
 function handleUnauthorized(): ApiError {
-  setToken(null)
+  clearTokens()
   for (const listener of unauthorizedListeners) listener()
   return new ApiError(401, 'Unauthorized', 'Unauthorized')
 }
@@ -72,7 +62,7 @@ function detailMessage(detail: unknown, fallback: string): string {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  const token = getToken()
+  const token = await getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
@@ -101,136 +91,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Session
+// Hub apps — static per-environment config (identity lives in Keycloak now,
+// so there is no auth service to serve this list)
 // ---------------------------------------------------------------------------
 
-export async function login(username: string, password: string): Promise<string> {
-  const body = new URLSearchParams()
-  body.set('username', username)
-  body.set('password', password)
-  const data = await request<{ access_token: string }>('/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  })
-  setToken(data.access_token)
-  return data.access_token
-}
+const DEFAULT_APPS: AppLink[] = [
+  { name: 'Search', description: 'Apollo person/company search', url: '/search' },
+  { name: 'Mail', description: 'Google Workspace inboxes & sending', url: '/mail/' },
+]
 
-export async function fetchMe(): Promise<User> {
-  return request<User>('/api/auth/me')
-}
-
-/** Best-effort server-side session revoke. Failures are ignored — the caller
- * clears the local token regardless, so the user is logged out either way. */
-export async function apiLogout(): Promise<void> {
-  const token = getToken()
-  if (!token) return
-  try {
-    await fetch('/api/auth/logout', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-  } catch {
-    /* ignore — logout is best-effort */
-  }
-}
-
-export async function requestAccount(username: string): Promise<void> {
-  await request<{ status: string }>('/api/auth/request-account', {
-    method: 'POST',
-    body: JSON.stringify({ username }),
-  })
-}
-
-export async function fetchApps(): Promise<AppLink[]> {
-  return request<AppLink[]>('/api/auth/apps')
-}
-
-// ---------------------------------------------------------------------------
-// Admin — users
-// ---------------------------------------------------------------------------
-
-export async function listUsers(): Promise<UserDetail[]> {
-  return request<UserDetail[]>('/api/auth/admin/users')
-}
-
-export async function createUser(
-  username: string,
-  password: string,
-  role: string,
-): Promise<UserDetail> {
-  return request<UserDetail>('/api/auth/admin/users', {
-    method: 'POST',
-    body: JSON.stringify({ username, password, role }),
-  })
-}
-
-export async function updateUser(
-  username: string,
-  fields: { password?: string; role?: string },
-): Promise<UserDetail> {
-  return request<UserDetail>(`/api/auth/admin/users/${encodeURIComponent(username)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(fields),
-  })
-}
-
-export async function deleteUser(username: string): Promise<void> {
-  await request<void>(`/api/auth/admin/users/${encodeURIComponent(username)}`, {
-    method: 'DELETE',
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Admin — roles
-// ---------------------------------------------------------------------------
-
-export async function listRoles(): Promise<Role[]> {
-  return request<Role[]>('/api/auth/admin/roles')
-}
-
-export async function createRole(
-  name: string,
-  description: string,
-  grants: Grant[],
-): Promise<Role> {
-  return request<Role>('/api/auth/admin/roles', {
-    method: 'POST',
-    body: JSON.stringify({ name, description, grants }),
-  })
-}
-
-export async function deleteRole(name: string): Promise<void> {
-  await request<void>(`/api/auth/admin/roles/${encodeURIComponent(name)}`, {
-    method: 'DELETE',
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Admin — pending requests
-// ---------------------------------------------------------------------------
-
-export async function listAccountRequests(): Promise<AccountRequest[]> {
-  return request<AccountRequest[]>('/api/auth/admin/account-requests')
-}
-
-export async function approveAccountRequest(
-  username: string,
-  password: string,
-  role: string,
-): Promise<UserDetail> {
-  return request<UserDetail>('/api/auth/admin/account-requests/approve', {
-    method: 'POST',
-    body: JSON.stringify({ username, password, role }),
-  })
-}
-
-export async function denyAccountRequest(username: string): Promise<void> {
-  await request<void>('/api/auth/admin/account-requests/deny', {
-    method: 'POST',
-    body: JSON.stringify({ username }),
-  })
+export function fetchApps(): AppLink[] {
+  const apps = config().apps
+  return Array.isArray(apps) && apps.length
+    ? apps.map((app) => ({ description: '', ...app }))
+    : DEFAULT_APPS
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +182,7 @@ export async function runSearch(
     typeof handlers === 'function' ? { onProgress: handlers } : handlers
 
   const headers = new Headers()
-  const token = getToken()
+  const token = await getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/x-ndjson')
@@ -499,7 +373,7 @@ async function consumePeopleProgressStream(
   if (signal?.aborted) return
 
   const headers = new Headers()
-  const token = getToken()
+  const token = await getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/x-ndjson')

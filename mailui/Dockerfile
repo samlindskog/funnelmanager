@@ -16,4 +16,9 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 COPY --from=build /app/dist /usr/share/nginx/html/mail
 
+# Regenerates /mail/config.js from FRONTEND_OIDC_* env at container start.
+COPY docker-entrypoint.sh /docker-entrypoint-mailui.sh
+RUN chmod +x /docker-entrypoint-mailui.sh
+ENTRYPOINT ["/docker-entrypoint-mailui.sh"]
+
 EXPOSE 80

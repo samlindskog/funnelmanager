@@ -1,27 +1,22 @@
 /** Mail app API client.
  *
- * The app is served same-origin at /mail/, so it shares the hub's session
- * token (localStorage `fm_token`). There is no login page here — an expired
- * or missing session sends the browser back to the hub's /login.
+ * The app is served same-origin at /mail/ and shares the hub's Keycloak OIDC
+ * session (localStorage fm_oidc_* keys) — whichever app is open refreshes it.
+ * There is no login form here: a missing/expired session redirects straight
+ * to Keycloak and returns to /mail/ afterwards.
  */
 
+import { beginLogin, clearTokens, getAccessToken, logout as oidcLogout } from './oidc'
 import type {
   MailAccount,
   MailAttachment,
   MailMessageDetail,
   MailMessagePage,
   MailSendRequest,
-  User,
 } from './types'
 
-const TOKEN_KEY = 'fm_token'
-
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
-}
-
 export function redirectToLogin(): void {
-  window.location.href = '/login'
+  void beginLogin('/mail/')
 }
 
 export class ApiError extends Error {
@@ -54,15 +49,15 @@ function detailMessage(detail: unknown, fallback: string): string {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  const token = getToken()
+  const token = await getAccessToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const response = await fetch(path, { ...init, headers })
-  // Session expired/revoked (or never present) — back to the hub login.
+  // Session expired/revoked beyond refresh (or never present) — sign in again.
   if (response.status === 401) {
-    localStorage.removeItem(TOKEN_KEY)
+    clearTokens()
     redirectToLogin()
     throw new ApiError(401, 'Unauthorized', 'Unauthorized')
   }
@@ -81,28 +76,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Session (issued/managed by the hub; consumed here)
+// Session (Keycloak OIDC, shared same-origin with the hub)
 // ---------------------------------------------------------------------------
 
-export async function fetchMe(): Promise<User> {
-  return request<User>('/api/auth/me')
-}
-
-/** Best-effort server-side revoke, then back to the hub login. */
-export async function logout(): Promise<void> {
-  const token = getToken()
-  if (token) {
-    try {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-    } catch {
-      /* ignore — logout is best-effort */
-    }
-  }
-  localStorage.removeItem(TOKEN_KEY)
-  redirectToLogin()
+/** RP-initiated logout: ends the Keycloak session and leaves this app. */
+export function logout(): void {
+  oidcLogout()
 }
 
 // ---------------------------------------------------------------------------
@@ -165,13 +144,13 @@ export async function downloadMailAttachment(
   messageId: number,
   attachment: MailAttachment,
 ): Promise<void> {
-  const token = getToken()
+  const token = await getAccessToken()
   const response = await fetch(
     `/api/mail/messages/${messageId}/attachments/${encodeURIComponent(attachment.attachment_id)}`,
     { headers: token ? { Authorization: `Bearer ${token}` } : undefined },
   )
   if (response.status === 401) {
-    localStorage.removeItem(TOKEN_KEY)
+    clearTokens()
     redirectToLogin()
     return
   }

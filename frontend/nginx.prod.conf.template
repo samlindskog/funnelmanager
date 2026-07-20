@@ -23,18 +23,6 @@ server {
         proxy_buffering off;
     }
 
-    # Auth/login/session issuance → auth backend (longest-prefix wins over /api/).
-    location /api/auth/ {
-        proxy_pass http://auth:8002/api/auth/;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 60s;
-        proxy_buffering off;
-    }
-
     # Search backend routes live under /api/search/. Remaining leads routes stay internal.
     location /api/search/ {
         proxy_pass http://search:8000/api/search/;

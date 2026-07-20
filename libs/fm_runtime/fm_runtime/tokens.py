@@ -79,6 +79,9 @@ class TokenBroker:
         if not self.settings.exchange_enabled:
             return subject_token or ""
 
+        # The svc-<audience> optional client scope carries the audience mapper;
+        # Keycloak only honors the audience request when it is in scope.
+        scope = self.settings.exchange_scope_template.format(audience=audience)
         if subject_token:
             key = "x:" + hashlib.sha256(subject_token.encode()).hexdigest() + ":" + audience
             form = {
@@ -87,10 +90,11 @@ class TokenBroker:
                 "subject_token_type": TOKEN_TYPE_ACCESS,
                 "requested_token_type": TOKEN_TYPE_ACCESS,
                 "audience": audience,
+                "scope": scope,
             }
         else:
             key = "cc:" + audience
-            form = {"grant_type": GRANT_CLIENT_CREDENTIALS, "audience": audience}
+            form = {"grant_type": GRANT_CLIENT_CREDENTIALS, "scope": scope}
 
         cached = self._cache.get(key)
         if cached and cached.fresh:

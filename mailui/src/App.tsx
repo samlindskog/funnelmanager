@@ -1,28 +1,43 @@
 import { Box, CircularProgress, CssBaseline, ThemeProvider, Typography } from '@mui/material'
 import { useEffect, useState } from 'react'
-import { fetchMe, getToken, redirectToLogin } from './api'
+import { redirectToLogin } from './api'
 import { MailApp } from './MailApp'
+import { beginLogin, completeLogin, currentClaims, getAccessToken, hasSession } from './oidc'
 import { theme } from './theme'
 import type { User } from './types'
 
-/** Auth gate: the session is issued by the hub (same origin), we only consume
- * it. No token or a 401 sends the browser back to the hub's /login. */
+/** Auth gate: the Keycloak OIDC session is shared same-origin with the hub.
+ * No session -> straight to Keycloak (back to /mail/ afterwards). This app
+ * also handles its own /mail/callback so a direct visit works without the
+ * hub. */
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!getToken()) {
-      redirectToLogin()
-      return
-    }
-    fetchMe()
-      .then(setUser)
-      .catch((err: unknown) => {
-        // A 401 already redirected to /login inside request(); anything else
-        // (auth service down) is worth surfacing instead of spinning forever.
-        setError(err instanceof Error ? err.message : 'Could not load your session')
+    async function bootstrap() {
+      if (window.location.pathname.endsWith('/callback')) {
+        const returnTo = await completeLogin()
+        window.history.replaceState(null, '', returnTo || '/mail/')
+      }
+      if (!hasSession()) {
+        void beginLogin('/mail/')
+        return
+      }
+      await getAccessToken() // refresh if stale
+      const claims = currentClaims()
+      if (!claims) {
+        redirectToLogin()
+        return
+      }
+      setUser({
+        username: claims.username,
+        role: claims.roles.includes('admin') ? 'admin' : '',
       })
+    }
+    bootstrap().catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : 'Could not load your session')
+    })
   }, [])
 
   return (

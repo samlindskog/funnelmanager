@@ -1,72 +1,100 @@
 # Authentication & Authorization
 
-**Authentication** is centralized in the auth service using **server-side opaque sessions** stored in Redis — no JWTs. **Authorization** is **role grants evaluated by OPA**; the auth service is the only thing that talks to OPA (it owns and pushes the policy). Every other service holds zero identity state and is a pure enforcement point: for each incoming request it asks the auth service one question — `POST /api/auth/authorize` — and obeys the answer. Decisions **fail closed**. The same bearer token rides every hop (browser → search, search → leads, MCP → leads), so each hop independently re-authorizes the same end user.
+**Keycloak is the sole identity provider** (one realm, `funnelmanager`): humans
+authenticate with the OIDC auth-code + PKCE flow, machine/AI agents are
+confidential clients using client credentials, and delegation between services
+uses **RFC 8693 token exchange**. Authorization is enforced by the platform —
+in the k3s deployment, Istio validates JWTs and mTLS workload identities and
+routes every request through **OPA (ext_authz)**; the applications themselves
+only *consume* identity through the shared `fm_runtime` middleware.
 
-## Trust boundaries (what nginx exposes)
+Every request carries **two identities**:
 
-nginx is the only public entry:
+1. **The originating principal** — a JWT (`sub`, `preferred_username`,
+   `realm_access.roles`) issued by Keycloak. On internal hops the token is
+   *exchanged*, never forwarded: the target-service audience replaces the
+   caller's, and `azp` records the client that performed the exchange.
+2. **The calling workload** — the mTLS SPIFFE identity of the pod making the
+   call (Envoy forwards it in `x-forwarded-client-cert`; `fm_runtime` parses
+   it for logging, OPA enforces on it).
 
-| Location | Upstream |
-|---|---|
-| `/api/auth/` | `auth:8002` |
-| `/api/search/` | `search:8000` |
-| `/api/leads/webhooks/` | `leads:8001` (the *only* leads path exposed) |
-| `/` | frontend (Vite in dev, built SPA in prod) |
+## Per-hop audiences and token exchange
 
-Deliberately **never routed**: the rest of `/api/leads/*`, OPA, Redis, and `/mcp` (published on host `:8003` in dev, loopback-only in prod).
+Each service only accepts JWTs whose `aud` names it (`search`, `leads`,
+`mail`, `mcp` — checked by Istio/OPA and again by `fm_runtime`). To call
+another service, a client exchanges its inbound token at Keycloak for a
+token with the target's audience:
 
-## Endpoint inventory
+- The realm defines client scopes `svc-<service>` (an audience mapper per
+  service). A client may exchange toward a target **only if it holds that
+  optional scope** — the one-hop pairing allowlist lives in the realm:
+  `search → leads`, `mcp → leads`, `agent-example → mcp`. Anything else
+  (e.g. `mail → leads`) is refused by Keycloak itself.
+- `fm_runtime`'s `TokenBroker` performs the exchange
+  (`grant_type=token-exchange`, `audience=<target>`, `scope=svc-<target>`)
+  and caches results per (subject, audience) — never once per request.
+  Calls made without an inbound principal (background jobs) use a
+  client-credentials token: the service acts as itself.
+- Keycloak 26.2's standard token exchange keeps the subject (`sub`,
+  `preferred_username`, roles) and stamps the exchanging client into `azp`.
+  It does **not** emit nested RFC 8693 `act` chains; `fm_runtime` parses
+  `act` when present (future-proof), and OPA combines `azp` with the mTLS
+  workload identity for delegation constraints.
 
-### Auth service — public surface (`/api/auth/*`), three access tiers
+## What each application does (fm_runtime)
 
-**Tier 1 — anonymous** (`auth/app/routers/auth.py`):
-
-| Endpoint | What it does |
-|---|---|
-| `POST /api/auth/login` | OAuth2 form → bcrypt check (timing-equalized dummy verify on unknown usernames) → mints a random token (`secrets.token_urlsafe(32)`), stored at `session:<token>` in Redis with native TTL (`SESSION_TTL_SECONDS`, default 1 day) |
-| `POST /api/auth/request-account` | Always answers 202 (no username enumeration); pending set capped at 500 |
-| `GET /api/auth/health` | Liveness |
-
-**Tier 2 — any valid session** (the token in the request *is* the credential):
-
-| Endpoint | What it does |
-|---|---|
-| `GET /api/auth/me` | Token → `{username, role}` |
-| `GET /api/auth/apps` | Hub app list from `WEB_APPS` (default: Search at `/search` + Mail at `/mail/`) |
-| `POST /api/auth/logout` | Deletes the Redis session key — instant revocation |
-| `POST /api/auth/validate` | Body `{token}` → introspection for other backends |
-| **`POST /api/auth/authorize`** | **The** endpoint: `{token, service, method, path}` → resolve session (401 if dead/expired) → OPA decision → `{allowed, username, role}`; **503 when OPA is unreachable (fail closed)** |
-
-**Tier 3 — OPA-gated admin** (`require_authorized` in `auth/app/security.py` — auth gates *itself* through the same authorize mechanism, service `"auth"`):
-
-- Users: `GET|POST /api/auth/admin/users`, `PATCH|DELETE .../users/{username}` (self-delete + last-admin guards serialized under a write lock)
-- Roles: `GET|POST /api/auth/admin/roles`, `DELETE .../roles/{name}` (admin role undeletable; in-use undeletable; every change re-pushed to OPA)
-- Requests: `GET .../account-requests` + `approve`/`deny`
-
-### OPA (`:8181`, auth-only client — `auth/app/opa.py`)
-
-`PUT /v1/policies/funnelmanager`, `PUT /v1/data/funnelmanager/roles`, `POST /v1/data/funnelmanager/authz/allow`. Auth pushes at startup, on role changes, every 60 s, and re-pushes when a decision comes back undefined (OPA restarted → self-heals). Grants are `{service, methods, path_prefix}` with `"*"` wildcards; path matching is exact or **segment-boundary** prefix (`/api/search/search` does *not* authorize `/api/search/searches`).
-
-### Search service (`/api/search/*`, service name `search`)
-
-All routes carry `Depends(get_current_user)` (`search/app/auth.py`): extract bearer → `authorize(service="search")` → 401 / 403 (`allowed: false`) / 503 (auth down). Only `GET /api/search/health` is anonymous. Every route also constructs `LeadsClient(settings, token)` with the caller's raw bearer, so **leads re-authorizes the same user** — including NDJSON streams and detached ingest jobs, which capture the token for the job's lifetime.
-
-### Leads service (`/api/leads/*`, service name `leads`, internal except webhooks)
-
-One **router-level** dependency (`enforce_authorization`, `leads/app/auth.py`) covers every route: missing bearer → 401, else `authorize(service="leads")`. The dependency itself exempts exactly `GET /api/leads/health` and `/api/leads/webhooks/*`. The webhook (`POST /api/leads/webhooks/apollo[/{secret}]`) refuses to serve (503) unless `APOLLO_WEBHOOK_SECRET` is configured, and does a constant-time compare of the path/query secret — Apollo cannot send bearer tokens, so this is the one secret-in-path exception.
-
-### MCP server (`:8003`)
-
-`/mcp` is the MCP protocol mount (not REST; Host-header allowlist `mcp:8003,localhost:8003,127.0.0.1:8003`); `GET /health` anonymous. Per-tool-call token priority: ① `session_token` tool argument → ② `Authorization: Bearer` on the `/mcp` request → ③ shared-login fallback **only** when `MCP_SHARED_LOGIN_FALLBACK=true` (dev). The fallback token is transparently re-minted on 401; explicit tokens never are — those errors surface to the agent with instructions to fetch a fresh one.
+- `PrincipalMiddleware` parses the forwarded JWT into a `Principal`
+  available to every handler (contextvar + `request.state`). In-mesh it
+  parses without verifying (Istio `RequestAuthentication` already did);
+  outside the mesh (docker-compose dev) `FM_JWT_VERIFY=true` turns on full
+  JWKS verification. Wrong/missing audience ⇒ 401.
+- Routes annotated `@anonymous("reason")` tolerate an absent principal.
+  That annotation is the **single source of truth** for the
+  public-anonymous allowlist (exported with `python -m fm_runtime.export`,
+  consumed by the OPA policy data):
+  - leads: `POST /api/leads/webhooks/apollo[/{secret}]` — Apollo cannot send
+    bearer tokens; constant-time secret compare, 503 when unconfigured.
+  - mail: `GET /api/mail/oauth/callback` — Google redirect; single-use
+    state row (10-min TTL) bound to the user who minted it.
+  - every service: `/healthz`, `/readyz`, `/metrics`, legacy `/health` —
+    kubelet probes and Prometheus scrapes are cluster-internal.
+- All outbound internal calls go through the broker-backed clients
+  (`LeadsClient` in search, `LeadsBackendClient` in mcp) — no service makes
+  an internal call outside this middleware. Trace headers
+  (`traceparent`/`b3`/`x-request-id`) propagate on every hop.
 
 ## How each client type interfaces
 
-**Browser:** login → `fm_token` in `localStorage` → `frontend/src/api.ts` adds `Authorization: Bearer` to every request (streams included). A mid-session 401 clears the token and fires `onUnauthorized` → `AuthProvider` drops the user → redirect to `/login`; transient auth-service outages do *not* drop the token. The hub reads `me`/`apps`; admin panels call `/api/auth/admin/*` (UI hides them for non-admins, but the server is the enforcement point); the search app calls `/api/search/*`.
+**Browser (hub + search + mail apps):** the `frontend` public client,
+auth-code + PKCE (`frontend/src/oidc.ts`, mirrored in `mailui/src/oidc.ts`).
+Tokens live in localStorage (`fm_oidc_*`), shared same-origin by both apps;
+whichever app is open refreshes the session. Access tokens carry
+`aud: [search, mail]`; the gateway (Istio) validates them, OPA authorizes
+per route. Sign-out is RP-initiated logout at Keycloak.
 
-**Internal services:** one uniform pattern everywhere — forward the caller's bearer, ask `authorize` with your own service name + method + path. A single browser action that reaches leads is authorized **twice** (search's check, then leads' check) — deliberate defense in depth; internal ≠ trusted.
+**Internal services:** exchange-then-call (above). A browser action that
+reaches leads is authorized at the gateway (frontend token, aud search),
+then again at leads (exchanged token, aud leads) — defense in depth;
+internal ≠ trusted.
 
-**MCP clients:** pass the acting profile's session token on every tool call (`session_token` argument or `Authorization: Bearer` header); the MCP server forwards it to the leads backend, which re-authorizes it, so the client acts with **exactly that profile's role**.
+**Machine/AI agents:** confidential clients (see `agent-example`) obtain
+client-credentials tokens (`aud: mcp`) and call the MCP server; each tool
+call carries the token (`session_token` argument or Authorization header).
+The MCP server exchanges it toward leads, so the agent acts as its own
+principal with `azp: mcp`, and OPA can constrain the delegation.
 
-## Session semantics
+**Admin/user management:** the Keycloak console (linked from the hub for
+admin-role users). There is exactly one human principal today (`admin`,
+realm role `admin`); adding users/roles is realm + OPA-data change, not a
+code change.
 
-Sessions store **only the username**; role and existence are re-resolved on every check — so role changes and user deletions bite live sessions instantly, and logout is an instant revocation. No refresh tokens: expiry means the browser re-logs-in. `AUTH_USERNAME`/`AUTH_PASSWORD` only bootstrap the first admin user (created if missing, never updated).
+## Dev vs prod
+
+docker-compose dev runs Keycloak in dev mode importing
+`deploy/keycloak/realm-funnelmanager-dev.json` (dev-only secrets,
+`admin`/`admin`). Backends verify JWTs locally (`FM_JWT_VERIFY=true`)
+because there is no mesh in compose. The issuer is pinned to the
+browser-facing URL (`http://localhost:8080/realms/funnelmanager`) while
+backends dial the `keycloak` container for token/JWKS endpoints, so `iss`
+claims stay consistent. In the k3s deployment Istio + OPA enforce
+everything and the apps run with verification off.

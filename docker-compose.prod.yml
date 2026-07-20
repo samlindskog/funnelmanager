@@ -41,19 +41,6 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    mem_limit: 256m
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
     restart: unless-stopped
@@ -124,13 +111,19 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS}
       DATABASE_URL: ${DATABASE_URL}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: search
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: search
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_SEARCH_SECRET}
     depends_on:
       db:
         condition: service_healthy
       leads:
         condition: service_started
-      auth:
+      keycloak:
         condition: service_started
     expose:
       - "8000"
@@ -149,7 +142,13 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS}
       MONGODB_URL: ${MONGODB_URL:-mongodb://mongo:27017}
       MONGODB_DB: ${MONGODB_DB:-funnelmanager_leads}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: leads
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: leads
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_LEADS_SECRET}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
@@ -187,7 +186,13 @@ services:
     environment:
       # Dedicated mail-db container above.
       DATABASE_URL: ${MAIL_DATABASE_URL}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: mail
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: mail
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MAIL_SECRET}
       CORS_ORIGINS: ${CORS_ORIGINS}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -198,7 +203,7 @@ services:
     depends_on:
       mail-db:
         condition: service_healthy
-      auth:
+      keycloak:
         condition: service_started
     expose:
       - "8004"
@@ -209,42 +214,38 @@ services:
     image: ghcr.io/samlindskog/funnelmanager/mailui:${IMAGE_TAG:-prod}
     restart: unless-stopped
     mem_limit: 128m
+    environment:
+      # Baked into /mail/config.js at container start (shared OIDC session
+      # with the hub — same public client).
+      FRONTEND_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FRONTEND_OIDC_CLIENT_ID: ${FRONTEND_OIDC_CLIENT_ID:-frontend}
     expose:
       - "80"
     depends_on:
       - mail
 
-  # Authorization decision point. Runs bare — the auth backend pushes the Rego
-  # policy and role-grant data into it at startup and on every role change.
-  opa:
-    image: openpolicyagent/opa:1.6.0
+  # Identity provider (sole OIDC issuer). Interim compose deployment until
+  # the k3s cluster (deploy/) takes over: dev-mode storage on a named volume,
+  # realm imported from deploy/keycloak/ on first start. FM_OIDC_ISSUER must
+  # be the browser-facing URL (e.g. https://kc.<domain>/realms/funnelmanager)
+  # with a TLS reverse proxy in front of the published port.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
     restart: unless-stopped
-    mem_limit: 256m
-    command: ["run", "--server", "--addr", "0.0.0.0:8181"]
-    expose:
-      - "8181"
-
-  auth:
-    image: ghcr.io/samlindskog/funnelmanager/auth:${IMAGE_TAG:-prod}
-    restart: unless-stopped
-    mem_limit: 384m
+    mem_limit: 1g
+    command: ["start-dev", "--import-realm", "--proxy-headers", "xforwarded"]
     environment:
-      # Bootstrap admin only — the user is created if missing, never updated.
-      AUTH_USERNAME: ${AUTH_USERNAME}
-      AUTH_PASSWORD: ${AUTH_PASSWORD}
-      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      OPA_URL: ${OPA_URL:-http://opa:8181}
-      # JSON list of hub apps: [{"name": ..., "description": ..., "url": ...}]
-      WEB_APPS: ${WEB_APPS:-}
-      CORS_ORIGINS: ${CORS_ORIGINS}
-    depends_on:
-      redis:
-        condition: service_healthy
-      opa:
-        condition: service_started
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    volumes:
+      - ${KEYCLOAK_REALM_FILE:-./deploy/keycloak/realm-funnelmanager-dev.json}:/opt/keycloak/data/import/realm.json:ro
+      - keycloak_data:/opt/keycloak/data/h2
+    ports:
+      - "${HOST_BIND:-127.0.0.1:}${PROD_KC_PORT:-8080}:8080"
     expose:
-      - "8002"
+      - "8080"
 
   mcp:
     image: ghcr.io/samlindskog/funnelmanager/mcp:${IMAGE_TAG:-prod}
@@ -252,14 +253,17 @@ services:
     # Parses full lead payloads before summarizing for agents; give it spike room.
     mem_limit: 1g
     environment:
-      # Shared-login fallback for tokenless MCP calls is OFF by default in
-      # prod — clients must pass a per-profile session token. Set
-      # MCP_SHARED_LOGIN_FALLBACK=true to restore the old behavior.
+      # Tokenless-call fallback (act as the MCP service identity) is OFF in
+      # prod — clients must pass the acting principal's token per call.
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-false}
-      AUTH_USERNAME: ${AUTH_USERNAME}
-      AUTH_PASSWORD: ${AUTH_PASSWORD}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: mcp
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: mcp
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MCP_SECRET}
     # Loopback-only publish: host-local MCP clients can reach
     # http://127.0.0.1:8003/mcp, the internet cannot. Drop the ports block to
     # keep it Docker-network-only; nginx never routes to it. PROD_MCP_PORT lets a
@@ -270,7 +274,7 @@ services:
       - "8003"
     depends_on:
       - leads
-      - auth
+      - keycloak
 
   frontend:
     image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}
@@ -278,6 +282,9 @@ services:
     mem_limit: 256m
     environment:
       DOMAIN: ${DOMAIN}
+      # Baked into /config.js at container start (browser-side OIDC config).
+      FRONTEND_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FRONTEND_OIDC_CLIENT_ID: ${FRONTEND_OIDC_CLIENT_ID:-frontend}
     # HOST_BIND pins the published port to loopback (e.g. "127.0.0.1:") so a host
     # TLS reverse proxy fronts it and Docker does not bypass ufw; PROD_HTTP_PORT
     # frees port 80 when another stack coexists on the box.
@@ -286,15 +293,14 @@ services:
     depends_on:
       - search
       - leads
-      - auth
       - mail
       - mailui
 
 volumes:
+  keycloak_data:
   postgres_data:
   mail_postgres_data:
   mongo_data:
-  redis_data:
   etcd_data:
   minio_data:
   milvus_data:

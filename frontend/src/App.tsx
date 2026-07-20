@@ -2,6 +2,7 @@ import { CircularProgress, Box } from '@mui/material'
 import { CssBaseline, ThemeProvider } from '@mui/material'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth'
+import { CallbackPage } from './pages/CallbackPage'
 import { HubPage } from './pages/HubPage'
 import { LandingPage } from './pages/LandingPage'
 import { SearchPage } from './pages/SearchPage'
@@ -30,6 +31,7 @@ export default function App() {
           <BrowserRouter>
             <Routes>
               <Route path="/login" element={<LandingPage />} />
+              <Route path="/callback" element={<CallbackPage />} />
               <Route
                 path="/"
                 element={

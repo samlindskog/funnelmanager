@@ -1,0 +1,331 @@
+{
+  "realm": "funnelmanager",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 86400,
+  "ssoSessionMaxLifespan": 86400,
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Full access to every Funnel Manager service (checked by OPA data documents)"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@funnelmanager.local",
+      "emailVerified": true,
+      "firstName": "Funnel",
+      "lastName": "Admin",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "admin"
+      ]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "svc-leads",
+      "protocol": "openid-connect",
+      "description": "Adds the leads service to the token audience (used by RFC 8693 exchange)",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-leads",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "leads",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "svc-search",
+      "protocol": "openid-connect",
+      "description": "Adds the search service to the token audience",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-search",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "search",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "svc-mail",
+      "protocol": "openid-connect",
+      "description": "Adds the mail service to the token audience",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-mail",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "mail",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "svc-mcp",
+      "protocol": "openid-connect",
+      "description": "Adds the mcp service to the token audience",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-mcp",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "mcp",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "basic",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "profile",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "multivalued": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "frontend",
+      "name": "Funnel Manager hub + search app + mail app (browser)",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://127.0.0.1:5173/*",
+        "http://localhost:8000/*",
+        "http://localhost/*"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://127.0.0.1:5173/*##http://localhost:8000/*##http://localhost/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-search",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "search",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "aud-mail",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "mail",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ]
+    },
+    {
+      "clientId": "search",
+      "name": "Search backend service identity",
+      "publicClient": false,
+      "secret": "dev-search-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "optionalClientScopes": [
+        "svc-leads"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ]
+    },
+    {
+      "clientId": "leads",
+      "name": "Leads backend service identity",
+      "publicClient": false,
+      "secret": "dev-leads-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ]
+    },
+    {
+      "clientId": "mail",
+      "name": "Mail backend service identity",
+      "publicClient": false,
+      "secret": "dev-mail-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ]
+    },
+    {
+      "clientId": "mcp",
+      "name": "MCP server service identity",
+      "publicClient": false,
+      "secret": "dev-mcp-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "optionalClientScopes": [
+        "svc-leads"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ]
+    },
+    {
+      "clientId": "agent-example",
+      "name": "Example machine/AI agent (client credentials)",
+      "publicClient": false,
+      "secret": "dev-agent-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-mcp",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "mcp",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "optionalClientScopes": [
+        "svc-mcp"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ]
+    }
+  ]
+}

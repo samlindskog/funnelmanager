@@ -32,20 +32,6 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    mem_limit: 128m
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "${HOST_BIND:-}6379:6379"
-    volumes:
-      - redis_data_dev:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
     mem_limit: 256m
@@ -116,7 +102,13 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@db:5432/${POSTGRES_DB:-funnelmanager}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: search
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: search
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_SEARCH_SECRET:-dev-search-secret}
     volumes:
       - ./search:/app
       - ./libs/fm_runtime:/libs/fm_runtime
@@ -127,8 +119,8 @@ services:
         condition: service_healthy
       leads:
         condition: service_started
-      auth:
-        condition: service_started
+      keycloak:
+        condition: service_healthy
 
   leads:
     build:
@@ -142,7 +134,13 @@ services:
     environment:
       MONGODB_URL: mongodb://mongo:27017
       MONGODB_DB: ${MONGODB_DB:-funnelmanager_leads}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: leads
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: leads
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_LEADS_SECRET:-dev-leads-secret}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       MILVUS_COLLECTION: ${MILVUS_COLLECTION:-leads_people}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
@@ -184,7 +182,13 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@mail-db:5432/funnelmanager_mail
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
+      FM_SERVICE_NAME: mail
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: mail
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MAIL_SECRET:-dev-mail-secret}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -198,8 +202,8 @@ services:
     depends_on:
       mail-db:
         condition: service_healthy
-      auth:
-        condition: service_started
+      keycloak:
+        condition: service_healthy
 
   # Standalone mail UI (React + MUI, own app) — served same-origin at /mail/
   # behind nginx so it shares the hub's session token.
@@ -221,37 +225,33 @@ services:
     depends_on:
       - mail
 
-  # Authorization decision point. Runs bare — the auth backend pushes the Rego
-  # policy and role-grant data into it at startup and on every role change.
-  opa:
-    image: openpolicyagent/opa:1.6.0
-    mem_limit: 256m
-    command: ["run", "--server", "--addr", "0.0.0.0:8181"]
-    expose:
-      - "8181"
-
-  auth:
-    build:
-      context: ./auth
-      dockerfile: Dockerfile.dev
-    mem_limit: 256m
-    env_file:
-      - .env
+  # Identity provider (sole OIDC issuer). Dev mode: H2 file storage + realm
+  # import from deploy/keycloak/ (dev-only secrets — the k3s deployment uses
+  # secret refs instead). The browser reaches it on localhost:8080 while
+  # backends dial keycloak:8080 — token/JWKS URLs are pinned to the container
+  # DNS name and the issuer string to the browser-facing origin so both see
+  # consistent `iss` claims.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    mem_limit: 1g
+    command: ["start-dev", "--import-realm"]
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
-      OPA_URL: ${OPA_URL:-http://opa:8181}
-      WEB_APPS: ${WEB_APPS:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
     volumes:
-      - ./auth:/app
-    expose:
-      - "8002"
-    depends_on:
-      redis:
-        condition: service_healthy
-      opa:
-        condition: service_started
+      - ./deploy/keycloak/realm-funnelmanager-dev.json:/opt/keycloak/data/import/realm.json:ro
+      - keycloak_data_dev:/opt/keycloak/data/h2
+    ports:
+      - "${HOST_BIND:-}8080:8080"
+    healthcheck:
+      # The KC image ships no curl/wget; poke the port with bash's /dev/tcp.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/funnelmanager HTTP/1.0\\r\\nHost: localhost\\r\\n\\r' >&3 && grep -q '200 OK' <&3"]
+      interval: 10s
+      start_period: 60s
+      timeout: 5s
+      retries: 12
 
   mcp:
     build:
@@ -263,9 +263,15 @@ services:
       - .env
     environment:
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
-      AUTH_BACKEND_URL: ${AUTH_BACKEND_URL:-http://auth:8002}
-      # Dev convenience: tool calls without a session token fall back to the
-      # shared AUTH_USERNAME/AUTH_PASSWORD login. Keep off in prod.
+      FM_SERVICE_NAME: mcp
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: mcp
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MCP_SECRET:-dev-mcp-secret}
+      # Dev convenience: tokenless tool calls act as the MCP server's own
+      # service identity (client credentials). Keep off in prod.
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-true}
     volumes:
       - ./mcp:/app
@@ -276,7 +282,7 @@ services:
       - "${HOST_BIND:-}8003:8003"
     depends_on:
       - leads
-      - auth
+      - keycloak
 
   frontend:
     build:
@@ -313,7 +319,6 @@ services:
       - frontend
       - search
       - leads
-      - auth
       - mail
       - mailui
 
@@ -321,9 +326,9 @@ volumes:
   postgres_data_dev:
   mail_postgres_data_dev:
   mongo_data_dev:
-  redis_data_dev:
   etcd_data_dev:
   minio_data_dev:
   milvus_data_dev:
+  keycloak_data_dev:
   frontend_node_modules:
   mailui_node_modules:

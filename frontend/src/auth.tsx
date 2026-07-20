@@ -7,22 +7,31 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { onUnauthorized } from './api'
 import {
-  ApiError,
-  apiLogout,
-  fetchMe,
-  getToken,
-  login as apiLogin,
-  onUnauthorized,
-  setToken,
-} from './api'
+  beginLogin,
+  currentClaims,
+  getAccessToken,
+  hasSession,
+  logout as oidcLogout,
+} from './oidc'
 import type { User } from './types'
 
 interface AuthContextValue {
   user: User | null
   loading: boolean
-  login: (username: string, password: string) => Promise<void>
+  /** Redirects to Keycloak (never resolves in this document). */
+  login: () => Promise<void>
   logout: () => void
+}
+
+function userFromClaims(): User | null {
+  const claims = currentClaims()
+  if (!claims) return null
+  return {
+    username: claims.username,
+    role: claims.roles.includes('admin') ? 'admin' : '',
+  }
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
@@ -32,38 +41,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const token = getToken()
-    if (!token) {
+    if (!hasSession()) {
       setLoading(false)
       return
     }
-    fetchMe()
-      .then(setUser)
-      .catch((err) => {
-        // Only drop the token when the server actually rejected it (401,
-        // already cleared inside api.ts). A transient failure (auth service
-        // briefly down) must not discard a still-valid session.
-        if (err instanceof ApiError && err.status === 401) setToken(null)
-      })
+    // Refresh if stale; a dead session yields null and the user stays logged
+    // out. A transient Keycloak outage keeps the stored session for retry.
+    getAccessToken()
+      .then(() => setUser(userFromClaims()))
       .finally(() => setLoading(false))
   }, [])
 
-  // A mid-session 401 (expired/revoked session) clears the token in api.ts;
-  // clearing the user here makes ProtectedRoute redirect to login instead of
-  // leaving a dead session where every action fails.
+  // A mid-session 401 (revoked/expired beyond refresh) clears tokens in
+  // api.ts; dropping the user here routes back to the sign-in page.
   useEffect(() => onUnauthorized(() => setUser(null)), [])
 
-  const login = useCallback(async (username: string, password: string) => {
-    await apiLogin(username, password)
-    const me = await fetchMe()
-    setUser(me)
+  const login = useCallback(async () => {
+    await beginLogin('/')
   }, [])
 
   const logout = useCallback(() => {
-    // Revoke the server-side session (best-effort) before dropping local state.
-    void apiLogout()
-    setToken(null)
-    setUser(null)
+    oidcLogout()
   }, [])
 
   const value = useMemo(

@@ -32,7 +32,27 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [search, leads, auth, mcp, mail, mailui, frontend]
+        # Python services build from the repo root so their Dockerfiles can
+        # COPY libs/fm_runtime; the two SPA images keep their own contexts.
+        include:
+          - service: search
+            context: .
+            dockerfile: search/Dockerfile
+          - service: leads
+            context: .
+            dockerfile: leads/Dockerfile
+          - service: mcp
+            context: .
+            dockerfile: mcp/Dockerfile
+          - service: mail
+            context: .
+            dockerfile: mail/Dockerfile
+          - service: mailui
+            context: ./mailui
+            dockerfile: mailui/Dockerfile
+          - service: frontend
+            context: ./frontend
+            dockerfile: frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,7 +80,8 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: ./${{ matrix.service }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

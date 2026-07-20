@@ -9,29 +9,6 @@ export interface AppLink {
   url: string
 }
 
-export interface Grant {
-  service: string
-  methods: string[]
-  path_prefix: string
-}
-
-export interface Role {
-  name: string
-  description: string
-  grants: Grant[]
-  created_at?: string | null
-}
-
-export interface UserDetail extends User {
-  created_at?: string | null
-}
-
-export interface AccountRequest {
-  username: string
-  requested_at?: string
-  last_seen_at?: string
-}
-
 // ---------------------------------------------------------------------------
 // Search app — Apollo records and search history (search backend)
 // ---------------------------------------------------------------------------

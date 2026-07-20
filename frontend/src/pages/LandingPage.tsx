@@ -1,65 +1,30 @@
-import {
-  Alert,
-  Box,
-  Button,
-  Paper,
-  Stack,
-  Tab,
-  Tabs,
-  TextField,
-  Typography,
-} from '@mui/material'
+import { Alert, Box, Button, Paper, Stack, Typography } from '@mui/material'
 import { alpha } from '@mui/material/styles'
-import { useState, type FormEvent } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { requestAccount } from '../api'
+import { useState } from 'react'
+import { Navigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { ColorModeToggle } from '../components/ColorModeToggle'
 
 /**
  * Deliberately nondescript landing page: no product name, no description —
  * a visitor who stumbles on it learns nothing about what it protects.
+ * Authentication happens at Keycloak (auth-code + PKCE); this page only
+ * starts the redirect. Accounts are provisioned by an admin in Keycloak.
  */
 export function LandingPage() {
   const { user, loading, login } = useAuth()
-  const navigate = useNavigate()
-  const [tab, setTab] = useState(0)
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [requestedUsername, setRequestedUsername] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
   if (!loading && user) return <Navigate to="/" replace />
 
-  async function onSignIn(e: FormEvent) {
-    e.preventDefault()
+  async function onSignIn() {
     setError(null)
-    setNotice(null)
     setSubmitting(true)
     try {
-      await login(username, password)
-      navigate('/', { replace: true })
+      await login() // navigates away
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  async function onRequestAccess(e: FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setNotice(null)
-    setSubmitting(true)
-    try {
-      await requestAccount(requestedUsername)
-      setNotice('Request received.')
-      setRequestedUsername('')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Request failed')
-    } finally {
       setSubmitting(false)
     }
   }
@@ -93,58 +58,10 @@ export function LandingPage() {
       >
         <Stack spacing={2.5}>
           <Typography variant="h4">Welcome</Typography>
-          <Tabs
-            value={tab}
-            onChange={(_, value) => {
-              setTab(value)
-              setError(null)
-              setNotice(null)
-            }}
-          >
-            <Tab label="Sign in" />
-            <Tab label="Request access" />
-          </Tabs>
           {error && <Alert severity="error">{error}</Alert>}
-          {notice && <Alert severity="success">{notice}</Alert>}
-          {tab === 0 ? (
-            <Stack spacing={2.5} component="form" onSubmit={onSignIn}>
-              <TextField
-                label="Username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                required
-                fullWidth
-              />
-              <TextField
-                label="Password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-                fullWidth
-              />
-              <Button type="submit" variant="contained" size="large" disabled={submitting}>
-                {submitting ? 'Signing in…' : 'Sign in'}
-              </Button>
-            </Stack>
-          ) : (
-            <Stack spacing={2.5} component="form" onSubmit={onRequestAccess}>
-              <TextField
-                label="Username"
-                value={requestedUsername}
-                onChange={(e) => setRequestedUsername(e.target.value)}
-                autoComplete="off"
-                helperText="Lowercase letters, digits, . _ - (3–32 chars)"
-                required
-                fullWidth
-              />
-              <Button type="submit" variant="contained" size="large" disabled={submitting}>
-                {submitting ? 'Sending…' : 'Request access'}
-              </Button>
-            </Stack>
-          )}
+          <Button variant="contained" size="large" onClick={onSignIn} disabled={submitting}>
+            {submitting ? 'Redirecting…' : 'Sign in'}
+          </Button>
         </Stack>
       </Paper>
     </Box>

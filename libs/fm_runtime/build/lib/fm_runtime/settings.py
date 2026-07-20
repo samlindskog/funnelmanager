@@ -47,6 +47,13 @@ class RuntimeSettings:
     enforce_audience: bool = field(default_factory=lambda: _bool("FM_ENFORCE_AUDIENCE", True))
     audience: str = field(default_factory=lambda: os.environ.get("FM_SERVICE_AUDIENCE", ""))
 
+    # Client-scope name granting audience=<target> on exchanged tokens.
+    # Keycloak requires the requester to hold an (optional) client scope with
+    # an audience mapper for the target; ours are named svc-<client>.
+    exchange_scope_template: str = field(
+        default_factory=lambda: os.environ.get("FM_EXCHANGE_SCOPE_TEMPLATE", "svc-{audience}")
+    )
+
     # Reject requests with no principal on routes not annotated @anonymous.
     # Defense-in-depth below the mesh DENY policy; keeps dev honest too.
     require_principal: bool = field(default_factory=lambda: _bool("FM_REQUIRE_PRINCIPAL", True))

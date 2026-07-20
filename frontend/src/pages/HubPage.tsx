@@ -1,7 +1,6 @@
 import LaunchIcon from '@mui/icons-material/Launch'
 import LogoutIcon from '@mui/icons-material/Logout'
 import {
-  Alert,
   Box,
   Button,
   Card,
@@ -13,23 +12,22 @@ import {
   Stack,
   Typography,
 } from '@mui/material'
-import { useEffect, useState } from 'react'
 import { fetchApps } from '../api'
 import { useAuth } from '../auth'
 import { ColorModeToggle } from '../components/ColorModeToggle'
-import type { AppLink } from '../types'
-import { AdminSection } from './admin/AdminSection'
+import { config } from '../oidc'
+
+/** Users, roles, and credentials are managed in Keycloak now — the hub links
+ * admins to its console instead of embedding admin panels. */
+function keycloakConsoleUrl(): string {
+  const issuer = config().oidcIssuer
+  const [base, realm] = issuer.split('/realms/')
+  return realm ? `${base}/admin/${realm}/console/` : issuer
+}
 
 export function HubPage() {
   const { user, logout } = useAuth()
-  const [apps, setApps] = useState<AppLink[]>([])
-  const [appsError, setAppsError] = useState<string | null>(null)
-
-  useEffect(() => {
-    fetchApps()
-      .then(setApps)
-      .catch((err) => setAppsError(err instanceof Error ? err.message : 'Failed to load apps'))
-  }, [])
+  const apps = fetchApps()
 
   if (!user) return null
   const isAdmin = user.role === 'admin'
@@ -87,8 +85,7 @@ export function HubPage() {
             <Typography variant="h5" sx={{ mb: 2 }}>
               Apps
             </Typography>
-            {appsError && <Alert severity="error">{appsError}</Alert>}
-            {!appsError && apps.length === 0 && (
+            {apps.length === 0 && (
               <Typography color="text.secondary">No apps configured.</Typography>
             )}
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap sx={{ flexWrap: 'wrap' }}>
@@ -117,7 +114,31 @@ export function HubPage() {
           {isAdmin && (
             <>
               <Divider />
-              <AdminSection />
+              <Box>
+                <Typography variant="h5" sx={{ mb: 2 }}>
+                  Administration
+                </Typography>
+                <Card variant="outlined" sx={{ maxWidth: 420 }}>
+                  <CardActionArea
+                    component="a"
+                    href={keycloakConsoleUrl()}
+                    target="_blank"
+                    rel="noopener"
+                  >
+                    <CardContent>
+                      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                        <Typography variant="h6" sx={{ flexGrow: 1 }}>
+                          Keycloak console
+                        </Typography>
+                        <LaunchIcon fontSize="small" color="action" />
+                      </Stack>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        Manage users, roles, and service clients for this realm.
+                      </Typography>
+                    </CardContent>
+                  </CardActionArea>
+                </Card>
+              </Box>
             </>
           )}
         </Stack>
