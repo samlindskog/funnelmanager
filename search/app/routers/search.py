@@ -660,10 +660,19 @@ def _pagination_for(row: SearchHistory) -> dict[str, Any]:
     }
 
 
+async def _get_owned_search(db: AsyncSession, search_id: int, user: UserOut) -> SearchHistory:
+    """Load a search owned by the caller; another user's row 404s like a missing one."""
+    row = await db.get(SearchHistory, search_id)
+    if not row or row.username != user.username:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    return row
+
+
 def _search_stream_response(
     settings: Settings,
     token: str,
     *,
+    username: str,
     history_query: str,
     entity_type: str,
     per_page: int,
@@ -691,6 +700,7 @@ def _search_stream_response(
         try:
             async with SessionLocal() as job_db:
                 row = SearchHistory(
+                    username=username,
                     query=_clip_history_query(history_query),
                     entity_type=entity_type,
                     page=1,
@@ -746,7 +756,7 @@ async def search(
     body: SearchRequest,
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> StreamingResponse:
     """NDJSON ingest stream: emit page 1 as soon as filled; further pages via sync endpoint."""
     client = LeadsClient(settings, token)
@@ -792,6 +802,7 @@ async def search(
     return _search_stream_response(
         settings,
         token,
+        username=user.username,
         history_query=history_query,
         entity_type=body.entity_type,
         per_page=body.per_page or _UI_PER_PAGE,
@@ -804,7 +815,7 @@ async def search_company_people(
     body: CompanyPeopleSearchRequest,
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> StreamingResponse:
     history_query = _history_label_for_company_people(body.company_name, body.keywords)
     search_params = _build_search_params(
@@ -820,6 +831,7 @@ async def search_company_people(
     return _search_stream_response(
         settings,
         token,
+        username=user.username,
         history_query=history_query,
         entity_type="people",
         per_page=body.per_page or _UI_PER_PAGE,
@@ -834,11 +846,9 @@ async def search_page(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> SearchResponse:
-    source = await db.get(SearchHistory, search_id)
-    if not source:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    source = await _get_owned_search(db, search_id, user)
 
     stored = await _count_stored_results(db, search_id)
     if stored == 0:
@@ -858,9 +868,14 @@ async def search_page(
 @router.get("/searches", response_model=list[SearchHistorySummary])
 async def list_searches(
     db: AsyncSession = Depends(get_db),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> list[SearchHistory]:
-    result = await db.execute(select(SearchHistory).order_by(SearchHistory.created_at.desc()).limit(100))
+    result = await db.execute(
+        select(SearchHistory)
+        .where(SearchHistory.username == user.username)
+        .order_by(SearchHistory.created_at.desc())
+        .limit(100)
+    )
     return list(result.scalars().all())
 
 
@@ -870,11 +885,9 @@ async def get_search(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> SearchHistoryDetail:
-    row = await db.get(SearchHistory, search_id)
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    row = await _get_owned_search(db, search_id, user)
 
     stored = await _count_stored_results(db, search_id)
     if stored > 0:
@@ -899,11 +912,9 @@ async def get_search(
 async def delete_search(
     search_id: int,
     db: AsyncSession = Depends(get_db),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> None:
-    row = await db.get(SearchHistory, search_id)
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    row = await _get_owned_search(db, search_id, user)
     await db.execute(delete(SearchResult).where(SearchResult.search_id == search_id))
     await db.delete(row)
     await db.commit()
@@ -930,12 +941,10 @@ async def export_search_csv(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> StreamingResponse:
     """Export every stored result for a search as CSV (name, email)."""
-    row = await db.get(SearchHistory, search_id)
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    row = await _get_owned_search(db, search_id, user)
 
     mongo_ids = await _load_all_mongo_ids(db, search_id=search_id)
     if not mongo_ids:
@@ -975,7 +984,7 @@ async def similarity_search(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    _: UserOut = Depends(get_current_user),
+    user: UserOut = Depends(get_current_user),
 ) -> SimilaritySearchResponse:
     """Proxy Milvus similarity search; persist history and paginate at 100/page."""
     query = body.query.strip()
@@ -1016,6 +1025,7 @@ async def similarity_search(
         "entity_type": "people",
     }
     row = SearchHistory(
+        username=user.username,
         query=history_query,
         entity_type="people",
         page=1,

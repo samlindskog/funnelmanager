@@ -276,6 +276,22 @@ services:
       - leads
       - auth
 
+  # Seeds openclaw.json from the template when missing. The live config is
+  # runtime state (the gateway writes per-user agents/bindings into it via the
+  # funnelmanager-auth sync route); the state dir must carry
+  # openclaw.json.example alongside skills/ and extensions/ (see
+  # deploy/README.md).
+  openclaw-init:
+    image: busybox:stable
+    profiles:
+      - agent
+    # Match the openclaw container's node uid so the seeded file stays
+    # writable by the gateway.
+    user: "1000:1000"
+    volumes:
+      - ${OPENCLAW_STATE_DIR:-./openclaw}:/state
+    command: sh -c 'test -f /state/openclaw.json || cp /state/openclaw.json.example /state/openclaw.json'
+
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     restart: unless-stopped
@@ -304,7 +320,10 @@ services:
     ports:
       - "${HOST_BIND:-127.0.0.1:}${PROD_OPENCLAW_PORT:-18789}:18789"
     depends_on:
-      - mcp
+      mcp:
+        condition: service_started
+      openclaw-init:
+        condition: service_completed_successfully
 
   frontend:
     image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}

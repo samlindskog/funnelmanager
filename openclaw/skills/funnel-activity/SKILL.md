@@ -12,11 +12,13 @@ platform. New Apollo searches and enrichment are run by humans in the
 Funnel Manager search app, not by the agent; if the user asks to run a new
 search or enrich a lead, point them at the search app in the hub.
 
-Auth: every tool needs a `session_token` (usually injected by the harness).
-If a call fails with a missing/expired token, fetch one with
-`funnelmanager_session_token` and pass it explicitly; if the chat is not
-linked to a profile, an admin must approve the pending channel request in the
-Funnel Manager hub.
+Auth: every funnelmanager tool call **must pass `session_token` explicitly**.
+Always call `funnelmanager_session_token` first, then pass its
+`session_token` value in every funnelmanager call. Tokenless or stale-token
+calls are blocked by policy with instructions — fetch a fresh token and
+retry. Tokens expire; never invent or reuse tokens across conversations. If
+the chat is not linked to a profile, an admin must approve the pending
+channel request in the Funnel Manager hub.
 
 ## Lead & enrichment activity (leads backend)
 

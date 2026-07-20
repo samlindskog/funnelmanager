@@ -200,7 +200,7 @@ Standalone app — same MUI theme, no shared code with `frontend/`. It expects t
 | `LEADS_BACKEND_URL` | Internal URL used by the search backend to call leads (e.g. `http://leads:8001`) |
 | `MCP_ALLOWED_HOSTS` | Host headers the MCP transport accepts (default `mcp:8003,localhost:8003,127.0.0.1:8003`) |
 | `OPENCLAW_GATEWAY_TOKEN` | Shared-secret auth for the OpenClaw Control UI / gateway API (the auth backend also uses it to approve DM pairings from the hub) |
-| `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json`); OpenAI is used until then |
+| `ANTHROPIC_API_KEY` | Optional: preferred OpenClaw agent model once set (see `openclaw/openclaw.json.example`); OpenAI is used until then |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for the OpenClaw Telegram channel |
 | `DOMAIN` | Production hostname for nginx `server_name` |
 
@@ -252,6 +252,8 @@ Internal (Docker network only — nginx never routes `/internal/*`):
 | `GET` | `/api/search/leads/{mongo_id}` | Hydrate one lead by Mongo `_id` |
 | `POST` | `/api/search/people/{apollo_id}/enrich` | Proxy to leads complete-person enrich |
 | `POST` | `/api/search/organizations/{apollo_id}/enrich` | Proxy to leads complete-organization enrich |
+
+Search history is per-user: every `/api/search/searches*` endpoint is scoped to the authenticated profile (other users' searches 404).
 
 ### Mail backend
 
@@ -349,7 +351,7 @@ Point an MCP client at `http://127.0.0.1:8003/mcp` (transport: streamable HTTP).
 
 ## OpenClaw agent
 
-The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json`, `skills/`, and `extensions/` are versioned; runtime state is gitignored) plus a named volume for auth-profile encryption keys.
+The `openclaw` compose service runs an [OpenClaw](https://docs.openclaw.ai) gateway wired to the funnelmanager MCP server (`mcp.servers` in `openclaw/openclaw.json`), reachable over **Telegram** and the **web Control UI** (`http://localhost:18789`, prod: loopback only). State lives in the bind-mounted `openclaw/` dir (only `openclaw.json.example`, `skills/`, and `extensions/` are versioned; the live `openclaw.json` is seeded from the template by the `openclaw-init` compose service and then owned by the gateway — like all other runtime state it is gitignored) plus a named volume for auth-profile encryption keys.
 
 **Channel identity → profile:** the versioned `funnelmanager-auth` plugin (`openclaw/extensions/funnelmanager-auth/`) resolves each conversation's channel + sender id, fetches a session token for the linked profile from the auth service's internal endpoint (`POST /internal/openclaw/session`), and injects it as `session_token` into funnelmanager MCP tool calls (`before_tool_call`). For harnesses whose native MCP path cannot rewrite tool arguments, it also registers a `funnelmanager_session_token` agent tool the model can call and pass along explicitly. Unlinked senders are blocked and recorded as **pending channel requests**, which admins assign to a new or existing user from the hub's admin panel. Inbound messages also report the sender's identity (throttled per identity), so a chat that was paired with OpenClaw before the plugin existed still surfaces as a pending request without waiting for a tool call.
 

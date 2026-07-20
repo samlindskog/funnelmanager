@@ -278,6 +278,18 @@ services:
       - leads
       - auth
 
+  # Seeds openclaw.json from the versioned template when missing. The live
+  # config is runtime state (the gateway writes per-user agents/bindings into
+  # it via the funnelmanager-auth sync route) and is gitignored.
+  openclaw-init:
+    image: busybox:stable
+    # Match the openclaw container's node uid so the seeded file stays
+    # writable by the gateway.
+    user: "1000:1000"
+    volumes:
+      - ./openclaw:/state
+    command: sh -c 'test -f /state/openclaw.json || cp /state/openclaw.json.example /state/openclaw.json'
+
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     restart: unless-stopped
@@ -293,8 +305,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     volumes:
-      # Config + skills are versioned in ./openclaw; runtime state (sessions,
-      # agent auth, credentials) persists there too but is gitignored.
+      # Template + skills + extensions are versioned in ./openclaw; the live
+      # openclaw.json and everything else there is runtime state (gitignored).
       - ./openclaw:/home/node/.openclaw
       # Auth-profile encryption keys — keep out of the repo dir entirely.
       - openclaw_auth_dev:/home/node/.config/openclaw
@@ -303,7 +315,10 @@ services:
     ports:
       - "${HOST_BIND:-}18789:18789"
     depends_on:
-      - mcp
+      mcp:
+        condition: service_started
+      openclaw-init:
+        condition: service_completed_successfully
 
   frontend:
     build:

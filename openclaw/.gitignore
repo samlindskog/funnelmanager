@@ -1,10 +1,12 @@
 # This directory is bind-mounted as /home/node/.openclaw inside the openclaw
-# container. Only the config and skills are versioned; everything else is
-# runtime state (sessions, agent auth, credentials, logs) and must stay out
-# of git.
+# container. Only the config template and skills are versioned; everything
+# else is runtime state (sessions, agent auth, credentials, logs) and must
+# stay out of git. The live openclaw.json is runtime state too — the gateway
+# writes per-user agents/bindings into it — and is seeded from
+# openclaw.json.example by the compose openclaw-init service.
 *
 !.gitignore
-!openclaw.json
+!openclaw.json.example
 !skills/
 !skills/**
 !extensions/
