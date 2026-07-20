@@ -1,84 +1,77 @@
 # Funnel Manager — Apollo Inspector
 
-Apollo person/company search + enrichment platform, gated by a central auth service with per-user profiles, roles, and OPA-backed authorization on every API endpoint. The search backend stores history and Mongo lead `_id`s in Postgres; the leads backend is the only service that talks to Apollo and stores full records in MongoDB.
+Apollo person/company search + enrichment platform with a zero-trust identity architecture: Keycloak is the sole OIDC issuer, every request carries the originating principal as a JWT (exchanged per hop via RFC 8693), and authorization belongs to the platform (OPA). The search backend stores history and Mongo lead `_id`s in Postgres; the leads backend is the only service that talks to Apollo and stores full records in MongoDB.
 
 ## Stack
 
-- **Auth backend:** FastAPI + Redis — user profiles (bcrypt), roles, pending account requests, and opaque session tokens (1-day TTL); owns the OPA policy + role data and answers `POST /api/auth/authorize` for every service
-- **OPA:** Open Policy Agent — the authorization decision point; the auth backend pushes the Rego policy and role grants into it (fail closed when unreachable)
-- **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; authorizes every request via the auth backend; relays searches to leads with the caller's token
-- **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only but still authorizes every request (webhooks keep secret-in-path auth)
+- **Keycloak:** the sole identity provider (realm `funnelmanager`) — human login via auth-code + PKCE, service/agent clients via client credentials, per-hop delegation via RFC 8693 token exchange (see `deploy/keycloak/`)
+- **fm_runtime** (`libs/fm_runtime`): shared runtime installed in every backend — principal extraction (sub + act/azp), audience checks, cached token-exchange broker, structured JSON logs, `/healthz` `/readyz` `/metrics`, `@anonymous` route annotations (the source of truth for the public-anonymous allowlist)
+- **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; exchanges the caller's token for a leads-audience token on every relay
+- **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only, accepts only leads-audience JWTs (webhooks keep secret-in-path auth)
 - **Mail backend:** FastAPI, SQLAlchemy (dedicated `mail-db` Postgres container) — archives every message from connected Gmail/Workspace mailboxes (any number of domains, OAuth per mailbox), keeps them in sync in the background, and sends mail via the Gmail API
 - **Mail UI:** its own React + TypeScript + Material UI app (`mailui/`, separate container) served same-origin at `/mail/` — appears on the hub as an app tile and shares the hub's session token; no code shared with the search frontend
 - **MCP server:** Python MCP SDK (streamable HTTP) — internal-only read-only tools over the leads backend for agents; every tool call carries a per-profile session token that is forwarded upstream
 - **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
-- **Deploy:** Docker Compose, nginx, Postgres, MongoDB, Redis, OPA
+- **Deploy:** Docker Compose (interim), nginx, Postgres, MongoDB, Keycloak — migrating to k3s + Istio + OPA (see `deploy/`)
 
 ## Features
 
 - Minimal landing page (no product info) with sign-in and "request access" (username only)
 - Post-login hub: current profile (username + role), configured web apps (Search, Mail)
 - Admin panels (admin role only): pending account requests, user management, role management with per-service grants
-- Every API endpoint — public or internal — validates the session token and checks the caller's role against the OPA policy
+- Every API endpoint — public or internal — requires a JWT whose audience names the service, except the explicitly annotated anonymous allowlist (webhooks, OAuth callback, probes)
 - Leads service: store Apollo people/org search hits in MongoDB (deduped by `apollo_id`), embed in Milvus in the background, and enrich via Complete Person/Organization Info
 - Mail service: connect Gmail/Workspace mailboxes across any domains via OAuth, archive all their mail in Postgres (kept in sync incrementally), browse inbox/sent per mailbox in the hub Mail app, and send email as any connected mailbox
 
-## Authorization model
+## Identity model
 
-The full endpoint-by-endpoint reference (access tiers, OPA mechanics, and how the browser / internal services interface with auth) lives in [`docs/authentication.md`](docs/authentication.md).
+The full reference (two identities per request, per-hop audiences, token exchange, the anonymous allowlist, dev vs prod) lives in [`docs/authentication.md`](docs/authentication.md). In short:
 
-- **Profiles** live in the auth backend (Redis): username, bcrypt password hash, one **role**.
-- **Roles** carry **grants**: `{service, methods, path_prefix}` rows (service is `auth` / `search` / `leads` / `mail` / `*`). The built-in `admin` role grants everything and cannot be deleted; more roles can be created in the hub UI.
-- The auth backend pushes the Rego policy + role grants to **OPA** at startup, on every role change, and periodically (self-heals OPA restarts).
-- Every service resolves each request with one call — `POST /api/auth/authorize` `{token, service, method, path}` → `401` (bad token), `{allowed: false}` (deny → 403), or `{allowed: true, username, role}`. OPA unreachable ⇒ deny (fail closed).
-- Auth's own surface: `login` / `request-account` are anonymous; `me`, `logout`, `apps`, `validate`, `authorize` are open to any valid profile; everything else under `/api/auth/admin/*` requires a role whose grants cover the `auth` service.
-- Sessions store only the username; role and existence are re-resolved from the profile store on every check, so role changes and deletions apply to live sessions immediately.
+- **Keycloak** issues all identity: humans (auth-code + PKCE), services and AI agents (confidential clients). Users/roles are managed in the Keycloak console (linked from the hub for admins).
+- Every service accepts only JWTs whose `aud` names it; internal hops exchange (never forward) tokens via RFC 8693 — the realm's `svc-<target>` client scopes are the one-hop pairing allowlist (`search→leads`, `mcp→leads`, `agent→mcp`).
+- Requests in the mesh also carry the calling workload's mTLS identity; OPA (ext_authz) decides on both. Applications receive the principal through `fm_runtime` and key user-owned data (search history) on `preferred_username`.
 
 ## Quick start (Docker development)
 
 ```bash
 cp .env.example .env
-# Edit .env and set APOLLO_API_KEY (and optionally AUTH_USERNAME / AUTH_PASSWORD)
+# Edit .env and set APOLLO_API_KEY
 
 docker compose -f docker-compose.dev.yml up --build
 ```
 
 - App (nginx → Vite): http://localhost:5173
 - APIs (nginx → backends): http://localhost:8000/api
-  - `/api/auth/…` → auth backend (login, profiles, authorization)
   - `/api/search/…` → search backend (search/history/enrich)
+  - `/api/mail/…` → mail backend
   - Leads is internal-only (`LEADS_BACKEND_URL`); the browser does not call it
-- Postgres: localhost:5432
-- MongoDB: localhost:27017
-- Redis: localhost:6379
+- Keycloak: http://localhost:8080 (realm `funnelmanager`; console login `admin`/`admin`)
+- Postgres: localhost:5432; MongoDB: localhost:27017
 
-nginx is the public reverse proxy in front of Vite, the auth backend (`/api/auth/…`), and the search backend (`/api/search/…`). The leads backend, OPA, and Redis are reached only by other services on the Docker network.
+nginx is the public reverse proxy in front of Vite and the search/mail backends. The leads backend is reached only by other services on the Docker network; Keycloak is published so the browser can run the OIDC flow.
 
 The MCP server listens at `http://localhost:8003/mcp` in dev (streamable HTTP). nginx never routes to it; in prod it is published on loopback only (`127.0.0.1:8003`).
 
 One short name per backend is used everywhere — source directory, compose
-service, container / DNS name, GHCR image, and API prefix all match: `auth`
-(`/api/auth`), `search` (`/api/search`), `leads` (`/api/leads`), and `mcp`
-(internal `/mcp`).
+service, container / DNS name, GHCR image, and API prefix all match:
+`search` (`/api/search`), `leads` (`/api/leads`), `mail` (`/api/mail`), and
+`mcp` (internal `/mcp`).
 
 Source is bind-mounted:
 
-- `./search` → `search` container
-- `./leads` → `leads` container
-- `./auth` → `auth` container
-- `./mcp` → `mcp` container
-- `./frontend` → `frontend` container (with a named volume for `node_modules`)
+- `./search`, `./leads`, `./mail`, `./mcp` → their containers
+- `./libs/fm_runtime` → every backend (editable install; live lib edits)
+- `./frontend`, `./mailui` → their Vite dev containers
 - `./frontend/nginx.dev.conf` → `nginx` container
 
-Default login: `admin` / `admin` (the bootstrap admin user — created on first
-startup from `AUTH_USERNAME` / `AUTH_PASSWORD`, then managed like any other
-user in the hub UI; later changes to those env vars do not update it).
+Default login: `admin` / `admin` (seeded by the dev Keycloak realm import;
+manage users in the Keycloak console afterwards).
 
 ## Production (Docker + nginx)
 
 ```bash
 cp .env.prod.example .env.prod
-# Set DOMAIN, AUTH_PASSWORD, APOLLO_API_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DATABASE_URL
+# Set DOMAIN, KC_* / FM_OIDC_*, APOLLO_API_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DATABASE_URL
 
 # Prod uses prebuilt images from GHCR (no local builds) — built and pushed by
 # .github/workflows/deploy-prod.yml; see deploy/README.md for the full flow.
@@ -87,8 +80,9 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
 
 - nginx serves the built SPA on port 80 for `${DOMAIN}`
-- `/api/auth/*` → auth FastAPI (Redis sessions); `/api/search/*` → search FastAPI (Postgres), which relays to leads internally
-- Postgres, MongoDB, and Redis data are stored in Docker volumes
+- `/api/search/*` → search FastAPI (Postgres), which relays to leads internally; `/api/mail/*` → mail
+- Keycloak must be reachable at `KC_HOSTNAME` (browser-facing HTTPS; TLS in front of its published port)
+- Postgres and MongoDB data are stored in Docker volumes
 
 Point your DNS A/AAAA record for `${DOMAIN}` at the host. Put TLS in front (Cloudflare, Caddy, Traefik, or certbot) as needed.
 
@@ -119,18 +113,6 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8001
 ```
 
-### Auth backend
-
-```bash
-cd auth
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Set REDIS_URL to a reachable Redis (e.g. redis://127.0.0.1:6379/0) and AUTH_USERNAME / AUTH_PASSWORD
-uvicorn app.main:app --reload --port 8002
-```
-
 ### Mail backend
 
 ```bash
@@ -138,8 +120,8 @@ cd mail
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Set DATABASE_URL, AUTH_BACKEND_URL, GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET,
-# and OAUTH_REDIRECT_URL (must be registered on the Google OAuth client).
+# Set DATABASE_URL, GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET, and
+# OAUTH_REDIRECT_URL (must be registered on the Google OAuth client).
 uvicorn app.main:app --reload --port 8004
 ```
 
@@ -150,8 +132,8 @@ cd mcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# Set LEADS_BACKEND_URL / AUTH_BACKEND_URL to reachable services
-# (e.g. http://127.0.0.1:8001 / :8002) plus AUTH_USERNAME / AUTH_PASSWORD.
+# Set LEADS_BACKEND_URL to a reachable leads service (e.g. http://127.0.0.1:8001).
+# Non-Docker runs also need: pip install -e ../libs/fm_runtime
 uvicorn app.main:app --reload --port 8003
 ```
 
@@ -173,23 +155,24 @@ npm install
 npm run dev   # serves at http://localhost:5173/mail/ (base /mail/)
 ```
 
-Standalone app — same MUI theme, no shared code with `frontend/`. It expects the hub session token in `localStorage` (log in via the hub first) and proxies `/api` to `VITE_API_PROXY_TARGET` (default `http://127.0.0.1:8004`).
+Standalone app — same MUI theme, no shared code with `frontend/`. It shares the hub's Keycloak OIDC session via localStorage (`fm_oidc_*` keys; it can also sign in on its own via `/mail/callback`) and proxies `/api` to `VITE_API_PROXY_TARGET` (default `http://127.0.0.1:8004`).
 
 ## Environment
 
 | Variable | Description |
 |---|---|
 | `APOLLO_API_KEY` | Apollo master API key (**leads backend only**) |
-| `AUTH_USERNAME` / `AUTH_PASSWORD` | Bootstrap admin credentials — the auth backend creates this admin-role user if missing (never updates an existing one) |
-| `SESSION_TTL_SECONDS` | Session token lifetime (auth backend; default `86400` = 1 day) |
-| `REDIS_URL` | Redis URL for the auth backend profile + session store (e.g. `redis://redis:6379/0`) |
-| `OPA_URL` | OPA decision service URL (auth backend; default `http://opa:8181`) |
-| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]`; blank = default Search (`/search`) + Mail (`/mail`) entries |
+| `KC_ADMIN_USERNAME` / `KC_ADMIN_PASSWORD` | Keycloak bootstrap admin (console account, not a realm user) |
+| `KC_HOSTNAME` | Browser-facing Keycloak URL (prod; TLS-terminated in front) |
+| `FM_OIDC_ISSUER` | OIDC issuer as seen by browsers and asserted in tokens, e.g. `https://kc.<domain>/realms/funnelmanager` |
+| `FM_OIDC_<SVC>_SECRET` | Confidential client secret per service (`SEARCH`/`LEADS`/`MAIL`/`MCP`) — must match the imported realm |
+| `FM_SERVICE_NAME`, `FM_JWT_VERIFY`, `FM_OIDC_TOKEN_URL`, `FM_OIDC_JWKS_URL`, `FM_OIDC_CLIENT_ID`, `FM_OIDC_CLIENT_SECRET`, `FM_SERVICE_AUDIENCE`, `FM_ENFORCE_AUDIENCE`, `FM_REQUIRE_PRINCIPAL`, `FM_EXCHANGE_SCOPE_TEMPLATE`, `FM_LOG_LEVEL` | fm_runtime per-service identity config (set by compose/k8s manifests; see `libs/fm_runtime/fm_runtime/settings.py`) |
+| `FRONTEND_OIDC_CLIENT_ID` | Public browser client id (default `frontend`); baked with the issuer into `/config.js` at container start |
+| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]` baked into `/config.js`; blank = default Search (`/search`) + Mail (`/mail/`) entries |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Web application type, Gmail API enabled) used by the mail backend to connect mailboxes — scopes `gmail.readonly` + `gmail.send` |
 | `MAIL_OAUTH_REDIRECT_URL` | Authorized redirect URI registered on the OAuth client; blank = derived from `PUBLIC_BASE_URL`, dev default `http://localhost:8000/api/mail/oauth/callback` |
 | `MAIL_DATABASE_URL` | Mail backend Postgres URL (prod compose; the dedicated `mail-db` container) |
-| `AUTH_BACKEND_URL` | Internal URL services use to authorize requests (e.g. `http://auth:8002`) |
-| `MCP_SHARED_LOGIN_FALLBACK` | MCP server: allow tokenless tool calls to fall back to the shared login (dev compose: `true`; prod default: `false`) |
+| `MCP_SHARED_LOGIN_FALLBACK` | MCP server: tokenless tool calls act as the MCP service identity via client credentials (dev compose: `true`; prod default: `false`) |
 | `CORS_ORIGINS` | Allowed frontend origins (comma-separated) |
 | `DATABASE_URL` | Async SQLAlchemy URL (`postgresql+asyncpg://...`) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres bootstrap (compose) |
@@ -201,30 +184,9 @@ Standalone app — same MUI theme, no shared code with `frontend/`. It expects t
 
 ## API
 
-### Auth backend
+### Identity (Keycloak)
 
-nginx routes `/api/auth/*` here; it owns profiles, roles, sessions, and the OPA policy. Services authorize every request via `POST /api/auth/authorize` on the Docker network.
-
-Public / any-profile:
-
-| Method | Path | Access | Description |
-|---|---|---|---|
-| `POST` | `/api/auth/login` | anonymous | OAuth2 password form → opaque session token (Redis, 1-day TTL) |
-| `POST` | `/api/auth/request-account` | anonymous | `{ "username": … }` → pending account request (always answers 202) |
-| `GET` | `/api/auth/me` | any profile | Current username + role |
-| `GET` | `/api/auth/apps` | any profile | Hub app list (from `WEB_APPS`) |
-| `POST` | `/api/auth/validate` | token in body | `{ "token": … }` → user or 401 |
-| `POST` | `/api/auth/authorize` | token in body | `{ token, service, method, path }` → `{ allowed, username, role }` (the OPA decision endpoint) |
-| `POST` | `/api/auth/logout` | any profile | Revoke the caller's session |
-
-Admin (role grants must cover the `auth` service):
-
-| Method | Path | Description |
-|---|---|---|
-| `GET/POST` | `/api/auth/admin/users` | List / create users (`{username, password, role}`) |
-| `PATCH/DELETE` | `/api/auth/admin/users/{username}` | Change role/password; delete (guards the last admin) |
-| `GET/POST` | `/api/auth/admin/roles`, `DELETE /roles/{name}` | Roles with grants; changes are pushed to OPA |
-| `GET` | `/api/auth/admin/account-requests` (+ `/approve`, `/deny`) | Pending account requests |
+There is no in-repo auth API anymore. Sign-in, tokens, users, and roles live in Keycloak (realm `funnelmanager`): browsers run auth-code + PKCE against `FM_OIDC_ISSUER`, services exchange tokens per hop (RFC 8693), and admins manage principals in the Keycloak console (linked from the hub). See [`docs/authentication.md`](docs/authentication.md). Every backend also serves `/healthz`, `/readyz`, and Prometheus `/metrics`.
 
 ### Search backend
 
@@ -244,7 +206,7 @@ Search history is per-user: every `/api/search/searches*` endpoint is scoped to 
 
 ### Mail backend
 
-nginx routes `/api/mail/*` here and `/mail/` to the standalone mail UI (`mailui`, its own React app + container; same origin as the hub, so it reuses the hub session — unauthenticated visits bounce to `/login`). Every API route requires a bearer session token authorized against the auth service + OPA (service `mail`), except `GET /api/mail/health` and the OAuth callback (validated by a single-use `state` bound to the user who started the flow). Data lives in the dedicated `mail-db` Postgres container; mailbox OAuth refresh tokens are stored there too — treat it as secret material.
+nginx routes `/api/mail/*` here and `/mail/` to the standalone mail UI (`mailui`, its own React app + container; same origin as the hub, so it shares the hub's Keycloak session — unauthenticated visits redirect to Keycloak). Every API route requires a mail-audience JWT, except the probes and the OAuth callback (validated by a single-use `state` bound to the user who started the flow). Data lives in the dedicated `mail-db` Postgres container; mailbox OAuth refresh tokens are stored there too — treat it as secret material.
 
 Connecting a mailbox: hit **Connect** in the Mail app → Google consent (offline access) → callback stores tokens and starts syncing. The background loop (every `SYNC_INTERVAL_SECONDS`, default 180) backfills the whole mailbox newest-first (`BACKFILL_PAGES_PER_CYCLE` pages of 100 per cycle) and applies Gmail history increments (new mail, deletions → `is_deleted` flag, label changes). Messages deleted on Google's side stay archived here.
 
@@ -262,7 +224,7 @@ Connecting a mailbox: hit **Connect** in the Mail app → Google consent (offlin
 
 ### Leads backend (internal)
 
-Reached by the search backend and MCP server at `LEADS_BACKEND_URL` (not exposed to the browser via nginx, except Apollo webhooks). Every route requires a bearer session token and is authorized against the auth service + OPA (service `leads`), except `GET /api/leads/health` and the secret-in-path Apollo webhooks.
+Reached by the search backend and MCP server at `LEADS_BACKEND_URL` (not exposed to the browser via nginx, except Apollo webhooks). Every route requires a leads-audience JWT (obtained by callers via RFC 8693 exchange), except the probes and the secret-in-path Apollo webhooks.
 
 Apollo-facing routes use the native Apollo API relative path under `/api/leads/apollo/…`. Method, path, and parameters match [Apollo’s API](https://docs.apollo.io/reference) (path may include or omit the `api/v1/` prefix). Apollo auth uses `APOLLO_API_KEY` from the server `.env` only — clients must not supply an Apollo API key.
 
@@ -313,7 +275,7 @@ Enrichment updates an existing document when `apollo_id` already exists (no dupl
 
 [MCP](https://modelcontextprotocol.io) server for internal AI-agent clients — streamable HTTP at `/mcp`, plus `GET /health`. It is never routed through nginx: dev publishes `8003` on the host, prod publishes `127.0.0.1:8003` (loopback only).
 
-**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is forwarded unchanged to the leads backend, which authorizes it per request against the auth service + OPA — so the agent acts with the authority of the profile behind the token. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls fall back to a shared `AUTH_USERNAME`/`AUTH_PASSWORD` login.
+**Auth:** every tool accepts an optional `session_token` argument; the MCP server also honors an `Authorization: Bearer` header on the `/mcp` request (the explicit argument wins). The token is the acting principal's (aud `mcp`); the server exchanges it (RFC 8693) for a leads-audience token per upstream call, so leads sees the same principal with `azp: mcp`. With `MCP_SHARED_LOGIN_FALLBACK=true` (dev), tokenless calls act as the MCP server's own service identity via client credentials.
 
 All tools are read-only inspection over the leads backend (free, no Apollo calls — new searches/enrichment happen in the search app):
 

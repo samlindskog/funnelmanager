@@ -26,6 +26,41 @@ jobs:
         working-directory: frontend
         run: npm run lint
 
+  mailui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mailui/package-lock.json
+      - name: Install
+        working-directory: mailui
+        run: npm ci
+      - name: Typecheck + build
+        working-directory: mailui
+        run: npm run build
+      - name: Lint
+        working-directory: mailui
+        run: npm run lint
+
+  backends:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install fm_runtime + service deps, import every app
+        run: |
+          python -m pip install -q ./libs/fm_runtime
+          python -m pip install -q -r search/requirements.txt -r leads/requirements.txt \
+            -r mail/requirements.txt -r mcp/requirements.txt
+          for svc in search leads mail mcp; do
+            (cd "$svc" && python -c "import app.main" && echo "$svc imports OK")
+          done
+
   compose-validate:
     runs-on: ubuntu-latest
     steps:
