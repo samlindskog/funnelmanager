@@ -216,14 +216,28 @@ YAML
     ;;
 
   flux)
+    # Read-only deploy-key install (no repo write, unlike `flux bootstrap`).
+    # The public half of $FLUX_KEY must already be a Deploy Key on the repo.
+    # Binds the cluster to $FLUX_BRANCH:deploy/clusters/prod, which fans out
+    # to the infrastructure + apps Kustomizations.
+    : "${GITHUB_REPO:?export GITHUB_REPO=samlindskog/funnelmanager}"
+    FLUX_KEY="${FLUX_KEY:-$HOME/funnelmanager-deploy/flux-deploy-key}"
+    FLUX_BRANCH="${FLUX_BRANCH:-k3s-deploy-x9bc433}"
     command -v flux >/dev/null || { echo "install the flux CLI first"; exit 1; }
     flux check --pre
-    flux bootstrap github \
-      --owner "${GITHUB_REPO%%/*}" \
-      --repository "${GITHUB_REPO##*/}" \
-      --branch main \
-      --path deploy/clusters/prod \
-      --personal
+    flux install
+    flux create secret git flux-system \
+      --url="ssh://git@github.com/${GITHUB_REPO}" \
+      --private-key-file="$FLUX_KEY"
+    flux create source git flux-system \
+      --url="ssh://git@github.com/${GITHUB_REPO}" \
+      --branch="$FLUX_BRANCH" \
+      --secret-ref=flux-system \
+      --interval=1m
+    flux create kustomization flux-system \
+      --source=GitRepository/flux-system \
+      --path=deploy/clusters/prod \
+      --prune=true --interval=10m
     ;;
 
   restore-leads)
