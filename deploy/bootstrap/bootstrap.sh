@@ -161,9 +161,12 @@ YAML
     read -rsp "Keycloak console admin password: " KCPW; echo
     ensure identity keycloak-admin generic keycloak-admin \
       --from-literal=username=admin --from-literal=password="$KCPW"
-    echo "Provide the HARDENED prod realm export (secrets rotated; see PLACEHOLDERS.md):"
-    read -rp "path to realm.json: " REALM
-    ensure identity keycloak-realm generic keycloak-realm --from-file=realm.json="$REALM"
+    echo "Provide the HARDENED realm exports (secrets rotated; see PLACEHOLDERS.md)."
+    echo "Both are mounted into Keycloak's import dir and imported on first start."
+    read -rp "path to PROD realm.json (funnelmanager): " REALM
+    read -rp "path to DEV  realm.json (funnelmanager-dev): " REALMDEV
+    ensure identity keycloak-realm generic keycloak-realm \
+      --from-file=realm.json="$REALM" --from-file=realm-dev.json="$REALMDEV"
 
     read -rp  "Object storage ACCESS_KEY_ID: " OSK
     read -rsp "Object storage SECRET: " OSS; echo
