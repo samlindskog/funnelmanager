@@ -1,0 +1,7 @@
+# ClusterIssuers live in their own Kustomization (gated on cert-manager being
+# Ready) so the cert-manager.io CRDs exist before these CRs are applied —
+# bundling them with the Helm install deadlocks Flux's dry-run on first boot.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - clusterissuer.yaml
