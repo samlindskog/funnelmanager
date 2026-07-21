@@ -208,6 +208,13 @@ spec:
       ports:
         - protocol: TCP
           port: 3100
+    # Keycloak OIDC (server-side token/userinfo) over the public issuer on 443.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

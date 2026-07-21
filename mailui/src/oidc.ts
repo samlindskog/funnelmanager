@@ -67,7 +67,10 @@ export function parseClaims(token: string): Claims | null {
   try {
     let payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
     payload += '='.repeat((4 - (payload.length % 4)) % 4)
-    const claims = JSON.parse(atob(payload))
+    // atob yields Latin-1 code units; decode the underlying bytes as UTF-8
+    // so non-ASCII usernames/roles survive intact.
+    const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0))
+    const claims = JSON.parse(new TextDecoder().decode(bytes))
     return {
       sub: String(claims.sub ?? ''),
       username: String(claims.preferred_username ?? claims.sub ?? ''),
@@ -151,7 +154,12 @@ let refreshInFlight: Promise<string | null> | null = null
 
 async function refreshTokens(): Promise<string | null> {
   const refreshToken = localStorage.getItem(REFRESH_KEY)
-  if (!refreshToken) return null
+  if (!refreshToken) {
+    // A stale access token with no refresh token is unrecoverable — clear it
+    // so hasSession() reflects reality and callers route back to login.
+    if (localStorage.getItem(ACCESS_KEY)) clearTokens()
+    return null
+  }
   try {
     const response = await fetch(tokenUrl(), {
       method: 'POST',

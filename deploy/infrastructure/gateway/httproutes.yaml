@@ -125,3 +125,22 @@ spec:
         - name: keycloak
           namespace: identity
           port: 8080
+---
+# Grafana — its own host; Grafana enforces Keycloak OIDC login itself, so the
+# OPA gateway policy allows this host wholesale (like the Keycloak host).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: istio-ingress
+spec:
+  parentRefs:
+    - name: fm-gateway
+      sectionName: https-grafana
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - name: grafana
+          namespace: monitoring
+          port: 3000

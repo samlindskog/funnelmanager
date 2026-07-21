@@ -1,5 +1,7 @@
-# Prometheus (monitoring ns) scrapes /metrics on the app ports and the
-# Istio sidecar's merged-metrics/health port (15020).
+# Prometheus (monitoring ns) scrapes the Istio sidecar's merged-metrics
+# port (15020 — app + Envoy metrics; STRICT mTLS forbids scraping the app
+# ports directly) and the CNPG instance-manager metrics port (9187 — the
+# db pods are not injected). The app ports stay open for completeness.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -28,3 +30,5 @@ spec:
           port: 8004
         - protocol: TCP
           port: 15020
+        - protocol: TCP
+          port: 9187

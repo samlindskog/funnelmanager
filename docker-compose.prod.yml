@@ -118,6 +118,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: search
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_SEARCH_SECRET}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
     depends_on:
       db:
         condition: service_healthy
@@ -149,6 +152,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: leads
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_LEADS_SECRET}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
@@ -193,6 +199,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: mail
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MAIL_SECRET}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
       CORS_ORIGINS: ${CORS_ORIGINS}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -238,9 +247,17 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
       KC_HOSTNAME: ${KC_HOSTNAME}
-      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # Backchannel requests (token exchange from the service containers) must
+      # mint tokens with the SAME issuer the browser sees; a dynamic
+      # backchannel hostname would stamp the container-DNS issuer and break
+      # every service's pinned-issuer verification.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
     volumes:
-      - ${KEYCLOAK_REALM_FILE:-./deploy/keycloak/realm-funnelmanager-dev.json}:/opt/keycloak/data/import/realm.json:ro
+      # No default on purpose: the tracked realm file is the DEV realm
+      # (admin/admin application user, published client secrets) and must
+      # never reach prod. Start from
+      # deploy/keycloak/realm-funnelmanager-prod.example.json.
+      - ${KEYCLOAK_REALM_FILE:?point KEYCLOAK_REALM_FILE at a hardened realm export — never the tracked dev realm}:/opt/keycloak/data/import/realm.json:ro
       - keycloak_data:/opt/keycloak/data/h2
     ports:
       - "${HOST_BIND:-127.0.0.1:}${PROD_KC_PORT:-8080}:8080"
@@ -264,6 +281,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: mcp
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MCP_SECRET}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
     # Loopback-only publish: host-local MCP clients can reach
     # http://127.0.0.1:8003/mcp, the internet cannot. Drop the ports block to
     # keep it Docker-network-only; nginx never routes to it. PROD_MCP_PORT lets a
@@ -282,9 +302,11 @@ services:
     mem_limit: 256m
     environment:
       DOMAIN: ${DOMAIN}
-      # Baked into /config.js at container start (browser-side OIDC config).
+      # Baked into /config.js at container start (browser-side OIDC config
+      # + optional hub app list).
       FRONTEND_OIDC_ISSUER: ${FM_OIDC_ISSUER}
       FRONTEND_OIDC_CLIENT_ID: ${FRONTEND_OIDC_CLIENT_ID:-frontend}
+      WEB_APPS: ${WEB_APPS:-}
     # HOST_BIND pins the published port to loopback (e.g. "127.0.0.1:") so a host
     # TLS reverse proxy fronts it and Docker does not bypass ufw; PROD_HTTP_PORT
     # frees port 80 when another stack coexists on the box.

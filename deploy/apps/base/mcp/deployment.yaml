@@ -15,6 +15,14 @@ spec:
       labels:
         app.kubernetes.io/name: mcp
         app.kubernetes.io/part-of: funnelmanager
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8003"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: mcp
       nodeSelector:
@@ -67,6 +75,13 @@ spec:
                 configMapKeyRef:
                   name: fm-oidc
                   key: issuer
+            # In-cluster token endpoint (split horizon) — the public issuer
+            # host is unreachable under the namespace's default-deny egress.
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
             - name: FM_OIDC_CLIENT_ID
               value: mcp
             - name: FM_OIDC_CLIENT_SECRET

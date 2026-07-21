@@ -93,7 +93,13 @@ case "${1:-}" in
       kubectl -n "$n" get secret "$s" >/dev/null 2>&1 && { echo "have $n/$s"; return; }
       kubectl -n "$n" create secret "$@"
     }
-    for n in identity prod dev monitoring flux-system; do ns "$n"; done
+    for n in identity prod dev monitoring flux-system cert-manager; do ns "$n"; done
+
+    # cert-manager DNS-01 solver: Cloudflare API token (Zone:DNS Edit +
+    # Zone:Zone Read on the domain zone). Lives in the cert-manager namespace.
+    read -rsp "Cloudflare API token (DNS-01): " CFT; echo
+    ensure cert-manager cloudflare-api-token generic cloudflare-api-token \
+      --from-literal=api-token="$CFT"
 
     read -rsp "Keycloak console admin password: " KCPW; echo
     ensure identity keycloak-admin generic keycloak-admin \
@@ -114,6 +120,12 @@ case "${1:-}" in
     read -rsp "Grafana admin password: " GFPW; echo
     ensure monitoring grafana-admin generic grafana-admin \
       --from-literal=admin-user=admin --from-literal=admin-password="$GFPW"
+    # Grafana Keycloak OIDC: the `grafana` confidential-client secret from the
+    # realm export. Loaded via envFromSecret; the key name IS Grafana's native
+    # env override for [auth.generic_oauth].client_secret.
+    read -rsp "Grafana OIDC client secret (realm 'grafana' client): " GFOIDC; echo
+    ensure monitoring grafana-oidc generic grafana-oidc \
+      --from-literal=GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET="$GFOIDC"
 
     for n in prod dev; do
       for svc in search leads mail mcp; do
@@ -157,8 +169,20 @@ case "${1:-}" in
       --personal
     ;;
 
+  restore-leads)
+    # Restore the pre-cutover leads Mongo archive into the cluster's mongo.
+    # Usage: ./bootstrap.sh restore-leads <path-to-leads.archive.gz> [prod|dev]
+    # (archive produced by: docker exec <mongo> mongodump --db=funnelmanager_leads --archive --gzip)
+    ARCHIVE="${2:?path to leads-*.archive.gz}"; NS="${3:-prod}"
+    POD=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=mongo -o jsonpath='{.items[0].metadata.name}')
+    echo "Restoring $ARCHIVE into $NS/$POD (funnelmanager_leads)…"
+    kubectl -n "$NS" exec -i "$POD" -- mongorestore --archive --gzip \
+      --nsInclude='funnelmanager_leads.*' < "$ARCHIVE"
+    echo "Restored. Re-index embeddings on the cluster afterwards if Milvus is fresh."
+    ;;
+
   *)
-    echo "usage: $0 {server|agent-edge|agent-worker|label-taint|secrets|flux}" >&2
+    echo "usage: $0 {server|agent-edge|agent-worker|label-taint|secrets|flux|restore-leads}" >&2
     exit 2
     ;;
 esac

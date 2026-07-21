@@ -12,11 +12,11 @@ metadata:
   namespace: istio-ingress
 spec:
   jwtRules:
-    - issuer: https://replace-kc.example.com/realms/funnelmanager # PLACEHOLDERS.md
-      jwksUri: https://replace-kc.example.com/realms/funnelmanager/protocol/openid-connect/certs
+    - issuer: https://kc.x9bc433.win/realms/funnelmanager # PLACEHOLDERS.md
+      jwksUri: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/certs
       forwardOriginalToken: true
-    - issuer: https://replace-kc.example.com/realms/funnelmanager-dev
-      jwksUri: https://replace-kc.example.com/realms/funnelmanager-dev/protocol/openid-connect/certs
+    - issuer: https://kc.x9bc433.win/realms/funnelmanager-dev
+      jwksUri: https://kc.x9bc433.win/realms/funnelmanager-dev/protocol/openid-connect/certs
       forwardOriginalToken: true
 ---
 apiVersion: security.istio.io/v1
@@ -26,8 +26,8 @@ metadata:
   namespace: prod
 spec:
   jwtRules:
-    - issuer: https://replace-kc.example.com/realms/funnelmanager
-      jwksUri: https://replace-kc.example.com/realms/funnelmanager/protocol/openid-connect/certs
+    - issuer: https://kc.x9bc433.win/realms/funnelmanager
+      jwksUri: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/certs
       forwardOriginalToken: true
 ---
 apiVersion: security.istio.io/v1
@@ -37,6 +37,6 @@ metadata:
   namespace: dev
 spec:
   jwtRules:
-    - issuer: https://replace-kc.example.com/realms/funnelmanager-dev
-      jwksUri: https://replace-kc.example.com/realms/funnelmanager-dev/protocol/openid-connect/certs
+    - issuer: https://kc.x9bc433.win/realms/funnelmanager-dev
+      jwksUri: https://kc.x9bc433.win/realms/funnelmanager-dev/protocol/openid-connect/certs
       forwardOriginalToken: true

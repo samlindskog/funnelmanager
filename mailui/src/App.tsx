@@ -1,5 +1,5 @@
-import { Box, CircularProgress, CssBaseline, ThemeProvider, Typography } from '@mui/material'
-import { useEffect, useState } from 'react'
+import { Box, Button, CircularProgress, CssBaseline, Stack, ThemeProvider, Typography } from '@mui/material'
+import { useEffect, useRef, useState } from 'react'
 import { redirectToLogin } from './api'
 import { MailApp } from './MailApp'
 import { beginLogin, completeLogin, currentClaims, getAccessToken, hasSession } from './oidc'
@@ -13,8 +13,11 @@ import type { User } from './types'
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const ran = useRef(false)
 
   useEffect(() => {
+    if (ran.current) return // StrictMode double-invoke guard: PKCE codes are single-use
+    ran.current = true
     async function bootstrap() {
       if (window.location.pathname.endsWith('/callback')) {
         const returnTo = await completeLogin()
@@ -47,7 +50,16 @@ export default function App() {
         <MailApp user={user} />
       ) : (
         <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
-          {error ? <Typography color="text.secondary">{error}</Typography> : <CircularProgress />}
+          {error ? (
+            <Stack spacing={2} sx={{ alignItems: 'center' }}>
+              <Typography color="text.secondary">{error}</Typography>
+              <Button variant="contained" onClick={() => redirectToLogin()}>
+                Back to sign in
+              </Button>
+            </Stack>
+          ) : (
+            <CircularProgress />
+          )}
         </Box>
       )}
     </ThemeProvider>

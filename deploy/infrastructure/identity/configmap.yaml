@@ -7,4 +7,4 @@ metadata:
     app.kubernetes.io/name: keycloak
     app.kubernetes.io/part-of: funnelmanager
 data:
-  hostname: https://replace-kc.example.com
+  hostname: https://kc.x9bc433.win

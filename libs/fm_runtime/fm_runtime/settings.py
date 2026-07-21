@@ -58,6 +58,17 @@ class RuntimeSettings:
     # Defense-in-depth below the mesh DENY policy; keeps dev honest too.
     require_principal: bool = field(default_factory=lambda: _bool("FM_REQUIRE_PRINCIPAL", True))
 
+    # Per-request role-grant authorization (the same rule OPA's grant_ok_for
+    # applies in the mesh). OFF in-mesh — OPA is the enforcement point there;
+    # ON in docker compose, where nothing else authorizes beyond audience.
+    enforce_grants: bool = field(default_factory=lambda: _bool("FM_ENFORCE_GRANTS", False))
+    # Grant data: inline JSON mapping role -> grants, or a file holding that
+    # mapping / a full OPA data.json. Unset = built-in default (see grants.py).
+    role_grants_json: str = field(default_factory=lambda: os.environ.get("FM_ROLE_GRANTS", ""))
+    role_grants_file: str = field(
+        default_factory=lambda: os.environ.get("FM_ROLE_GRANTS_FILE", "")
+    )
+
     log_level: str = field(default_factory=lambda: os.environ.get("FM_LOG_LEVEL", "INFO"))
 
     @property
@@ -87,8 +98,22 @@ class RuntimeSettings:
     @property
     def exchange_enabled(self) -> bool:
         """Token exchange runs whenever a token endpoint is configured;
-        without one (bare dev) outbound calls pass the subject token through."""
+        without one (bare dev) outbound calls pass the subject token through.
+        A token endpoint with a blank client secret is a misconfiguration —
+        ``validate()`` rejects it at startup so the broker can never silently
+        forward un-exchanged tokens in a Keycloak-backed deployment."""
         return bool(self.effective_token_url and self.oidc_client_secret)
+
+    def validate(self) -> None:
+        """Fail fast on contradictory configuration (PrincipalMiddleware calls
+        this at startup so a bad deployment crashes with a clear message
+        instead of degrading into passthrough/tokenless outbound calls)."""
+        if self.effective_token_url and not self.oidc_client_secret:
+            raise RuntimeError(
+                "FM_OIDC_CLIENT_SECRET is empty but a token endpoint is "
+                f"configured ({self.effective_token_url}). Set the secret, or "
+                "unset FM_OIDC_ISSUER/FM_OIDC_TOKEN_URL for bare-dev passthrough."
+            )
 
 
 @lru_cache

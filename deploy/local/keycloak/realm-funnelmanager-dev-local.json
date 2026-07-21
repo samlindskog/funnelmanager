@@ -1,5 +1,6 @@
 {
-  "realm": "funnelmanager",
+  "_comment": "LOCAL k3d realm \u2014 the tracked compose dev realm re-issued as 'funnelmanager-dev' (the realm name the dev environment's OPA data and RequestAuthentication expect) with fm.localtest.me redirect URIs. Dev-only credentials (admin/admin, dev-*-secret) \u2014 never import outside a local cluster. Regenerate after editing the tracked dev realm: see deploy/local/README.md.",
+  "realm": "funnelmanager-dev",
   "enabled": true,
   "sslRequired": "external",
   "registrationAllowed": false,
@@ -14,7 +15,7 @@
       },
       {
         "name": "internal-service",
-        "description": "Service-account identity for detached background work (search/mcp continue jobs under client credentials once the principal's token expires) — grants leads API access only (OPA data documents / fm_runtime grants)"
+        "description": "Service-account identity for detached background work (search/mcp continue jobs under client credentials once the principal's token expires) \u2014 grants leads API access only (OPA data documents / fm_runtime grants)"
       }
     ]
   },
@@ -202,17 +203,14 @@
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": true,
       "redirectUris": [
-        "http://localhost:5173/*",
-        "http://127.0.0.1:5173/*",
-        "http://localhost:8000/*",
-        "http://localhost/*"
+        "https://fm.localtest.me/*"
       ],
       "webOrigins": [
         "+"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:5173/*##http://127.0.0.1:5173/*##http://localhost:8000/*##http://localhost/*"
+        "post.logout.redirect.uris": "https://fm.localtest.me/*"
       },
       "protocolMappers": [
         {
@@ -236,30 +234,6 @@
           }
         }
       ],
-      "defaultClientScopes": [
-        "basic",
-        "profile",
-        "roles"
-      ]
-    },
-    {
-      "clientId": "grafana",
-      "name": "Grafana (observability) OIDC login",
-      "publicClient": false,
-      "secret": "dev-grafana-secret",
-      "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "fullScopeAllowed": true,
-      "redirectUris": [
-        "https://grafana.x9bc433.win/login/generic_oauth"
-      ],
-      "webOrigins": [
-        "https://grafana.x9bc433.win"
-      ],
-      "attributes": {
-        "pkce.code.challenge.method": "S256"
-      },
       "defaultClientScopes": [
         "basic",
         "profile",

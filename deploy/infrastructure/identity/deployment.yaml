@@ -57,6 +57,9 @@ spec:
               value: "true"
             - name: KC_HEALTH_ENABLED
               value: "true"
+            # Prometheus scrapes /metrics on the management port (9000).
+            - name: KC_METRICS_ENABLED
+              value: "true"
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               valueFrom:
                 secretKeyRef:

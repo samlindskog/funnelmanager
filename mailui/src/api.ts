@@ -6,7 +6,7 @@
  * to Keycloak and returns to /mail/ afterwards.
  */
 
-import { beginLogin, clearTokens, getAccessToken, logout as oidcLogout } from './oidc'
+import { beginLogin, clearTokens, getAccessToken, hasSession, logout as oidcLogout } from './oidc'
 import type {
   MailAccount,
   MailAttachment,
@@ -50,12 +50,22 @@ function detailMessage(detail: unknown, fallback: string): string {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   const token = await getAccessToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (!token) {
+    if (hasSession()) {
+      // The session exists but could not be refreshed right now (identity
+      // provider unreachable) — retryable, keep the tokens, do NOT log out.
+      const message = 'Could not refresh the session — retry shortly'
+      throw new ApiError(503, message, message)
+    }
+    redirectToLogin()
+    throw new ApiError(401, 'Unauthorized', 'Unauthorized')
+  }
+  headers.set('Authorization', `Bearer ${token}`)
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const response = await fetch(path, { ...init, headers })
-  // Session expired/revoked beyond refresh (or never present) — sign in again.
+  // Session expired/revoked beyond refresh — sign in again.
   if (response.status === 401) {
     clearTokens()
     redirectToLogin()

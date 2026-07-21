@@ -13,6 +13,12 @@ spec:
     labels:
       app.kubernetes.io/name: mail-db
       app.kubernetes.io/part-of: funnelmanager
+    annotations:
+      # CNPG's init jobs fight sidecars (the Envoy container never exits, so
+      # the bootstrap Job never completes) and the non-mesh operator must
+      # reach the instance manager — same reason the identity namespace is
+      # not injected. NetworkPolicies fence these pods instead.
+      sidecar.istio.io/inject: "false"
   bootstrap:
     initdb:
       database: funnelmanager_mail

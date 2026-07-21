@@ -1,4 +1,4 @@
-import { clearTokens, config, getAccessToken } from './oidc'
+import { clearTokens, config, getAccessToken, hasSession } from './oidc'
 import type {
   ApolloRecord,
   AppLink,
@@ -32,6 +32,21 @@ function handleUnauthorized(): ApiError {
   return new ApiError(401, 'Unauthorized', 'Unauthorized')
 }
 
+/** Access token for an API call. A session that exists but cannot be
+ * refreshed right now (identity provider unreachable) is NOT a logout —
+ * throw a retryable 503 and keep the tokens; only a genuinely absent
+ * session resets auth state. Never send an authenticated endpoint a
+ * token-less request: its 401 would be mistaken for session death. */
+async function bearerToken(): Promise<string> {
+  const token = await getToken()
+  if (token) return token
+  if (hasSession()) {
+    const message = 'Could not refresh the session — retry shortly'
+    throw new ApiError(503, message, message)
+  }
+  throw handleUnauthorized()
+}
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -62,18 +77,15 @@ function detailMessage(detail: unknown, fallback: string): string {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  const token = await getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  headers.set('Authorization', `Bearer ${await bearerToken()}`)
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
 
-  const hadToken = Boolean(token)
   const response = await fetch(path, { ...init, headers })
   // A 401 on an authenticated request means the session expired/was revoked —
-  // reset auth state and route back to login. A 401 on an unauthenticated
-  // request (e.g. a bad login) is a normal error whose server message we keep.
-  if (response.status === 401 && hadToken) {
+  // reset auth state and route back to login.
+  if (response.status === 401) {
     throw handleUnauthorized()
   }
   if (!response.ok) {
@@ -182,8 +194,7 @@ export async function runSearch(
     typeof handlers === 'function' ? { onProgress: handlers } : handlers
 
   const headers = new Headers()
-  const token = await getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  headers.set('Authorization', `Bearer ${await bearerToken()}`)
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/x-ndjson')
 
@@ -373,8 +384,7 @@ async function consumePeopleProgressStream(
   if (signal?.aborted) return
 
   const headers = new Headers()
-  const token = await getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  headers.set('Authorization', `Bearer ${await bearerToken()}`)
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/x-ndjson')
 

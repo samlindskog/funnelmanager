@@ -35,12 +35,16 @@ generatorOptions:
 configMapGenerator:
   - name: fm-oidc
     literals:
-      - issuer=https://replace-kc.example.com/realms/funnelmanager
+      - issuer=https://kc.x9bc433.win/realms/funnelmanager
+      # Split horizon: the public issuer host is not reachable from the app
+      # namespaces (default-deny egress) — token exchange dials Keycloak's
+      # in-cluster Service; issued tokens still carry the public issuer.
+      - token-url=http://keycloak.identity.svc.cluster.local:8080/realms/funnelmanager/protocol/openid-connect/token
   - name: fm-web
     literals:
-      - domain=replace-app.example.com
-      - cors-origins=https://replace-app.example.com
-      - public-base-url=https://replace-app.example.com
+      - domain=x9bc433.win
+      - cors-origins=https://x9bc433.win
+      - public-base-url=https://x9bc433.win
       - web-apps=
 
 patches:

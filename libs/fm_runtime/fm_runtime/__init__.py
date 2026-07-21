@@ -28,12 +28,13 @@ from fm_runtime.context import RequestContext, current_context, current_principa
 from fm_runtime.logging import configure_logging
 from fm_runtime.middleware import PrincipalMiddleware
 from fm_runtime.observability import install_observability
-from fm_runtime.principal import Actor, Peer, Principal, TokenError
+from fm_runtime.principal import Actor, AuthUnavailableError, Peer, Principal, TokenError
 from fm_runtime.settings import RuntimeSettings, get_runtime_settings
 from fm_runtime.tokens import ExchangeError, TokenBroker, get_broker
 
 __all__ = [
     "Actor",
+    "AuthUnavailableError",
     "ExchangeError",
     "InternalClient",
     "Peer",

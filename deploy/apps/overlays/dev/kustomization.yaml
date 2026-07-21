@@ -35,12 +35,18 @@ configMapGenerator:
   - name: fm-oidc
     literals:
       # Dev uses the funnelmanager-dev realm on the shared Keycloak.
-      - issuer=https://replace-kc.example.com/realms/funnelmanager-dev
+      - issuer=https://kc.x9bc433.win/realms/funnelmanager-dev
+      # Split horizon: the public issuer host is not reachable from the app
+      # namespaces (default-deny egress) — token exchange dials Keycloak's
+      # in-cluster Service; issued tokens still carry the public issuer.
+      - token-url=http://keycloak.identity.svc.cluster.local:8080/realms/funnelmanager-dev/protocol/openid-connect/token
   - name: fm-web
     literals:
-      - domain=replace-app.example.com
-      - cors-origins=https://replace-app.example.com
-      - public-base-url=https://replace-app.example.com
+      # Dev environment host — NOT the prod one: webhooks and CORS built from
+      # these must land on this environment (gateway https-dev listener).
+      - domain=dev.x9bc433.win
+      - cors-origins=https://dev.x9bc433.win
+      - public-base-url=https://dev.x9bc433.win
       - web-apps=
 
 patches:

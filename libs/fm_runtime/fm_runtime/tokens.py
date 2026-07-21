@@ -77,6 +77,9 @@ class TokenBroker:
         client-credentials token for this service's own identity.
         """
         if not self.settings.exchange_enabled:
+            # Bare dev only (no token endpoint at all) — RuntimeSettings
+            # .validate() rejects a configured endpoint with a blank secret
+            # at startup, so this can never mask a missing prod secret.
             return subject_token or ""
 
         # The svc-<audience> optional client scope carries the audience mapper;

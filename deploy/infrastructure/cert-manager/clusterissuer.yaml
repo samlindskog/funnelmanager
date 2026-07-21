@@ -1,20 +1,28 @@
+# ACME via DNS-01 over Cloudflare. The domain (x9bc433.win) is proxied by
+# Cloudflare, so HTTP-01 to the edge can't be reached for validation —
+# DNS-01 writes a TXT record via the Cloudflare API instead and works with
+# the orange-cloud proxy left ON. Needs a Cloudflare API token (Zone:DNS
+# Edit + Zone:Zone Read on x9bc433.win) in the `cloudflare-api-token` Secret
+# in the cert-manager namespace (created at bootstrap — see PLACEHOLDERS.md).
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: letsencrypt
 spec:
   acme:
-    email: REPLACE_LE_EMAIL # PLACEHOLDERS.md
+    email: sam@slindskog.net # PLACEHOLDERS.md
     server: https://acme-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
       name: letsencrypt-account-key
     solvers:
-      - http01:
-          gatewayHTTPRoute:
-            parentRefs:
-              - name: fm-gateway
-                namespace: istio-ingress
-                kind: Gateway
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+        selector:
+          dnsZones:
+            - x9bc433.win
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -22,14 +30,16 @@ metadata:
   name: letsencrypt-staging
 spec:
   acme:
-    email: REPLACE_LE_EMAIL # PLACEHOLDERS.md
+    email: sam@slindskog.net # PLACEHOLDERS.md
     server: https://acme-staging-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
       name: letsencrypt-staging-account-key
     solvers:
-      - http01:
-          gatewayHTTPRoute:
-            parentRefs:
-              - name: fm-gateway
-                namespace: istio-ingress
-                kind: Gateway
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+        selector:
+          dnsZones:
+            - x9bc433.win

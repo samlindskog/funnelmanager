@@ -1,4 +1,5 @@
 {
+  "_comment": "Production realm TEMPLATE. Copy OUT of the repo, replace every REPLACE-* secret and x9bc433.win host, then point KEYCLOAK_REALM_FILE (compose) or the keycloak-realm secret (k3s) at the copy. Unlike the dev realm this imports NO human users — create them in the Keycloak console and assign realm roles there.",
   "realm": "funnelmanager",
   "enabled": true,
   "sslRequired": "external",
@@ -19,25 +20,6 @@
     ]
   },
   "users": [
-    {
-      "username": "admin",
-      "enabled": true,
-      "email": "admin@funnelmanager.local",
-      "emailVerified": true,
-      "firstName": "Funnel",
-      "lastName": "Admin",
-      "requiredActions": [],
-      "credentials": [
-        {
-          "type": "password",
-          "value": "admin",
-          "temporary": false
-        }
-      ],
-      "realmRoles": [
-        "admin"
-      ]
-    },
     {
       "username": "service-account-search",
       "enabled": true,
@@ -198,21 +180,18 @@
       "name": "Funnel Manager hub + search app + mail app (browser)",
       "publicClient": true,
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
+      "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": true,
       "redirectUris": [
-        "http://localhost:5173/*",
-        "http://127.0.0.1:5173/*",
-        "http://localhost:8000/*",
-        "http://localhost/*"
+        "https://x9bc433.win/*"
       ],
       "webOrigins": [
         "+"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:5173/*##http://127.0.0.1:5173/*##http://localhost:8000/*##http://localhost/*"
+        "post.logout.redirect.uris": "https://x9bc433.win/*"
       },
       "protocolMappers": [
         {
@@ -246,7 +225,7 @@
       "clientId": "grafana",
       "name": "Grafana (observability) OIDC login",
       "publicClient": false,
-      "secret": "dev-grafana-secret",
+      "secret": "REPLACE-grafana-secret",
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
@@ -270,7 +249,7 @@
       "clientId": "search",
       "name": "Search backend service identity",
       "publicClient": false,
-      "secret": "dev-search-secret",
+      "secret": "REPLACE-search-secret",
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
@@ -290,7 +269,7 @@
       "clientId": "leads",
       "name": "Leads backend service identity",
       "publicClient": false,
-      "secret": "dev-leads-secret",
+      "secret": "REPLACE-leads-secret",
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
@@ -307,7 +286,7 @@
       "clientId": "mail",
       "name": "Mail backend service identity",
       "publicClient": false,
-      "secret": "dev-mail-secret",
+      "secret": "REPLACE-mail-secret",
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
@@ -324,7 +303,7 @@
       "clientId": "mcp",
       "name": "MCP server service identity",
       "publicClient": false,
-      "secret": "dev-mcp-secret",
+      "secret": "REPLACE-mcp-secret",
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
@@ -333,37 +312,6 @@
       },
       "optionalClientScopes": [
         "svc-leads"
-      ],
-      "defaultClientScopes": [
-        "basic",
-        "profile",
-        "roles"
-      ]
-    },
-    {
-      "clientId": "agent-example",
-      "name": "Example machine/AI agent (client credentials)",
-      "publicClient": false,
-      "secret": "dev-agent-secret",
-      "standardFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": true,
-      "attributes": {
-        "standard.token.exchange.enabled": "true"
-      },
-      "protocolMappers": [
-        {
-          "name": "aud-mcp",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-audience-mapper",
-          "config": {
-            "included.custom.audience": "mcp",
-            "access.token.claim": "true"
-          }
-        }
-      ],
-      "optionalClientScopes": [
-        "svc-mcp"
       ],
       "defaultClientScopes": [
         "basic",

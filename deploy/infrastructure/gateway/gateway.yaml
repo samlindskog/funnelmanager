@@ -21,7 +21,7 @@ spec:
     - name: https-app
       port: 443
       protocol: HTTPS
-      hostname: replace-app.example.com # PLACEHOLDERS.md
+      hostname: x9bc433.win # PLACEHOLDERS.md
       tls:
         mode: Terminate
         certificateRefs:
@@ -32,7 +32,7 @@ spec:
     - name: https-dev
       port: 443
       protocol: HTTPS
-      hostname: replace-dev.example.com # PLACEHOLDERS.md (e.g. dev.<domain>)
+      hostname: dev.x9bc433.win # PLACEHOLDERS.md (e.g. dev.<domain>)
       tls:
         mode: Terminate
         certificateRefs:
@@ -43,11 +43,22 @@ spec:
     - name: https-kc
       port: 443
       protocol: HTTPS
-      hostname: replace-kc.example.com # PLACEHOLDERS.md (host only, e.g. kc.<domain>)
+      hostname: kc.x9bc433.win # PLACEHOLDERS.md (host only, e.g. kc.<domain>)
       tls:
         mode: Terminate
         certificateRefs:
           - name: kc-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https-grafana
+      port: 443
+      protocol: HTTPS
+      hostname: grafana.x9bc433.win
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: grafana-tls
       allowedRoutes:
         namespaces:
           from: Same
@@ -63,7 +74,7 @@ spec:
     name: letsencrypt
     kind: ClusterIssuer
   dnsNames:
-    - replace-app.example.com
+    - x9bc433.win
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -76,7 +87,7 @@ spec:
     name: letsencrypt
     kind: ClusterIssuer
   dnsNames:
-    - replace-dev.example.com
+    - dev.x9bc433.win
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -89,4 +100,17 @@ spec:
     name: letsencrypt
     kind: ClusterIssuer
   dnsNames:
-    - replace-kc.example.com
+    - kc.x9bc433.win
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grafana-tls
+  namespace: istio-ingress
+spec:
+  secretName: grafana-tls
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - grafana.x9bc433.win

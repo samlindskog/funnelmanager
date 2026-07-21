@@ -96,11 +96,25 @@ reconciling. Expected order (enforced by `dependsOn` + `wait`):
 7. `infra-identity` (**gate:** kc-db Cluster healthy, Keycloak Ready,
    realm imported — `curl https://kc.<DOMAIN>/realms/funnelmanager/.well-known/openid-configuration`)
 8. `infra-gateway` (**gate:** Certificates Ready — Let's Encrypt solved via
-   the HTTP listener; Gateway Programmed)
-9. `infra-observability` (**gate:** prometheus/loki/grafana Ready)
+   **DNS-01 over Cloudflare** (`cloudflare-api-token` secret; proxy may stay
+   ON); Gateway Programmed. The A records for `x9bc433.win`, `dev.`, `kc.`,
+   `grafana.` must point at the edge node.)
+9. `infra-observability` (**gate:** prometheus/loki/grafana Ready; Grafana
+   login via Keycloak at `https://grafana.x9bc433.win`)
 10. `apps-prod` (**gate:** all six Deployments Ready). `apps-dev` is
     **suspended** by default (single-worker budget) — `flux resume
-    kustomization apps-dev` to run it.
+    kustomization apps-dev` + the `deploy-dev` workflow to run it.
+
+**First image pin:** the overlays ship `sha-PINME`, which no registry serves,
+so `apps-prod` cannot go Ready until real images are pinned. Run the
+`release-prod` workflow once (Actions → Run workflow, ref `main`) — it builds
+the six images and commits a `sha-<sha>` pin to `main` that Flux rolls out.
+Do this right after `flux bootstrap`; the gate simply stays pending until the
+pin lands.
+
+**Data restore:** once `prod` mongo is Ready, load the pre-cutover leads
+archive — `./bootstrap.sh restore-leads ~/funnelmanager-backups/<ts>/leads-usfr2.archive.gz prod`
+— then re-index embeddings (cluster Milvus starts empty).
 
 Watch with `flux get kustomizations --watch`.
 

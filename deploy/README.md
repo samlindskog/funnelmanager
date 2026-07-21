@@ -42,22 +42,32 @@ The `prod` image tag is a moving tag advanced on every deploy; each build also
 pushes an immutable `sha-<sha>` tag (and `v*` on release tags) for pinning and
 rollback.
 
-## CI/CD (GitHub Actions)
+## CI/CD (GitHub Actions) — k3s GitOps
 
-- **`.github/workflows/ci.yml`** — runs on every PR and push to main: frontend
-  typecheck/build/lint + Compose validation. No deploy.
-- **`.github/workflows/deploy-prod.yml`** — deploys prod. Never triggered by a
-  plain push to main; only by:
-  - pushing a tag `v*` (`git tag v1.2.0 && git push origin v1.2.0`), or
-  - the **Run workflow** button (`workflow_dispatch`), which takes a ref.
+The deploy model is **GitOps**: images are built on runners and pushed to
+GHCR, then the immutable `sha-<sha>` tag is *pinned into the overlay
+kustomization and committed to `main`*. Flux (watching `main`) reconciles the
+pin and rolls it out. A deploy is a git commit, not an SSH push — auditable
+and revertable.
 
-  A build job (matrix over the five services) builds each image on a GitHub
-  runner with buildx + GHA layer cache and pushes to GHCR using the workflow's
-  `GITHUB_TOKEN`. The deploy job then SSHes to usfr2 with the forced-command
-  deploy key and streams — over stdin — the GHCR username, the ephemeral
-  `GITHUB_TOKEN` (so the box can pull private packages without a stored PAT),
-  and `docker-compose.prod.yml` at the deployed ref. The hook writes the compose
-  file, `docker login`s, pulls, `up -d`s, prunes, and logs out.
+- **`.github/workflows/ci.yml`** — every PR / push to main: frontend + mailui
+  build/lint, backend import checks, **`opa check`/`opa test`** (25+ policy
+  tests), **`kustomize build`** of every infra dir + both overlays, and
+  compose-file validation. No deploy.
+- **`.github/workflows/build-images.yml`** — reusable: builds the six images
+  (buildx + GHA cache) → GHCR as `sha-<sha>` + a moving `prod`/`dev` tag, then
+  pins the chosen overlay's `newTag` and commits to `main` (`[skip ci]`).
+- **`.github/workflows/release-prod.yml`** — prod release. Triggered only by a
+  `v*` tag push or the **Run workflow** button (ref input); pins the **prod**
+  overlay. Gate it behind the `production` environment's required reviewer.
+- **`.github/workflows/deploy-dev.yml`** — dev preview in the same cluster.
+  **Run workflow** with a ref; pins the **dev** overlay (served at
+  `https://dev.x9bc433.win`, funnelmanager-dev realm, same Istio/OPA path as
+  prod). `apps-dev` ships suspended for capacity — `flux resume kustomization
+  apps-dev` to bring it up, `flux suspend` to reclaim the worker.
+
+Rollback: dispatch `release-prod` with an older ref, or revert the pin commit
+on `main` (Flux re-reconciles either way).
 
 ## Manual deploy / rollback (on the box)
 

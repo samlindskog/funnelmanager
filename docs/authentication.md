@@ -34,7 +34,14 @@ token with the target's audience:
   (`grant_type=token-exchange`, `audience=<target>`, `scope=svc-<target>`)
   and caches results per (subject, audience) — never once per request.
   Calls made without an inbound principal (background jobs) use a
-  client-credentials token: the service acts as itself.
+  client-credentials token: the service acts as itself. Detached jobs
+  (streaming search/enrich in `LeadsClient`) capture the principal's subject
+  token but downgrade to the service's own client-credentials identity once
+  it expires mid-job — the `search`/`mcp` service accounts hold the
+  `internal-service` realm role, whose grants cover only the leads API.
+  A configured token endpoint with a blank `FM_OIDC_CLIENT_SECRET` refuses
+  to start (`RuntimeSettings.validate()`) — passthrough exists only for
+  bare dev with no IdP at all.
 - Keycloak 26.2's standard token exchange keeps the subject (`sub`,
   `preferred_username`, roles) and stamps the exchanging client into `azp`.
   It does **not** emit nested RFC 8693 `act` chains; `fm_runtime` parses
@@ -47,7 +54,20 @@ token with the target's audience:
   available to every handler (contextvar + `request.state`). In-mesh it
   parses without verifying (Istio `RequestAuthentication` already did);
   outside the mesh (docker-compose dev) `FM_JWT_VERIFY=true` turns on full
-  JWKS verification. Wrong/missing audience ⇒ 401.
+  JWKS verification. Wrong/missing audience ⇒ 401. A JWKS outage is **not**
+  a 401: the cache serves stale keys through it, rate-limits refetches
+  (unknown `kid`s cannot trigger a fetch per request), and when no cached
+  key matches the middleware answers a retryable 503 — clients keep their
+  sessions instead of being force-logged-out by a Keycloak restart.
+- With `FM_ENFORCE_GRANTS=true` (set in both compose files) the middleware
+  also applies the **role grants** — the same
+  `{service, methods, path_prefix}` rule OPA's `grant_ok_for` enforces in
+  the mesh, keyed by the JWT's realm roles. Grant data comes from
+  `FM_ROLE_GRANTS` (inline JSON) or `FM_ROLE_GRANTS_FILE` (a full OPA
+  `data.json` works); unset, the built-in default mirrors
+  `deploy/policy/data.json` (`admin` = everything, `internal-service` =
+  leads only). No covering grant ⇒ 403. This keeps compose deployments
+  fail-closed per request even though they run no OPA.
 - Routes annotated `@anonymous("reason")` tolerate an absent principal.
   That annotation is the **single source of truth** for the
   public-anonymous allowlist (exported with `python -m fm_runtime.export`,
@@ -96,5 +116,17 @@ docker-compose dev runs Keycloak in dev mode importing
 because there is no mesh in compose. The issuer is pinned to the
 browser-facing URL (`http://localhost:8080/realms/funnelmanager`) while
 backends dial the `keycloak` container for token/JWKS endpoints, so `iss`
-claims stay consistent. In the k3s deployment Istio + OPA enforce
-everything and the apps run with verification off.
+claims stay consistent — which also requires
+`KC_HOSTNAME_BACKCHANNEL_DYNAMIC=false`: a dynamic backchannel hostname
+would stamp `iss=http://keycloak:8080` on exchanged tokens and break the
+pinned-issuer check. (`--import-realm` only imports a realm that does not
+exist yet — after editing the realm file, drop the Keycloak volume or apply
+the change in the console.)
+
+The prod compose deployment **requires** `KEYCLOAK_REALM_FILE` (no
+default): the tracked realm file is the dev realm — an `admin`/`admin`
+application user and published client secrets — and must never be imported
+into prod. Start from
+`deploy/keycloak/realm-funnelmanager-prod.example.json`, which imports no
+human users. In the k3s deployment Istio + OPA enforce everything and the
+apps run with verification off.

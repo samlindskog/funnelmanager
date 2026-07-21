@@ -109,6 +109,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: search
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_SEARCH_SECRET:-dev-search-secret}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
     volumes:
       - ./search:/app
       - ./libs/fm_runtime:/libs/fm_runtime
@@ -141,6 +144,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: leads
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_LEADS_SECRET:-dev-leads-secret}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       MILVUS_COLLECTION: ${MILVUS_COLLECTION:-leads_people}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
@@ -189,6 +195,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: mail
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MAIL_SECRET:-dev-mail-secret}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -239,7 +248,11 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
       KC_HOSTNAME: http://localhost:8080
-      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # Backchannel requests (token exchange / JWKS from the containers) must
+      # mint tokens with the SAME issuer the browser sees; a dynamic
+      # backchannel hostname would stamp iss=http://keycloak:8080 and break
+      # every service's pinned-issuer verification.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
     volumes:
       - ./deploy/keycloak/realm-funnelmanager-dev.json:/opt/keycloak/data/import/realm.json:ro
       - keycloak_data_dev:/opt/keycloak/data/h2
@@ -270,6 +283,9 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: mcp
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MCP_SECRET:-dev-mcp-secret}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
       # Dev convenience: tokenless tool calls act as the MCP server's own
       # service identity (client credentials). Keep off in prod.
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-true}

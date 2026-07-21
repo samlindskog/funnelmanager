@@ -17,6 +17,7 @@ Behavior per request:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -26,7 +27,14 @@ from prometheus_client import Counter, Histogram
 
 from fm_runtime import context as fm_context
 from fm_runtime.annotations import build_matchers
-from fm_runtime.principal import TokenError, parse_peer, parse_token, summarize_for_log
+from fm_runtime.grants import grants_allow, role_grants
+from fm_runtime.principal import (
+    AuthUnavailableError,
+    TokenError,
+    parse_peer,
+    parse_token,
+    summarize_for_log,
+)
 from fm_runtime.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger("fm.access")
@@ -66,6 +74,9 @@ class PrincipalMiddleware:
         self.app = app
         self.service = service
         self.settings = settings or get_runtime_settings()
+        self.settings.validate()
+        if self.settings.enforce_grants:
+            role_grants()  # parse grant config at startup — fail fast, not per-request
         self._anonymous: list[tuple[frozenset[str], re.Pattern[str]]] | None = None
         self._extra = tuple(re.compile(p) for p in extra_anonymous)
 
@@ -93,6 +104,7 @@ class PrincipalMiddleware:
 
         principal = None
         token_error: TokenError | None = None
+        auth_unavailable: AuthUnavailableError | None = None
         auth_header = _header(scope, b"authorization") or ""
         scheme, _, token = auth_header.partition(" ")
         if scheme.lower() == "bearer" and token.strip():
@@ -100,6 +112,8 @@ class PrincipalMiddleware:
                 principal = await parse_token(token.strip(), self.settings)
             except TokenError as exc:
                 token_error = exc
+            except AuthUnavailableError as exc:
+                auth_unavailable = exc
 
         request_id = _header(scope, b"x-request-id") or uuid.uuid4().hex
         trace_headers = {}
@@ -117,14 +131,45 @@ class PrincipalMiddleware:
         )
         scope.setdefault("state", {})["fm_context"] = ctx
 
-        if principal is None and not self._is_anonymous(scope):
+        anonymous_route = self._is_anonymous(scope)
+
+        # IdP outage while holding a token: retryable 503, never 401 — a 401
+        # tells clients the session is dead and they discard their tokens.
+        if auth_unavailable is not None and not anonymous_route:
+            await _send_json(
+                send,
+                503,
+                f"Authentication temporarily unavailable: {auth_unavailable}",
+                extra_headers=[(b"retry-after", b"5")],
+            )
+            self._observe(scope, 503, 0.0, ctx)
+            return
+
+        if principal is None and not anonymous_route:
             if self.settings.require_principal:
                 detail = str(token_error) if token_error else "Not authenticated"
-                await _send_401(send, detail)
+                await _send_json(
+                    send, 401, detail, extra_headers=[(b"www-authenticate", b"Bearer")]
+                )
                 self._observe(scope, 401, 0.0, ctx)
                 return
             if token_error:
                 logger.warning("Invalid token allowed through (FM_REQUIRE_PRINCIPAL=false): %s", token_error)
+
+        # Role-grant authorization (compose deployments — in-mesh OPA applies
+        # the identical rule via ext_authz). Anonymous routes carry their own
+        # in-app auth (webhook secret, OAuth state row) and are exempt.
+        if (
+            principal is not None
+            and not anonymous_route
+            and self.settings.enforce_grants
+            and not grants_allow(
+                principal.roles, self.service, method, scope.get("path", "")
+            )
+        ):
+            await _send_json(send, 403, "no role grant covers this request")
+            self._observe(scope, 403, 0.0, ctx)
+            return
 
         started = time.perf_counter()
         status_holder = {"status": 0}
@@ -167,16 +212,21 @@ class PrincipalMiddleware:
         )
 
 
-async def _send_401(send, detail: str) -> None:
-    body = ('{"detail": "' + detail.replace('"', "'") + '"}').encode()
+async def _send_json(
+    send,
+    status: int,
+    detail: str,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
+    body = json.dumps({"detail": detail}).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 401,
+            "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
-                (b"www-authenticate", b"Bearer"),
+                *(extra_headers or []),
             ],
         }
     )

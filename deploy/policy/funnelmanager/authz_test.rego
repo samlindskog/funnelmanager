@@ -17,9 +17,9 @@ jwt(claims) := io.jwt.encode_sign({"typ": "JWT", "alg": "HS256"}, claims, {
 	"k": "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktMTIzNA",
 })
 
-prod_iss := "https://replace-kc.example.com/realms/funnelmanager"
+prod_iss := "https://kc.x9bc433.win/realms/funnelmanager"
 
-dev_iss := "https://replace-kc.example.com/realms/funnelmanager-dev"
+dev_iss := "https://kc.x9bc433.win/realms/funnelmanager-dev"
 
 admin_user_token(aud, azp) := jwt({
 	"iss": prod_iss,
@@ -36,7 +36,7 @@ http_input(src_ns, src_sa, dst_ns, dst_sa, method, path, token) := {"attributes"
 	"request": {"http": {
 		"method": method,
 		"path": path,
-		"host": "replace-app.example.com",
+		"host": "x9bc433.win",
 		"headers": {"authorization": sprintf("Bearer %s", [token])},
 	}},
 }}
@@ -47,7 +47,7 @@ http_input_noauth(src_ns, src_sa, dst_ns, dst_sa, method, path) := {"attributes"
 	"request": {"http": {
 		"method": method,
 		"path": path,
-		"host": "replace-app.example.com",
+		"host": "x9bc433.win",
 		"headers": {},
 	}},
 }}
@@ -243,7 +243,7 @@ test_segment_boundary_prefix if {
 
 test_gateway_authenticated_api_allowed if {
 	authz.allow with input as gateway_input(
-		"replace-app.example.com", "GET", "/api/search/searches",
+		"x9bc433.win", "GET", "/api/search/searches",
 		{"authorization": sprintf("Bearer %s", [jwt({
 			"iss": prod_iss, "aud": ["search", "mail"], "azp": "frontend",
 			"sub": "u-admin", "realm_access": {"roles": ["admin"]},
@@ -252,11 +252,17 @@ test_gateway_authenticated_api_allowed if {
 }
 
 test_gateway_tokenless_api_denied if {
-	not authz.allow with input as gateway_input("replace-app.example.com", "GET", "/api/search/searches", {})
+	not authz.allow with input as gateway_input("x9bc433.win", "GET", "/api/search/searches", {})
 }
 
 test_gateway_spa_shell_anonymous if {
-	authz.allow with input as gateway_input("replace-app.example.com", "GET", "/login", {})
+	authz.allow with input as gateway_input("x9bc433.win", "GET", "/login", {})
+}
+
+test_gateway_mixed_case_www_host_normalized if {
+	# Host normalization lowercases BEFORE trimming "www." so any
+	# capitalization of the prefix still resolves the environment.
+	authz.allow with input as gateway_input("WWW.X9bc433.win", "GET", "/login", {})
 }
 
 test_gateway_unknown_host_denied if {
@@ -265,9 +271,14 @@ test_gateway_unknown_host_denied if {
 
 test_gateway_keycloak_host_passes if {
 	authz.allow with input as gateway_input(
-		"replace-kc.example.com", "GET",
+		"kc.x9bc433.win", "GET",
 		"/realms/funnelmanager/.well-known/openid-configuration", {},
 	)
+}
+
+test_gateway_grafana_host_passes if {
+	# Grafana enforces its own Keycloak OIDC login; the gateway admits the host.
+	authz.allow with input as gateway_input("grafana.x9bc433.win", "GET", "/login", {})
 }
 
 test_bootstrap_default_deny if {

@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+import jwt as pyjwt
 from fastapi import HTTPException, status
 
-from fm_runtime import get_broker
+from fm_runtime import ExchangeError, get_broker
 from fm_runtime.context import current_trace_headers
 
 from app.config import Settings
 
+logger = logging.getLogger(__name__)
+
 APOLLO_MAX_PER_PAGE = 100
+
+# Stop exchanging a subject token this close to (or past) its expiry —
+# Keycloak would reject the exchange anyway.
+_SUBJECT_EXPIRY_SLACK_SECONDS = 10.0
 
 PERSON_DISPLAY_ENDPOINTS = (
     "/api/v1/people/match",
@@ -345,16 +354,33 @@ def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
     return record
 
 
+def _token_expiry(token: str | None) -> float | None:
+    """Unix ``exp`` of a JWT, parsed without verification (the middleware
+    already verified the inbound token; this is only for expiry scheduling)."""
+    if not token:
+        return None
+    try:
+        claims = pyjwt.decode(token, options={"verify_signature": False})
+    except pyjwt.InvalidTokenError:
+        return None
+    exp = claims.get("exp")
+    return float(exp) if isinstance(exp, (int, float)) else None
+
+
 class LeadsClient:
     """Relay to /api/leads — never calls Apollo directly.
 
     ``token`` is the caller's *subject* token: on every outbound call it is
     exchanged (RFC 8693, cached) for a token whose audience is the leads
     service, so leads sees the same originating principal with this service
-    in the ``act`` chain. Detached ingest jobs capture the subject token for
-    their lifetime — exactly the old session-lifetime semantics. Without a
-    subject token the exchange falls back to this service's own
-    client-credentials identity.
+    in the ``act`` chain. Access tokens are short-lived (minutes) while
+    detached ingest/enrich jobs and NDJSON streams can run far longer; once
+    the captured subject token expires no exchange can succeed, so the client
+    downgrades to this service's own client-credentials identity for the rest
+    of the job — the principal authorized the work when it started, and the
+    ``internal-service`` role grant scopes what the service identity may call.
+    Without a subject token at all, calls use client credentials from the
+    start.
     """
 
     AUDIENCE = "leads"
@@ -362,9 +388,27 @@ class LeadsClient:
     def __init__(self, settings: Settings, token: str | None = None):
         self.settings = settings
         self.subject_token = token
+        self._subject_expires_at = _token_expiry(token)
+        self._downgraded = False
         # Trace context is captured at construction (request scope) so
         # detached jobs keep correlating with the request that started them.
         self._trace_headers = current_trace_headers()
+
+    def _effective_subject(self) -> str | None:
+        subject = self.subject_token
+        if (
+            subject
+            and self._subject_expires_at is not None
+            and time.time() >= self._subject_expires_at - _SUBJECT_EXPIRY_SLACK_SECONDS
+        ):
+            if not self._downgraded:
+                self._downgraded = True
+                logger.warning(
+                    "Subject token expired mid-job; continuing under the "
+                    "search service identity (client credentials)"
+                )
+            subject = None
+        return subject
 
     async def _headers(self) -> dict[str, str]:
         headers = {
@@ -372,7 +416,16 @@ class LeadsClient:
             "Accept": "application/json",
             **self._trace_headers,
         }
-        outbound = await get_broker().token_for(self.AUDIENCE, self.subject_token)
+        try:
+            outbound = await get_broker().token_for(self.AUDIENCE, self._effective_subject())
+        except ExchangeError as exc:
+            # Keycloak unreachable or refusing: retryable upstream failure.
+            # Streaming endpoints catch HTTPException and emit an ``error``
+            # event; synchronous ones return this 503 as-is.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Identity provider unavailable: {exc}",
+            ) from exc
         if outbound:
             headers["Authorization"] = f"Bearer {outbound}"
         return headers

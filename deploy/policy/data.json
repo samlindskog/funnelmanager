@@ -2,14 +2,15 @@
   "funnelmanager": {
     "config": {
       "issuers": {
-        "prod": "https://replace-kc.example.com/realms/funnelmanager",
-        "dev": "https://replace-kc.example.com/realms/funnelmanager-dev"
+        "prod": "https://kc.x9bc433.win/realms/funnelmanager",
+        "dev": "https://kc.x9bc433.win/realms/funnelmanager-dev"
       },
       "hosts": {
-        "replace-app.example.com": "prod",
-        "replace-dev.example.com": "dev"
+        "x9bc433.win": "prod",
+        "dev.x9bc433.win": "dev"
       },
-      "keycloak_host": "replace-kc.example.com",
+      "keycloak_host": "kc.x9bc433.win",
+      "grafana_host": "grafana.x9bc433.win",
       "routes": {
         "/api/leads/webhooks/": "leads",
         "/api/search/": "search",
@@ -98,6 +99,12 @@
         "description": "Full access to every service (the single human principal today; agents' service accounts receive realm roles in Keycloak the same way)",
         "grants": [
           {"service": "*", "methods": ["*"], "path_prefix": "/"}
+        ]
+      },
+      "internal-service": {
+        "description": "search/mcp service accounts: detached jobs continue under client credentials once the principal's token expires — leads API only. Keep in sync with fm_runtime/grants.py's built-in default.",
+        "grants": [
+          {"service": "leads", "methods": ["*"], "path_prefix": "/api/leads"}
         ]
       }
     }

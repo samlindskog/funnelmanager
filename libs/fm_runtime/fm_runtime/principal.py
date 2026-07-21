@@ -14,6 +14,7 @@ app-level assertions. Authorization decisions on it belong to OPA, not here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_ALGS = ["RS256", "RS384", "RS512", "ES256", "ES384", "PS256"]
 _JWKS_TTL_SECONDS = 600.0
+_JWKS_MIN_REFRESH_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -92,31 +94,60 @@ class TokenError(Exception):
     expired, or wrong audience). The middleware maps this to a 401."""
 
 
+class AuthUnavailableError(Exception):
+    """The verification infrastructure (JWKS endpoint) is unreachable and no
+    cached key can vouch for the token. The middleware maps this to a
+    retryable 503 — never a 401, which clients treat as session death and
+    answer by dropping their tokens."""
+
+
 class _JwksCache:
     """kid -> verification key, refreshed from the JWKS endpoint on TTL expiry
-    or on an unknown kid (covers key rotation)."""
+    or on an unknown kid (covers key rotation).
+
+    Failure posture: a failed refresh serves the stale cached keys instead of
+    failing closed (a Keycloak restart must not 401 every active session),
+    and refreshes are rate-limited so requests bearing unknown kids
+    (attacker-controlled input) cannot each trigger a JWKS fetch."""
 
     def __init__(self) -> None:
         self._keys: dict[str, Any] = {}
-        self._fetched_at = 0.0
+        self._fetched_at = 0.0  # last successful fetch (monotonic)
+        self._attempted_at = 0.0  # last attempt, success or not
+        self._last_refresh_failed = False
+        self._lock = asyncio.Lock()
 
     async def key_for(self, kid: str, jwks_url: str) -> Any:
         if kid in self._keys and (time.monotonic() - self._fetched_at) < _JWKS_TTL_SECONDS:
             return self._keys[kid]
-        await self._refresh(jwks_url)
-        key = self._keys.get(kid)
-        if key is None:
+        async with self._lock:
+            now = time.monotonic()
+            if kid in self._keys and (now - self._fetched_at) < _JWKS_TTL_SECONDS:
+                return self._keys[kid]  # refreshed while waiting for the lock
+            if self._attempted_at == 0.0 or (
+                (now - self._attempted_at) >= _JWKS_MIN_REFRESH_INTERVAL_SECONDS
+            ):
+                await self._refresh(jwks_url)
+            key = self._keys.get(kid)
+            if key is not None:  # fresh, or stale-but-present during an outage
+                return key
+            if self._last_refresh_failed:
+                raise AuthUnavailableError(
+                    "JWKS endpoint unavailable and no cached key matches"
+                )
             raise TokenError(f"Unknown signing key id {kid!r}")
-        return key
 
     async def _refresh(self, jwks_url: str) -> None:
+        self._attempted_at = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(jwks_url)
                 response.raise_for_status()
                 payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise TokenError(f"JWKS fetch failed: {exc}") from exc
+            self._last_refresh_failed = True
+            logger.warning("JWKS refresh from %s failed (serving cached keys): %s", jwks_url, exc)
+            return
         keys: dict[str, Any] = {}
         for jwk in payload.get("keys", []):
             kid = str(jwk.get("kid") or "")
@@ -128,6 +159,7 @@ class _JwksCache:
                 continue
         self._keys = keys
         self._fetched_at = time.monotonic()
+        self._last_refresh_failed = False
 
 
 _jwks_cache = _JwksCache()
@@ -176,7 +208,9 @@ async def parse_token(token: str, settings: RuntimeSettings) -> Principal:
     """Parse (and, when configured, verify) a bearer JWT into a Principal.
 
     Raises TokenError on anything unusable — the caller decides whether that
-    is fatal (non-anonymous route) or ignorable (anonymous route).
+    is fatal (non-anonymous route) or ignorable (anonymous route) — and
+    AuthUnavailableError when verification infrastructure (JWKS) is down,
+    which must surface as a retryable 503, never a 401.
     """
     if settings.jwt_verify:
         jwks_url = settings.effective_jwks_url
@@ -245,6 +279,7 @@ def summarize_for_log(principal: Principal | None) -> str:
 
 __all__ = [
     "Actor",
+    "AuthUnavailableError",
     "Peer",
     "Principal",
     "TokenError",

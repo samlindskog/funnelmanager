@@ -101,9 +101,11 @@ Dev overlay halves app requests, keeps limits, replicas 1 everywhere.
   `FM_SERVICE_NAME`, `FM_OIDC_ISSUER`, `FM_OIDC_CLIENT_ID`,
   `FM_OIDC_CLIENT_SECRET` (secretKeyRef), `FM_JWT_VERIFY: "false"`
   (mesh validates; RequestAuthentication), plus service-specific vars
-  mirroring compose. Token/JWKS URLs default from the issuer (reachable
-  in-cluster via the gateway) — do not set FM_OIDC_TOKEN_URL/JWKS_URL
-  unless split-horizon is needed.
+  mirroring compose. Split horizon is required: the app namespaces'
+  default-deny egress cannot reach the public issuer host, so search/mcp
+  set `FM_OIDC_TOKEN_URL` (fm-oidc `token-url`) to
+  `keycloak.identity.svc:8080` — issued tokens still carry the public
+  issuer because Keycloak's backchannel hostname is not dynamic.
 - Probes: HTTP GET `/healthz` (liveness) and `/readyz` (readiness) on the
   app port for the four backends; `/` for static nginx; Keycloak uses
   `/health/ready` on port 9000 (management).

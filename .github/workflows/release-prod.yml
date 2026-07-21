@@ -1,0 +1,36 @@
+# Prod release (k3s GitOps). Builds the six images and pins them into the
+# prod overlay on main; Flux rolls them out. Never triggered by a plain push
+# to main — only by:
+#   * pushing a release tag `v*`  (git tag v1.2.0 && git push origin v1.2.0)
+#   * the Run workflow button (workflow_dispatch), which takes a ref.
+# Rollback: dispatch with an older ref (or tag), or revert the pin commit.
+name: release-prod
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Ref to build & release (tag, branch, or SHA)'
+        required: false
+        default: 'main'
+
+concurrency:
+  group: release-prod
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Attach the GitHub "production" environment so a reviewer approval can
+    # gate every prod release (Settings -> Environments).
+    uses: ./.github/workflows/build-images.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+      overlay: prod
+      moving_tag: prod
+    permissions:
+      contents: write
+      packages: write
+    secrets: inherit

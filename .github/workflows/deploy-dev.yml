@@ -1,0 +1,37 @@
+# Dev preview in the prod cluster. Builds the six images from any ref and
+# pins them into the DEV overlay on main; Flux reconciles the dev namespace,
+# which is wired into the same Istio/Envoy/OPA/Keycloak path as prod and
+# served at https://dev.x9bc433.win (funnelmanager-dev realm).
+#
+# Capacity note: the `apps-dev` Flux Kustomization ships SUSPENDED (the 8GB
+# worker can't always hold prod + dev + data + observability). Bringing dev
+# up is a two-step, on-demand action:
+#   1. run this workflow (dispatch with the ref) to build + pin dev images;
+#   2. on the operator box:  flux resume kustomization apps-dev
+# Tear back down with:       flux suspend kustomization apps-dev
+# (then `kubectl -n dev delete deploy --all` to reclaim memory if needed).
+name: deploy-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Ref to build & preview in dev (branch, tag, or SHA)'
+        required: false
+        default: 'main'
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    uses: ./.github/workflows/build-images.yml
+    with:
+      ref: ${{ github.event.inputs.ref }}
+      overlay: dev
+      moving_tag: dev
+    permissions:
+      contents: write
+      packages: write
+    secrets: inherit

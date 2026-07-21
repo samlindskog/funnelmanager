@@ -135,24 +135,8 @@ spec:
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
 
-      - job_name: funnelmanager
-        metrics_path: /metrics
-        kubernetes_sd_configs:
-          - role: pod
-            namespaces:
-              names:
-                - prod
-                - dev
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_part_of]
-            regex: funnelmanager
-            action: keep
-          - source_labels: [__meta_kubernetes_pod_container_port_name]
-            regex: http
-            action: keep
-          - source_labels: [__meta_kubernetes_namespace]
-            target_label: namespace
-          - source_labels: [__meta_kubernetes_pod_name]
-            target_label: pod
-          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-            target_label: app
+      # No custom job for the fm services: STRICT mTLS rejects direct scrapes
+      # of the app ports from this (non-mesh) namespace. Their deployments
+      # carry prometheus.io annotations instead — Istio's metrics merge
+      # rewrites them to the sidecar's plaintext :15020 (app + Envoy metrics
+      # together) and the chart's default kubernetes-pods job scrapes that.

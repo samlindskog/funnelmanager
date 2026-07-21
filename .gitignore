@@ -7,6 +7,8 @@ backend/.env
 search/*.db
 mail/*.db
 *.egg-info/
+build/
+dist/
 .pytest_cache/
 
 # Node

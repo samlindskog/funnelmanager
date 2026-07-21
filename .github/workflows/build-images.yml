@@ -1,0 +1,107 @@
+# Reusable: build+push all six images to GHCR, then pin the resulting
+# immutable sha tag into an environment overlay and commit it back to main.
+# Flux (watching main) reconciles the pin and rolls out the new version —
+# the deploy is a git commit, not an SSH push. GitOps for k3s.
+name: build-images
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build the images from.
+        required: true
+        type: string
+      overlay:
+        description: Overlay to pin (prod|dev).
+        required: true
+        type: string
+      moving_tag:
+        description: Moving convenience tag to also push (prod|dev).
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  vars:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.rev.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: vars
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        # Python services build from the repo root so their Dockerfiles can
+        # COPY libs/fm_runtime; the two SPA images keep their own contexts.
+        include:
+          - { service: search,   context: .,        dockerfile: search/Dockerfile }
+          - { service: leads,    context: .,        dockerfile: leads/Dockerfile }
+          - { service: mcp,      context: .,        dockerfile: mcp/Dockerfile }
+          - { service: mail,     context: .,        dockerfile: mail/Dockerfile }
+          - { service: mailui,   context: ./mailui, dockerfile: mailui/Dockerfile }
+          - { service: frontend, context: ./frontend, dockerfile: frontend/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:sha-${{ needs.vars.outputs.sha }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ inputs.moving_tag }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  pin:
+    needs: [vars, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Pin onto main (what Flux watches), regardless of which ref was built.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Pin ${{ inputs.overlay }} overlay to sha-${{ needs.vars.outputs.sha }}
+        run: |
+          set -euo pipefail
+          SHA="sha-${{ needs.vars.outputs.sha }}"
+          f="deploy/apps/overlays/${{ inputs.overlay }}/kustomization.yaml"
+          # Replace every `newTag: <anything>` under the images: block.
+          sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*).*/\1$SHA/" "$f"
+          git diff --stat
+      - name: Commit the pin
+        run: |
+          set -euo pipefail
+          git config user.name  "funnelmanager-ci[bot]"
+          git config user.email "ci@users.noreply.github.com"
+          f="deploy/apps/overlays/${{ inputs.overlay }}/kustomization.yaml"
+          if git diff --quiet -- "$f"; then
+            echo "No image change to pin."; exit 0
+          fi
+          git add "$f"
+          git commit -m "ci(${{ inputs.overlay }}): pin images to sha-${{ needs.vars.outputs.sha }} [skip ci]"
+          git push origin main

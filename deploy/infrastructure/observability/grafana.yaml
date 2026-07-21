@@ -42,6 +42,35 @@ spec:
       type: ClusterIP
       port: 3000
 
+    # Keycloak OIDC login (generic_oauth). The browser is sent to the public
+    # issuer (kc.x9bc433.win); Grafana's own server-side token/userinfo calls
+    # go back out over 443 to the same public host (issuer stays consistent).
+    # The client secret arrives as the GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET env
+    # var (Grafana's native [auth.generic_oauth].client_secret override) from
+    # the `grafana-oidc` Secret; the `grafana` confidential client + redirect
+    # URI live in the realm export.
+    envFromSecret: grafana-oidc
+    grafana.ini:
+      server:
+        root_url: https://grafana.x9bc433.win
+      auth:
+        disable_login_form: false
+        oauth_auto_login: false
+      auth.generic_oauth:
+        enabled: true
+        name: Keycloak
+        client_id: grafana
+        scopes: openid profile roles
+        auth_url: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/auth
+        token_url: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/token
+        api_url: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/userinfo
+        login_attribute_path: preferred_username
+        # Map realm role -> Grafana org role. admin => Grafana Admin.
+        role_attribute_path: "contains(realm_access.roles[*], 'admin') && 'Admin' || 'Viewer'"
+        role_attribute_strict: false
+        allow_assign_grafana_admin: true
+        use_pkce: true
+
     sidecar:
       dashboards:
         enabled: false

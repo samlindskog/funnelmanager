@@ -15,6 +15,14 @@ spec:
       labels:
         app.kubernetes.io/name: leads
         app.kubernetes.io/part-of: funnelmanager
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: leads
       nodeSelector:

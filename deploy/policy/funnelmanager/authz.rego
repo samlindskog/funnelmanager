@@ -32,7 +32,8 @@ method := http.method
 # Envoy's :path includes the query string; rules match on the bare path.
 path := split(http.path, "?")[0]
 
-host := lower(trim_prefix(object.get(http, "host", ""), "www."))
+# Lowercase BEFORE trimming so a mixed-case "WWW." prefix is still stripped.
+host := trim_prefix(lower(object.get(http, "host", "")), "www.")
 
 _workload(principal) := {"ns": parts[2], "sa": parts[4]} if {
 	parts := split(trim_prefix(principal, "spiffe://"), "/")
@@ -213,6 +214,14 @@ allow if {
 	host == config.keycloak_host
 }
 
+# Grafana's own host: Grafana enforces Keycloak OIDC login itself, so the
+# gateway admits the host wholesale (same posture as Keycloak's host).
+allow if {
+	is_http
+	at_gateway
+	host == config.grafana_host
+}
+
 # --------------------------------------------------------------------------
 # TCP branch — dedicated-dependency isolation
 # --------------------------------------------------------------------------
@@ -267,6 +276,7 @@ deny_reasons contains "gateway: unknown host or route" if {
 	at_gateway
 	not gateway_env
 	not host == config.keycloak_host
+	not host == config.grafana_host
 }
 
 deny_reasons contains "gateway: authentication or authorization failed" if {
