@@ -1,0 +1,105 @@
+{
+  "funnelmanager": {
+    "config": {
+      "issuers": {
+        "prod": "https://replace-kc.example.com/realms/funnelmanager",
+        "dev": "https://replace-kc.example.com/realms/funnelmanager-dev"
+      },
+      "hosts": {
+        "replace-app.example.com": "prod",
+        "replace-dev.example.com": "dev"
+      },
+      "keycloak_host": "replace-kc.example.com",
+      "routes": {
+        "/api/leads/webhooks/": "leads",
+        "/api/search/": "search",
+        "/api/mail/": "mail",
+        "/mail/": "mailui",
+        "/": "frontend"
+      },
+      "callers": {
+        "search": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "mail": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "frontend": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "mailui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "leads": [
+          {"ns": "env", "sa": "search"},
+          {"ns": "env", "sa": "mcp"},
+          {
+            "ns": "istio-ingress",
+            "sa": "istio-ingress",
+            "path_prefixes": ["/api/leads/webhooks/"]
+          }
+        ],
+        "mcp": []
+      },
+      "azp_allow": {
+        "search": ["frontend"],
+        "mail": ["frontend"],
+        "leads": ["search", "mcp"]
+      },
+      "anonymous": [
+        {
+          "service": "leads",
+          "methods": ["POST"],
+          "prefixes": ["/api/leads/webhooks/apollo"],
+          "reason": "Apollo cannot send bearer tokens; secret-in-path auth in-app"
+        },
+        {
+          "service": "mail",
+          "methods": ["GET"],
+          "prefixes": ["/api/mail/oauth/callback"],
+          "reason": "Google OAuth redirect; single-use state row in-app"
+        },
+        {
+          "service": "*",
+          "methods": ["GET"],
+          "prefixes": [
+            "/healthz",
+            "/readyz",
+            "/metrics",
+            "/health",
+            "/api/search/health",
+            "/api/leads/health",
+            "/api/mail/health"
+          ],
+          "reason": "probes and scrapes (cluster-internal; belt-and-suspenders)"
+        },
+        {
+          "service": "frontend",
+          "methods": ["GET", "HEAD"],
+          "prefixes": ["/"],
+          "reason": "static SPA shell must load pre-auth (login page)"
+        },
+        {
+          "service": "mailui",
+          "methods": ["GET", "HEAD"],
+          "prefixes": ["/mail"],
+          "reason": "static SPA shell must load pre-auth"
+        },
+        {
+          "service": "mcp",
+          "methods": ["GET", "POST", "DELETE"],
+          "prefixes": ["/mcp", "/health", "/healthz", "/readyz", "/metrics"],
+          "reason": "principal token rides inside MCP tool calls; workload allowlist still gates"
+        }
+      ],
+      "pairings": [
+        {"from": "search", "to": "app-db"},
+        {"from": "mail", "to": "mail-db"},
+        {"from": "leads", "to": "mongo"},
+        {"from": "leads", "to": "milvus"},
+        {"from": "milvus", "to": "etcd"},
+        {"from": "milvus", "to": "minio"}
+      ]
+    },
+    "roles": {
+      "admin": {
+        "description": "Full access to every service (the single human principal today; agents' service accounts receive realm roles in Keycloak the same way)",
+        "grants": [
+          {"service": "*", "methods": ["*"], "path_prefix": "/"}
+        ]
+      }
+    }
+  }
+}

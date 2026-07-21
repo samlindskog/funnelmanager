@@ -2,4 +2,21 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - daemonset.yaml
-  - policy-bootstrap.yaml
+# The live bundle is generated straight from deploy/policy (GitOps: a policy
+# or data change rolls out like any commit; every OPA instance loads the
+# identical bundle). Tests are excluded from the shipped ConfigMap.
+# Note: the ../../policy reference requires LoadRestrictionsNone — Flux's
+# kustomize-controller builds that way; locally use
+# `kubectl kustomize --load-restrictor=LoadRestrictionsNone`.
+configMapGenerator:
+  - name: fm-policy
+    namespace: opa-system
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/name: opa
+        app.kubernetes.io/part-of: funnelmanager
+    files:
+      - authz.rego=../../policy/funnelmanager/authz.rego
+      - envoy.rego=../../policy/funnelmanager/envoy.rego
+      - data.json=../../policy/data.json
