@@ -17,43 +17,53 @@
 set -euo pipefail
 
 K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
-# --- Fill from PLACEHOLDERS.md (exported in the shell, never committed) ---
-: "${KC_ISSUER:?export KC_ISSUER=https://<kc-host>/realms/funnelmanager}"
-: "${CP_PRIVATE_IP:?export CP_PRIVATE_IP=<cp private ip>}"
-: "${GITHUB_REPO:?export GITHUB_REPO=<owner>/funnelmanager}"
+
+# Networking mode. This cluster runs OPTION B: no private VLAN, so nodes
+# address each other over their PUBLIC IPs and the flannel overlay is
+# ENCRYPTED with WireGuard (pod traffic crosses the public network). Set
+# these per node in the shell (never committed):
+#   NODE_IP        the IP this node advertises (public IP in option B)
+#   FLANNEL_IFACE  the interface that IP is on (eth0 in option B)
+#   FLANNEL_BACKEND wireguard-native (option B) | vxlan (private VLAN)
+#   EDGE_IP WORKER_IP CP_IP  the three public IPs (firewall peer allows)
+FLANNEL_IFACE="${FLANNEL_IFACE:-eth0}"
+FLANNEL_BACKEND="${FLANNEL_BACKEND:-wireguard-native}"
 
 case "${1:-}" in
   server)
     # cp: k3s server, SQLite datastore (default), traefik + servicelb OFF
     # (the istio gateway owns 80/443 via hostPort on edge), kube reservations
-    # so system daemons survive pressure, OIDC kubectl auth against Keycloak.
+    # so system daemons survive pressure. kubectl-OIDC (against Keycloak) is
+    # DEFERRED — enabled by `./bootstrap.sh enable-oidc` once Keycloak is up,
+    # so the apiserver never blocks on an issuer that does not exist yet.
+    : "${NODE_IP:?export NODE_IP=<cp public ip>}"
     if ! systemctl is-active --quiet k3s 2>/dev/null; then
       curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" sh -s - server \
+        --node-name cp \
         --disable traefik \
         --disable servicelb \
-        --node-ip "$CP_PRIVATE_IP" \
-        --flannel-iface "${PRIVATE_IFACE:-eth1}" \
+        --node-ip "$NODE_IP" \
+        --advertise-address "$NODE_IP" \
+        --tls-san "$NODE_IP" \
+        --flannel-iface "$FLANNEL_IFACE" \
+        --flannel-backend "$FLANNEL_BACKEND" \
         --node-taint node-role.kubernetes.io/control-plane=:NoSchedule \
         --kubelet-arg=kube-reserved=cpu=250m,memory=512Mi \
-        --kubelet-arg=system-reserved=cpu=250m,memory=512Mi \
-        --kube-apiserver-arg=oidc-issuer-url="$KC_ISSUER" \
-        --kube-apiserver-arg=oidc-client-id=kubectl \
-        --kube-apiserver-arg=oidc-username-claim=preferred_username \
-        --kube-apiserver-arg=oidc-username-prefix='kc:' \
-        --kube-apiserver-arg=oidc-groups-claim=groups \
-        --kube-apiserver-arg=oidc-groups-prefix='kc:'
+        --kubelet-arg=system-reserved=cpu=250m,memory=512Mi
     fi
     echo "join token: $(sudo cat /var/lib/rancher/k3s/server/node-token)"
     ;;
 
   agent-edge)
-    : "${K3S_URL:?export K3S_URL=https://<cp private ip>:6443}"
+    : "${K3S_URL:?export K3S_URL=https://<cp public ip>:6443}"
     : "${K3S_TOKEN:?export K3S_TOKEN=<node-token from server>}"
+    : "${NODE_IP:?export NODE_IP=<edge public ip>}"
     if ! systemctl is-active --quiet k3s-agent 2>/dev/null; then
       curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" \
         K3S_URL="$K3S_URL" K3S_TOKEN="$K3S_TOKEN" sh -s - agent \
-        --node-ip "${NODE_PRIVATE_IP:?}" \
-        --flannel-iface "${PRIVATE_IFACE:-eth1}" \
+        --node-name edge \
+        --node-ip "$NODE_IP" \
+        --flannel-iface "$FLANNEL_IFACE" \
         --node-label role=edge \
         --node-taint role=edge:NoSchedule \
         --kubelet-arg=kube-reserved=cpu=250m,memory=384Mi \
@@ -62,16 +72,63 @@ case "${1:-}" in
     ;;
 
   agent-worker)
-    : "${K3S_URL:?}" ; : "${K3S_TOKEN:?}"
+    : "${K3S_URL:?}" ; : "${K3S_TOKEN:?}" ; : "${NODE_IP:?export NODE_IP=<worker public ip>}"
     if ! systemctl is-active --quiet k3s-agent 2>/dev/null; then
       curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" \
         K3S_URL="$K3S_URL" K3S_TOKEN="$K3S_TOKEN" sh -s - agent \
-        --node-ip "${NODE_PRIVATE_IP:?}" \
-        --flannel-iface "${PRIVATE_IFACE:-eth1}" \
+        --node-name worker1 \
+        --node-ip "$NODE_IP" \
+        --flannel-iface "$FLANNEL_IFACE" \
         --node-label role=worker \
         --kubelet-arg=kube-reserved=cpu=250m,memory=512Mi \
         --kubelet-arg=system-reserved=cpu=250m,memory=512Mi
     fi
+    ;;
+
+  firewall)
+    # OPTION B host firewall (ufw). Public NICs carry cluster traffic, so the
+    # k3s control ports are opened ONLY to the peer nodes' public IPs; SSH is
+    # opened first (lockout guard); the pod/service CIDRs and a permissive
+    # FORWARD policy keep CNI working. Pass the role as $2 (cp|edge|worker).
+    ROLE="${2:?usage: $0 firewall <cp|edge|worker>}"
+    : "${CP_IP:?}" ; : "${EDGE_IP:?}" ; : "${WORKER_IP:?}"
+    command -v ufw >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y ufw; }
+    sudo ufw --force reset
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    sudo ufw allow 22/tcp                       # SSH first — never lock out
+    sudo sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+    sudo ufw allow from 10.42.0.0/16            # pod CIDR (flannel)
+    sudo ufw allow from 10.43.0.0/16            # service CIDR
+    for PEER in "$CP_IP" "$EDGE_IP" "$WORKER_IP"; do
+      sudo ufw allow from "$PEER" to any port 6443 proto tcp    # apiserver
+      sudo ufw allow from "$PEER" to any port 10250 proto tcp   # kubelet
+      sudo ufw allow from "$PEER" to any port 51820,51821 proto udp  # wireguard
+    done
+    if [ "$ROLE" = edge ]; then
+      sudo ufw allow 80/tcp; sudo ufw allow 443/tcp   # only edge is public
+    fi
+    sudo ufw --force enable
+    sudo ufw status verbose
+    ;;
+
+  enable-oidc)
+    # Wire kubectl OIDC auth to Keycloak AFTER it is reachable. Appends the
+    # apiserver flags and restarts k3s. Certificate admin access is unaffected.
+    : "${KC_ISSUER:?export KC_ISSUER=https://kc.x9bc433.win/realms/funnelmanager}"
+    F=/etc/rancher/k3s/config.yaml
+    sudo mkdir -p /etc/rancher/k3s
+    sudo tee -a "$F" >/dev/null <<YAML
+kube-apiserver-arg:
+  - "oidc-issuer-url=$KC_ISSUER"
+  - "oidc-client-id=kubectl"
+  - "oidc-username-claim=preferred_username"
+  - "oidc-username-prefix=kc:"
+  - "oidc-groups-claim=groups"
+  - "oidc-groups-prefix=kc:"
+YAML
+    sudo systemctl restart k3s
+    echo "OIDC apiserver args appended; k3s restarted."
     ;;
 
   label-taint)
@@ -182,7 +239,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "usage: $0 {server|agent-edge|agent-worker|label-taint|secrets|flux|restore-leads}" >&2
+    echo "usage: $0 {firewall <role>|server|agent-edge|agent-worker|enable-oidc|label-taint|secrets|flux|restore-leads}" >&2
     exit 2
     ;;
 esac
