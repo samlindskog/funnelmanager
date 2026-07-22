@@ -8,6 +8,12 @@ name: release-prod
 
 on:
   push:
+    # While the cluster tracks the k3s-deploy branch, every push to it builds
+    # + pins prod (continuous deploy from the branch). Pin commits carry
+    # [skip ci] so they don't loop. Remove this branch trigger once merged to
+    # main and Flux is repointed at main.
+    branches:
+      - k3s-deploy-x9bc433
     tags:
       - 'v*'
   workflow_dispatch:
