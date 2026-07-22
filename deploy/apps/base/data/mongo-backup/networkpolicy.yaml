@@ -1,0 +1,37 @@
+# The backup runner is out of the mesh (sidecar inject=false): it talks to the
+# kube-apiserver (exec) and Linode Object Storage (443), never to mongo over
+# the network. Default-deny + DNS + those two egresses; no ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo-backup
+  labels:
+    app.kubernetes.io/name: mongo-backup
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mongo-backup
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # kube-apiserver (kubectl exec; the kubernetes Service on 443 DNATs to the
+    # node's 6443) + object storage over HTTPS.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443

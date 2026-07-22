@@ -53,6 +53,7 @@ jobs:
           - { service: mail,     context: .,        dockerfile: mail/Dockerfile }
           - { service: mailui,   context: ./mailui, dockerfile: mailui/Dockerfile }
           - { service: frontend, context: ./frontend, dockerfile: frontend/Dockerfile }
+          - { service: backup,   context: ./backup, dockerfile: backup/Dockerfile }
     steps:
       - uses: actions/checkout@v4
         with:

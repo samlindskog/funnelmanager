@@ -4,6 +4,7 @@ resources:
   - app-db
   - mail-db
   - mongo
+  - mongo-backup
   - milvus
   - etcd
   - minio

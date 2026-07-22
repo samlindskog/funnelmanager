@@ -29,6 +29,8 @@ images:
     newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
   - name: ghcr.io/samlindskog/funnelmanager/mailui
     newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
+  - name: ghcr.io/samlindskog/funnelmanager/backup
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
 
 generatorOptions:
   disableNameSuffixHash: true

@@ -1,0 +1,85 @@
+# Leads backup: every 12h (00:00, 12:00 UTC), 3-day retention. Dumps
+# funnelmanager_leads and pushes to s3://<bucket>/mongo-leads/<namespace>/.
+# Object-storage creds reuse the objectstore-backups Secret (same one CNPG
+# uses). Namespace is injected via the downward API so this base works
+# unchanged in prod and dev.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mongo-backup
+  labels:
+    app.kubernetes.io/name: mongo-backup
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  schedule: "0 0,12 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1200
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: mongo-backup
+            app.kubernetes.io/part-of: funnelmanager
+          annotations:
+            # Out of the mesh: talks only to the apiserver + object storage.
+            sidecar.istio.io/inject: "false"
+        spec:
+          serviceAccountName: mongo-backup
+          restartPolicy: Never
+          nodeSelector:
+            role: worker
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              image: ghcr.io/samlindskog/funnelmanager/backup
+              env:
+                - name: NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: MONGO_POD
+                  value: mongo-0
+                - name: BUCKET
+                  value: funnelmanager-1
+                - name: S3_ENDPOINT
+                  value: https://us-lax-4.linodeobjects.com
+                - name: RETENTION
+                  value: 3d
+                - name: ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: objectstore-backups
+                      key: ACCESS_KEY_ID
+                - name: ACCESS_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: objectstore-backups
+                      key: ACCESS_SECRET_KEY
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

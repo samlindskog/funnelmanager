@@ -28,6 +28,8 @@ images:
     newTag: sha-PINME
   - name: ghcr.io/samlindskog/funnelmanager/mailui
     newTag: sha-PINME
+  - name: ghcr.io/samlindskog/funnelmanager/backup
+    newTag: sha-PINME
 
 generatorOptions:
   disableNameSuffixHash: true
