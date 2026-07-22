@@ -65,6 +65,10 @@ spec:
         token_url: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/token
         api_url: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/userinfo
         login_attribute_path: preferred_username
+        # Keycloak has no /userinfo/emails endpoint; without an email claim
+        # Grafana would 404 on that GitHub-style fallback. Derive the "email"
+        # from a claim that is always present so login never hits it.
+        email_attribute_path: "email || preferred_username"
         # Map realm role -> Grafana org role. admin => Grafana Admin.
         role_attribute_path: "contains(realm_access.roles[*], 'admin') && 'Admin' || 'Viewer'"
         role_attribute_strict: false
