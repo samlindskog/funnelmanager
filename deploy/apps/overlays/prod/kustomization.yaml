@@ -18,17 +18,17 @@ resources:
 # never :latest.
 images:
   - name: ghcr.io/samlindskog/funnelmanager/search
-    newTag: sha-93896910bc7500b89befdc83e1a0a71787cd6fc3
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
   - name: ghcr.io/samlindskog/funnelmanager/leads
-    newTag: sha-93896910bc7500b89befdc83e1a0a71787cd6fc3
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
   - name: ghcr.io/samlindskog/funnelmanager/mail
-    newTag: sha-93896910bc7500b89befdc83e1a0a71787cd6fc3
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
   - name: ghcr.io/samlindskog/funnelmanager/mcp
-    newTag: sha-93896910bc7500b89befdc83e1a0a71787cd6fc3
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
   - name: ghcr.io/samlindskog/funnelmanager/frontend
-    newTag: sha-93896910bc7500b89befdc83e1a0a71787cd6fc3
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
   - name: ghcr.io/samlindskog/funnelmanager/mailui
-    newTag: sha-93896910bc7500b89befdc83e1a0a71787cd6fc3
+    newTag: sha-42e38a79e211fea3ec359120b2f9f46b9161f54d
 
 generatorOptions:
   disableNameSuffixHash: true
