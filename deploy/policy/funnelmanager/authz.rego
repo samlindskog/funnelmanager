@@ -51,7 +51,11 @@ service := dst.sa
 
 env := dst.ns
 
-at_gateway if service == "istio-ingress"
+# At the edge gateway there is no mTLS peer: Envoy populates
+# destination.principal with the TLS SNI hostname (not a workload SPIFFE) and
+# leaves source.principal unset. So "we are at the gateway" == the destination
+# did not parse as a SPIFFE workload. Sidecar hops always have a SPIFFE dst.
+at_gateway if not dst
 
 # --------------------------------------------------------------------------
 # JWT (decode only — Istio already validated the signature)

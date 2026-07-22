@@ -46,6 +46,9 @@ spec:
             # ..2026_...) so each .rego/.json loads once — otherwise OPA parses
             # every file 3x and dies on "multiple default rules".
             - "--ignore=.*"
+            # Hot-reload the bundle when the fm-policy ConfigMap changes
+            # (no pod restart needed on policy/data updates).
+            - --watch
             - /policy
           ports:
             - name: grpc-authz

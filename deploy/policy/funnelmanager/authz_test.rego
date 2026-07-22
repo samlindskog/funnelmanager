@@ -58,8 +58,10 @@ tcp_input(src_ns, src_sa, dst_ns, dst_sa) := {"attributes": {
 }}
 
 gateway_input(host, method, path, headers) := {"attributes": {
-	"source": {"principal": ""},
-	"destination": {"principal": spiffe("istio-ingress", "istio-ingress")},
+	# Real ingress-gateway ext_authz: no source principal, and the
+	# destination principal is the TLS SNI hostname (not a SPIFFE workload).
+	"source": {"address": {"socketAddress": {"address": "203.0.113.7"}}},
+	"destination": {"principal": host},
 	"request": {"http": {
 		"method": method,
 		"path": path,
