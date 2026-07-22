@@ -80,10 +80,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Pin onto main (what Flux watches), regardless of which ref was built.
+      # Pin onto the branch that was built (what Flux watches). For a tag
+      # release, inputs.ref is the tag → set pin_ref to the tracking branch.
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Pin ${{ inputs.overlay }} overlay to sha-${{ needs.vars.outputs.sha }}
         run: |
@@ -104,4 +105,4 @@ jobs:
           fi
           git add "$f"
           git commit -m "ci(${{ inputs.overlay }}): pin images to sha-${{ needs.vars.outputs.sha }} [skip ci]"
-          git push origin main
+          git push origin HEAD:${{ inputs.ref }}
