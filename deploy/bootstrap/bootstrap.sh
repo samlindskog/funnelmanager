@@ -161,12 +161,11 @@ YAML
     read -rsp "Keycloak console admin password: " KCPW; echo
     ensure identity keycloak-admin generic keycloak-admin \
       --from-literal=username=admin --from-literal=password="$KCPW"
-    echo "Provide the HARDENED realm exports (secrets rotated; see PLACEHOLDERS.md)."
-    echo "Both are mounted into Keycloak's import dir and imported on first start."
-    read -rp "path to PROD realm.json (funnelmanager): " REALM
-    read -rp "path to DEV  realm.json (funnelmanager-dev): " REALMDEV
-    ensure identity keycloak-realm generic keycloak-realm \
-      --from-file=realm.json="$REALM" --from-file=realm-dev.json="$REALMDEV"
+    # NOTE: the `keycloak-realm` secret (the hardened realm exports mounted
+    # into Keycloak's import dir) is provisioned OUT OF BAND, not here — e.g.
+    #   kubectl -n identity create secret generic keycloak-realm \
+    #     --from-file=realm.json=<prod> --from-file=realm-dev.json=<dev>
+    # (or via SOPS). Keep the export files off this script's prompt path.
 
     read -rp  "Object storage ACCESS_KEY_ID: " OSK
     read -rsp "Object storage SECRET: " OSS; echo
