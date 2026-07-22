@@ -42,8 +42,8 @@ spec:
   backup:
     retentionPolicy: "14d"
     barmanObjectStore:
-      destinationPath: s3://REPLACE_BUCKET_CNPG/mail-db
-      endpointURL: https://REPLACE_REGION.linodeobjects.com
+      destinationPath: s3://funnelmanager-1/mail-db
+      endpointURL: https://us-lax-4.linodeobjects.com
       s3Credentials:
         accessKeyId:
           name: objectstore-backups
