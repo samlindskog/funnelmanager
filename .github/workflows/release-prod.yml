@@ -14,6 +14,16 @@ on:
     # main and Flux is repointed at main.
     branches:
       - k3s-deploy-x9bc433
+    # Only rebuild images when app source changes — manifest-only commits
+    # (deploy/**, .github/**) reconcile through Flux with no new image.
+    paths:
+      - 'search/**'
+      - 'leads/**'
+      - 'mail/**'
+      - 'mcp/**'
+      - 'frontend/**'
+      - 'mailui/**'
+      - 'libs/**'
     tags:
       - 'v*'
   workflow_dispatch:

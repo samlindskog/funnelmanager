@@ -42,6 +42,10 @@ spec:
             - --set=plugins.envoy_ext_authz_grpc.path=funnelmanager/envoy/result
             - --set=decision_logs.console=true
             - --set=status.console=true
+            # Ignore the ConfigMap volume's internal symlink dirs (..data,
+            # ..2026_...) so each .rego/.json loads once — otherwise OPA parses
+            # every file 3x and dies on "multiple default rules".
+            - "--ignore=.*"
             - /policy
           ports:
             - name: grpc-authz
