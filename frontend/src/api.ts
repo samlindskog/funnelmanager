@@ -119,6 +119,13 @@ export function fetchApps(): AppLink[] {
     : DEFAULT_APPS
 }
 
+/** Admin-only tiles for the hub's Administration section (e.g. Grafana),
+ * configured via ADMIN_APPS. The Keycloak console tile is always shown. */
+export function fetchAdminApps(): AppLink[] {
+  const apps = config().adminApps
+  return Array.isArray(apps) ? apps.map((app) => ({ description: '', ...app })) : []
+}
+
 // ---------------------------------------------------------------------------
 // Search app — Apollo searches, enrichment, NDJSON streams (search backend)
 // ---------------------------------------------------------------------------

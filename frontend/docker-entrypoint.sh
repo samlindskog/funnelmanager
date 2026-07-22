@@ -16,6 +16,9 @@ FRONTEND_OIDC_CLIENT_ID="${FRONTEND_OIDC_CLIENT_ID:-frontend}"
   if [ -n "${WEB_APPS:-}" ]; then
     echo "  apps: ${WEB_APPS},"
   fi
+  if [ -n "${ADMIN_APPS:-}" ]; then
+    echo "  adminApps: ${ADMIN_APPS},"
+  fi
   echo "}"
 } > /usr/share/nginx/html/config.js
 

@@ -11,6 +11,8 @@ export interface FmConfig {
   oidcIssuer: string
   oidcClientId: string
   apps?: { name: string; description?: string; url: string }[]
+  // Admin-only tiles shown in the hub's Administration section (e.g. Grafana).
+  adminApps?: { name: string; description?: string; url: string }[]
 }
 
 declare global {

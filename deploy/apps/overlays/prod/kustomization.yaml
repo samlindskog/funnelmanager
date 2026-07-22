@@ -48,6 +48,7 @@ configMapGenerator:
       - cors-origins=https://x9bc433.win
       - public-base-url=https://x9bc433.win
       - web-apps=
+      - 'admin-apps=[{"name":"Grafana","description":"Metrics, logs & dashboards","url":"https://grafana.x9bc433.win"}]'
 
 patches:
   # Replace-in-place rollouts (maxSurge 0): the 8GB worker's memory-limit

@@ -12,7 +12,7 @@ import {
   Stack,
   Typography,
 } from '@mui/material'
-import { fetchApps } from '../api'
+import { fetchAdminApps, fetchApps } from '../api'
 import { useAuth } from '../auth'
 import { ColorModeToggle } from '../components/ColorModeToggle'
 import { config } from '../oidc'
@@ -28,9 +28,19 @@ function keycloakConsoleUrl(): string {
 export function HubPage() {
   const { user, logout } = useAuth()
   const apps = fetchApps()
+  const adminApps = fetchAdminApps()
 
   if (!user) return null
   const isAdmin = user.role === 'admin'
+
+  const adminTiles = [
+    {
+      name: 'Keycloak console',
+      description: 'Manage users, roles, and service clients for this realm.',
+      url: keycloakConsoleUrl(),
+    },
+    ...adminApps,
+  ]
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
@@ -118,26 +128,27 @@ export function HubPage() {
                 <Typography variant="h5" sx={{ mb: 2 }}>
                   Administration
                 </Typography>
-                <Card variant="outlined" sx={{ maxWidth: 420 }}>
-                  <CardActionArea
-                    component="a"
-                    href={keycloakConsoleUrl()}
-                    target="_blank"
-                    rel="noopener"
-                  >
-                    <CardContent>
-                      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                        <Typography variant="h6" sx={{ flexGrow: 1 }}>
-                          Keycloak console
-                        </Typography>
-                        <LaunchIcon fontSize="small" color="action" />
-                      </Stack>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                        Manage users, roles, and service clients for this realm.
-                      </Typography>
-                    </CardContent>
-                  </CardActionArea>
-                </Card>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                  {adminTiles.map((tile) => (
+                    <Card key={tile.name} variant="outlined" sx={{ minWidth: 240, flex: '0 1 280px' }}>
+                      <CardActionArea component="a" href={tile.url} target="_blank" rel="noopener">
+                        <CardContent>
+                          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                            <Typography variant="h6" sx={{ flexGrow: 1 }}>
+                              {tile.name}
+                            </Typography>
+                            <LaunchIcon fontSize="small" color="action" />
+                          </Stack>
+                          {tile.description && (
+                            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                              {tile.description}
+                            </Typography>
+                          )}
+                        </CardContent>
+                      </CardActionArea>
+                    </Card>
+                  ))}
+                </Stack>
               </Box>
             </>
           )}

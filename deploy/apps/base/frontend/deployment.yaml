@@ -73,3 +73,9 @@ spec:
                   name: fm-web
                   key: web-apps
                   optional: true
+            - name: ADMIN_APPS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: admin-apps
+                  optional: true
