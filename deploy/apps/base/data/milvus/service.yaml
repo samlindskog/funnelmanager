@@ -12,3 +12,4 @@ spec:
     - name: grpc
       port: 19530
       targetPort: 19530
+      appProtocol: tcp

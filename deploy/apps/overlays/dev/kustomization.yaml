@@ -50,6 +50,21 @@ configMapGenerator:
       - web-apps=
 
 patches:
+  # Replace-in-place rollouts (maxSurge 0): the 8GB worker's memory-limit
+  # quota has no headroom to run an old + new pod at once.
+  - target:
+      kind: Deployment
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ignored-by-target-selector
+      spec:
+        strategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxSurge: 0
+            maxUnavailable: 1
   # Every dev pod runs at the fm-dev PriorityClass (see CONVENTIONS.md);
   # the placeholder metadata.name is ignored — the target selector applies
   # the patch to all Deployments/StatefulSets.

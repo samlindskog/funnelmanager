@@ -12,3 +12,4 @@ spec:
     - name: s3
       port: 9000
       targetPort: 9000
+      appProtocol: tcp

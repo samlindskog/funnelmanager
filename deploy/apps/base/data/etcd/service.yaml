@@ -12,3 +12,7 @@ spec:
     - name: client
       port: 2379
       targetPort: 2379
+      # Force plain TCP: etcd is gRPC/HTTP2, which Istio would L7-classify and
+      # route through the HTTP authz branch (no JWT → denied). The OPA TCP
+      # dependency-pairing branch is what authorizes milvus→etcd.
+      appProtocol: tcp
