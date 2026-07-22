@@ -9,11 +9,12 @@ spec:
     - name: infra-identity
     - name: infra-gateway
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/apps/overlays/prod
   wait: true
-  timeout: 10m
+  timeout: 2m
   healthChecks:
     - { apiVersion: apps/v1, kind: Deployment, name: search, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: leads, namespace: prod }
@@ -38,8 +39,9 @@ spec:
     - name: infra-identity
     - name: infra-gateway
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/apps/overlays/dev
   wait: true
-  timeout: 10m
+  timeout: 2m

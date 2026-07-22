@@ -7,9 +7,10 @@
 #             -> gateway (certs + routes) -> observability
 # Apps (apps.yaml) depend on mesh-policies + identity.
 #
-# `flux bootstrap` generates deploy/clusters/prod/flux-system/ next to this
-# file (GitRepository `flux-system` + its own Kustomization) — see
-# deploy/bootstrap/README.md.
+# The `flux-system` GitRepository + root Kustomization are created by
+# `bootstrap.sh flux` (read-only deploy-key install: `flux install` + a git
+# source over SSH, no repo write) — see deploy/bootstrap/README.md. Flux
+# tracks `main`.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -17,6 +18,7 @@ metadata:
   namespace: flux-system
 spec:
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/namespaces
@@ -58,6 +60,7 @@ spec:
     - name: infra-namespaces
     - name: infra-gateway-api-crds
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/cert-manager
@@ -74,6 +77,7 @@ spec:
   dependsOn:
     - name: infra-cert-manager
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/cert-manager-issuers
@@ -89,6 +93,7 @@ spec:
   dependsOn:
     - name: infra-namespaces
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/cnpg-operator
@@ -104,11 +109,12 @@ spec:
   dependsOn:
     - name: infra-cert-manager
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/istio
   wait: true
-  timeout: 10m
+  timeout: 5m
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -119,6 +125,7 @@ spec:
   dependsOn:
     - name: infra-istio
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/opa
@@ -140,6 +147,7 @@ spec:
   dependsOn:
     - name: infra-opa
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/mesh-policies
@@ -155,11 +163,12 @@ spec:
     - name: infra-cnpg-operator
     - name: infra-istio
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/identity
   wait: true
-  timeout: 10m
+  timeout: 5m
   healthChecks:
     - apiVersion: apps/v1
       kind: Deployment
@@ -177,6 +186,7 @@ spec:
     - name: infra-cert-manager
     - name: infra-cert-manager-issuers
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/gateway
@@ -191,8 +201,9 @@ spec:
   dependsOn:
     - name: infra-namespaces
   interval: 10m
+  retryInterval: 1m
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/observability
   wait: true
-  timeout: 10m
+  timeout: 5m
