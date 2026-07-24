@@ -78,6 +78,13 @@ token with the target's audience:
     state row (10-min TTL) bound to the user who minted it.
   - every service: `/healthz`, `/readyz`, `/metrics`, legacy `/health` —
     kubelet probes and Prometheus scrapes are cluster-internal.
+- `GET /api/{service}/whoami` (installed by `fm_runtime.install` on every
+  backend) echoes the acting principal (sub, username, roles). It is
+  deliberately **not** `@anonymous`: answering requires a valid JWT plus a
+  covering role grant, so the hub uses it as its app-discovery probe — a
+  tile is shown only when the user's token gets a 2xx from the app's
+  `probe` URL, keeping the hub's tile list derived from real enforcement
+  instead of duplicated config.
 - All outbound internal calls go through the broker-backed clients
   (`LeadsClient` in search, `LeadsBackendClient` in mcp) — no service makes
   an internal call outside this middleware. Trace headers

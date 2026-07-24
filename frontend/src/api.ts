@@ -108,8 +108,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_APPS: AppLink[] = [
-  { name: 'Search', description: 'Apollo person/company search', url: '/search' },
-  { name: 'Mail', description: 'Google Workspace inboxes & sending', url: '/mail/' },
+  { name: 'Search', description: 'Apollo person/company search', url: '/search', probe: '/api/search/whoami' },
+  { name: 'Mail', description: 'Google Workspace inboxes & sending', url: '/mail/', probe: '/api/mail/whoami' },
 ]
 
 export function fetchApps(): AppLink[] {
@@ -124,6 +124,30 @@ export function fetchApps(): AppLink[] {
 export function fetchAdminApps(): AppLink[] {
   const apps = config().adminApps
   return Array.isArray(apps) ? apps.map((app) => ({ description: '', ...app })) : []
+}
+
+/** Discovery: a tile is shown when its probe answers with anything but
+ * 401/403 under the user's token — the backing service's own authz
+ * (OPA/grants) is the source of truth, so nothing is duplicated here.
+ * Tiles with a roles list (external apps that can't be probed cross-origin)
+ * are filtered against the user's realm roles instead; tiles with neither
+ * always show. Network failures fail open — the server still enforces. */
+export async function filterAvailableApps(apps: AppLink[], roles: string[]): Promise<AppLink[]> {
+  const visible = await Promise.all(
+    apps.map(async (app) => {
+      if (app.roles?.length) return app.roles.some((role) => roles.includes(role))
+      if (!app.probe) return true
+      try {
+        const response = await fetch(app.probe, {
+          headers: { Authorization: `Bearer ${await bearerToken()}` },
+        })
+        return response.status !== 401 && response.status !== 403
+      } catch {
+        return true
+      }
+    }),
+  )
+  return apps.filter((_, index) => visible[index])
 }
 
 // ---------------------------------------------------------------------------

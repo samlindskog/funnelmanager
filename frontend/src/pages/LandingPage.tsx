@@ -1,6 +1,6 @@
 import { Alert, Box, Button, Paper, Stack, Typography } from '@mui/material'
 import { alpha } from '@mui/material/styles'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { ColorModeToggle } from '../components/ColorModeToggle'
@@ -15,6 +15,11 @@ export function LandingPage() {
   const { user, loading, login } = useAuth()
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+
+  // Restore the nondescript title after signing out of a titled app.
+  useEffect(() => {
+    document.title = 'Sign in'
+  }, [])
 
   if (!loading && user) return <Navigate to="/" replace />
 

@@ -12,10 +12,12 @@ import {
   Stack,
   Typography,
 } from '@mui/material'
-import { fetchAdminApps, fetchApps } from '../api'
+import { useEffect, useState } from 'react'
+import { fetchAdminApps, fetchApps, filterAvailableApps } from '../api'
 import { useAuth } from '../auth'
 import { ColorModeToggle } from '../components/ColorModeToggle'
-import { config } from '../oidc'
+import { config, currentClaims } from '../oidc'
+import type { AppLink } from '../types'
 
 /** Users, roles, and credentials are managed in Keycloak now — the hub links
  * admins to its console instead of embedding admin panels. */
@@ -27,11 +29,27 @@ function keycloakConsoleUrl(): string {
 
 export function HubPage() {
   const { user, logout } = useAuth()
-  const apps = fetchApps()
-  const adminApps = fetchAdminApps()
+  // null = probes still in flight (tiles render once discovery settles).
+  const [apps, setApps] = useState<AppLink[] | null>(null)
+
+  useEffect(() => {
+    document.title = 'Funnel Manager'
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const roles = currentClaims()?.roles ?? []
+    filterAvailableApps(fetchApps(), roles).then((available) => {
+      if (!cancelled) setApps(available)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   if (!user) return null
   const isAdmin = user.role === 'admin'
+  const roles = currentClaims()?.roles ?? []
 
   const adminTiles = [
     {
@@ -39,7 +57,9 @@ export function HubPage() {
       description: 'Manage users, roles, and service clients for this realm.',
       url: keycloakConsoleUrl(),
     },
-    ...adminApps,
+    ...fetchAdminApps().filter(
+      (app) => !app.roles?.length || app.roles.some((role) => roles.includes(role)),
+    ),
   ]
 
   return (
@@ -95,11 +115,13 @@ export function HubPage() {
             <Typography variant="h5" sx={{ mb: 2 }}>
               Apps
             </Typography>
-            {apps.length === 0 && (
-              <Typography color="text.secondary">No apps configured.</Typography>
+            {apps?.length === 0 && (
+              <Typography color="text.secondary">
+                No apps are available to your account.
+              </Typography>
             )}
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap sx={{ flexWrap: 'wrap' }}>
-              {apps.map((app) => (
+              {(apps ?? []).map((app) => (
                 <Card key={app.name} variant="outlined" sx={{ minWidth: 240, flex: '0 1 280px' }}>
                   <CardActionArea component="a" href={app.url} target="_blank" rel="noopener">
                     <CardContent>

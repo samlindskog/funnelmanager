@@ -187,7 +187,7 @@ Standalone app — same MUI theme, no shared code with `frontend/`. It shares th
 
 ### Identity (Keycloak)
 
-There is no in-repo auth API anymore. Sign-in, tokens, users, and roles live in Keycloak (realm `funnelmanager`): browsers run auth-code + PKCE against `FM_OIDC_ISSUER`, services exchange tokens per hop (RFC 8693), and admins manage principals in the Keycloak console (linked from the hub). See [`docs/authentication.md`](docs/authentication.md). Every backend also serves `/healthz`, `/readyz`, and Prometheus `/metrics`.
+There is no in-repo auth API anymore. Sign-in, tokens, users, and roles live in Keycloak (realm `funnelmanager`): browsers run auth-code + PKCE against `FM_OIDC_ISSUER`, services exchange tokens per hop (RFC 8693), and admins manage principals in the Keycloak console (linked from the hub). See [`docs/authentication.md`](docs/authentication.md). Every backend also serves `/healthz`, `/readyz`, and Prometheus `/metrics`, plus an authenticated `GET /api/{service}/whoami` (principal echo: sub, username, roles). Unlike the probes it is **not** `@anonymous` — reaching it requires a valid JWT and a covering role grant, which is what the hub uses for app discovery: each tile's `probe` URL is fetched with the user's token and the tile is hidden on 401/403, so the tile list always mirrors what OPA/grants actually allow.
 
 ### Search backend
 

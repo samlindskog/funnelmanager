@@ -10,6 +10,7 @@ That installs, uniformly across every service:
   RFC 8693 `act` chain), 401s non-@anonymous routes without one,
 - structured JSON logging to stdout (principal sub on every line),
 - /healthz, /readyz, /metrics,
+- /api/<service>/whoami — authenticated principal echo (the hub's discovery probe),
 - Prometheus HTTP metrics + structured access log.
 
 Outbound internal calls go through InternalClient (token exchange + trace
@@ -31,6 +32,7 @@ from fm_runtime.observability import install_observability
 from fm_runtime.principal import Actor, AuthUnavailableError, Peer, Principal, TokenError
 from fm_runtime.settings import RuntimeSettings, get_runtime_settings
 from fm_runtime.tokens import ExchangeError, TokenBroker, get_broker
+from fm_runtime.whoami import install_whoami
 
 __all__ = [
     "Actor",
@@ -60,6 +62,7 @@ def install(app: Any, service: str, ready_checks: dict | None = None) -> None:
     settings = get_runtime_settings()
     configure_logging(service, settings.log_level)
     install_observability(app, ready_checks)
+    install_whoami(app, service)
     # Added first so any middleware the service adds afterwards (CORS, ...)
     # runs outside it.
     app.add_middleware(PrincipalMiddleware, service=service, settings=settings)

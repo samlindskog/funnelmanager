@@ -15,6 +15,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const ran = useRef(false)
 
+  // index.html ships the nondescript "Sign in" title; brand only post-auth.
+  useEffect(() => {
+    if (user) document.title = 'Mail — Funnel Manager'
+  }, [user])
+
   useEffect(() => {
     if (ran.current) return // StrictMode double-invoke guard: PKCE codes are single-use
     ran.current = true

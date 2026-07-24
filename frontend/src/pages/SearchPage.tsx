@@ -57,6 +57,10 @@ export function SearchPage() {
   const theme = useTheme()
   const isMdUp = useMediaQuery(theme.breakpoints.up('md'))
   const { user, logout } = useAuth()
+
+  useEffect(() => {
+    document.title = 'Search — Funnel Manager'
+  }, [])
   const [searchSource, setSearchSource] = useState<SearchSource>('apollo')
   const [query, setQuery] = useState('')
   const [similarityLimit, setSimilarityLimit] = useState(25)
