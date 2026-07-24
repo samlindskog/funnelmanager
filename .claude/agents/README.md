@@ -34,6 +34,16 @@ If a global rule changes, change `CLAUDE.md` — every agent picks it up.
 | `mcp-agent`      | `mcp/` | `leads/` internals |
 | `runtime-agent`  | `libs/fm_runtime/` (shared auth/runtime) | service business logic |
 | `platform-agent` | `deploy/`, `deploy/keycloak/`, `docker-compose*.yml`, `.github/` | app source |
+| `jobs-agent`     | `jobs/` (cross-app job tracker/controller, NEW) | the apps it tracks |
+| `agents-agent`   | `agents/` (pydantic-ai runtime-agent backend, NEW) | `agentsui/`, other services' internals |
+| `agentsui-agent` | `agentsui/` (standalone agents UI, NEW) | `frontend/`, `mailui/` |
+
+The `jobs` / `agents` / `agentsui` services and their target architecture are
+specified in `docs/agent-build-plan.md`. Run a build workstream with the
+`service-workstream` workflow (`.claude/workflows/service-workstream.js`): it
+dispatches the owning agent at **Opus/high**, then the three adversarial reviewers
+on its diff, per the program's "team uses Opus on high effort + adversarial review
+per agent" rule.
 
 **Reviewer agents** (read-only, adversarial — run against a domain agent's diff).
 These are **global** (`~/.claude/agents/`), reusable across every project — they
