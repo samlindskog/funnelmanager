@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/skills/deploy-funnelmanager/improve-skill.sh\"",
+            "timeout": 30,
+            "statusMessage": "Checking session for deploy learnings…"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/review-domain-agents.sh\"",
+            "timeout": 30,
+            "statusMessage": "Reviewing project-agent effectiveness"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/capture-domain-agent.sh\"",
+            "timeout": 15,
+            "statusMessage": "Capturing project-agent transcript"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/domain-proposals-notice.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
