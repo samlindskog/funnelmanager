@@ -54,6 +54,14 @@ class RuntimeSettings:
         default_factory=lambda: os.environ.get("FM_EXCHANGE_SCOPE_TEMPLATE", "svc-{audience}")
     )
 
+    # Client id of the runtime-AI-agents service. When this service performs an
+    # exchange as that client (or an inbound token was already stamped by it),
+    # TokenBroker mints/propagates fm_origin=agent so persisted records read
+    # "alice (via agent)". Purely an attribution signal — never an access gate.
+    agents_client_id: str = field(
+        default_factory=lambda: os.environ.get("FM_AGENTS_CLIENT_ID", "agents")
+    )
+
     # Reject requests with no principal on routes not annotated @anonymous.
     # Defense-in-depth below the mesh DENY policy; keeps dev honest too.
     require_principal: bool = field(default_factory=lambda: _bool("FM_REQUIRE_PRINCIPAL", True))

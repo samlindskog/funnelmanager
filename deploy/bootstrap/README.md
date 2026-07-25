@@ -130,8 +130,9 @@ curl -sf https://<DOMAIN>/api/search/searches -H "Authorization: Bearer $TOK"   
 #    counts as reached; with the secret set expect 401-on-bad/200-on-good):
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   https://<DOMAIN>/api/leads/webhooks/apollo/wrong-secret                        # 401 (not 403-by-mesh)
-# 3. Wrong-audience token rejected (mcp-audience token against search):
-AT=$(curl -s $KC -d grant_type=client_credentials -d client_id=agent-example \
+# 3. Wrong-audience token rejected (a service's own client-credentials token,
+#    not audienced for search, used against search):
+AT=$(curl -s $KC -d grant_type=client_credentials -d client_id=mcp \
      -d client_secret=<secret> | jq -r .access_token)
 curl -s -o /dev/null -w '%{http_code}\n' \
   https://<DOMAIN>/api/search/searches -H "Authorization: Bearer $AT"            # 401/403

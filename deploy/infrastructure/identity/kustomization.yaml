@@ -4,6 +4,7 @@ resources:
   - cluster.yaml
   - scheduledbackup.yaml
   - configmap.yaml
+  - providers-configmap.yaml
   - serviceaccount.yaml
   - service.yaml
   - deployment.yaml

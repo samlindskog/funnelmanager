@@ -94,15 +94,22 @@ jobs:
           # Replace every `newTag: <anything>` under the images: block.
           sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*).*/\1$SHA/" "$f"
           git diff --stat
-      - name: Commit the pin
+      - name: Rebuild fm-origin provider JAR + ConfigMap from src/
+        # Keep the committed Keycloak script-provider artifacts CI-reproduced
+        # from src/ (never hand-authored), just like the sha-image pins. The
+        # build is deterministic, so this is a no-op unless src/ changed.
+        run: deploy/keycloak/providers/build.sh
+      - name: Commit the pin (+ regenerated provider artifacts)
         run: |
           set -euo pipefail
           git config user.name  "funnelmanager-ci[bot]"
           git config user.email "ci@users.noreply.github.com"
-          f="deploy/apps/overlays/${{ inputs.overlay }}/kustomization.yaml"
-          if git diff --quiet -- "$f"; then
-            echo "No image change to pin."; exit 0
+          git add \
+            "deploy/apps/overlays/${{ inputs.overlay }}/kustomization.yaml" \
+            deploy/keycloak/providers/fm-origin-provider.jar \
+            deploy/infrastructure/identity/providers-configmap.yaml
+          if git diff --cached --quiet; then
+            echo "Nothing to pin or regenerate."; exit 0
           fi
-          git add "$f"
           git commit -m "ci(${{ inputs.overlay }}): pin images to sha-${{ needs.vars.outputs.sha }} [skip ci]"
           git push origin main

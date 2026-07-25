@@ -115,6 +115,66 @@
       ]
     },
     {
+      "name": "svc-jobs",
+      "protocol": "openid-connect",
+      "description": "Adds the jobs service to the token audience (used by RFC 8693 exchange)",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-jobs",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jobs",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "svc-agents",
+      "protocol": "openid-connect",
+      "description": "Adds the agents service to the token audience (used by RFC 8693 exchange)",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-agents",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "agents",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fm-origin",
+      "protocol": "openid-connect",
+      "description": "Propagates fm_origin across RFC 8693 exchanges: a script mapper (feature scripts) copies the inbound subject token's fm_origin onto the issued token (default user), so an agent origin survives every hop. Reads only the subject token, unforgeable.",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "fm-origin-passthrough",
+          "protocol": "openid-connect",
+          "protocolMapper": "script-fm-origin-passthrough.js",
+          "config": {
+            "claim.name": "fm_origin",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
       "name": "basic",
       "protocol": "openid-connect",
       "attributes": {
@@ -218,7 +278,8 @@
       "defaultClientScopes": [
         "basic",
         "profile",
-        "roles"
+        "roles",
+        "fm-origin"
       ]
     },
     {
@@ -257,12 +318,14 @@
         "standard.token.exchange.enabled": "true"
       },
       "optionalClientScopes": [
-        "svc-leads"
+        "svc-leads",
+        "svc-mail"
       ],
       "defaultClientScopes": [
         "basic",
         "profile",
-        "roles"
+        "roles",
+        "fm-origin"
       ]
     },
     {
@@ -279,7 +342,8 @@
       "defaultClientScopes": [
         "basic",
         "profile",
-        "roles"
+        "roles",
+        "fm-origin"
       ]
     },
     {
@@ -296,7 +360,8 @@
       "defaultClientScopes": [
         "basic",
         "profile",
-        "roles"
+        "roles",
+        "fm-origin"
       ]
     },
     {
@@ -311,7 +376,68 @@
         "standard.token.exchange.enabled": "true"
       },
       "optionalClientScopes": [
-        "svc-leads"
+        "svc-leads",
+        "svc-search",
+        "svc-jobs",
+        "svc-mail"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles",
+        "fm-origin"
+      ]
+    },
+    {
+      "clientId": "jobs",
+      "name": "Jobs service identity",
+      "publicClient": false,
+      "secret": "REPLACE-jobs-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "optionalClientScopes": [
+        "svc-search",
+        "svc-agents"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles",
+        "fm-origin"
+      ]
+    },
+    {
+      "clientId": "agents",
+      "name": "Agents service identity (runs runtime AI agents; fm_origin=agent)",
+      "publicClient": false,
+      "secret": "REPLACE-agents-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "fm-origin-agent",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": {
+            "claim.name": "fm_origin",
+            "claim.value": "agent",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ],
+      "optionalClientScopes": [
+        "svc-mcp"
       ],
       "defaultClientScopes": [
         "basic",

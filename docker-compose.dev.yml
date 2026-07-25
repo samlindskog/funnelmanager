@@ -241,7 +241,10 @@ services:
   # DNS name and the issuer string to the browser-facing origin so both see
   # consistent `iss` claims.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.2
+    # Pinned to a concrete 26.2.x patch + digest (verified on quay.io). The
+    # script-mapper mechanism was proven on 26.2; stay on 26.2.x. Bump both the
+    # tag and the digest together.
+    image: quay.io/keycloak/keycloak:26.2.5@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9
     mem_limit: 1g
     command: ["start-dev", "--import-realm"]
     environment:
@@ -253,8 +256,15 @@ services:
       # backchannel hostname would stamp iss=http://keycloak:8080 and break
       # every service's pinned-issuer verification.
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
+      # Enables the fm-origin-provider script mapper (below), which propagates
+      # the fm_origin claim across RFC 8693 token exchanges. 'scripts' is a
+      # preview feature; start-dev auto-builds the mounted provider on startup.
+      KC_FEATURES: scripts
     volumes:
       - ./deploy/keycloak/realm-funnelmanager-dev.json:/opt/keycloak/data/import/realm.json:ro
+      # Script provider: carries fm_origin across every exchange hop so an
+      # agent-initiated origin ("alice (via agent)") survives mcp->search->....
+      - ./deploy/keycloak/providers/fm-origin-provider.jar:/opt/keycloak/providers/fm-origin-provider.jar:ro
       - keycloak_data_dev:/opt/keycloak/data/h2
     ports:
       - "${HOST_BIND:-}8080:8080"

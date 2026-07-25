@@ -21,15 +21,25 @@ Every request carries **two identities**:
 ## Per-hop audiences and token exchange
 
 Each service only accepts JWTs whose `aud` names it (`search`, `leads`,
-`mail`, `mcp` — checked by Istio/OPA and again by `fm_runtime`). To call
-another service, a client exchanges its inbound token at Keycloak for a
-token with the target's audience:
+`mail`, `mcp`, `jobs`, `agents` — checked by Istio/OPA and again by
+`fm_runtime`). To call another service, a client exchanges its inbound token
+at Keycloak for a token with the target's audience:
 
 - The realm defines client scopes `svc-<service>` (an audience mapper per
   service). A client may exchange toward a target **only if it holds that
-  optional scope** — the one-hop pairing allowlist lives in the realm:
-  `search → leads`, `mcp → leads`, `agent-example → mcp`. Anything else
-  (e.g. `mail → leads`) is refused by Keycloak itself.
+  optional scope** — the one-hop pairing allowlist lives in the realm.
+  Current edges: `search → leads`, `search → mail` (the `exclude_contacted`
+  contacted-set read), `mcp → {leads, search, jobs, mail}` (MCP fans out to
+  every backend it exposes tools for), `agents → mcp` (a runtime agent's only
+  hop out), `jobs → {search, agents}` (subscribing to producers' job streams
+  / proxying their control API). Anything else (e.g. `mail → leads`) is refused
+  by Keycloak itself. **This exchange table is triple-encoded and must stay in
+  lockstep:** the realm's `optionalClientScopes`, OPA's `config.azp_allow`
+  (`deploy/policy/data.json`), and `fm_runtime/grants.py`'s
+  `SVC_EXCHANGE_SCOPES` — prove them equal (and catch any leftover realm
+  over-grant) with `python -m fm_runtime.export --check deploy/policy/data.json
+  --realm deploy/keycloak/realm-funnelmanager-dev.json`.
+  Every new edge widens who may act toward a service → a security-review item.
 - `fm_runtime`'s `TokenBroker` performs the exchange
   (`grant_type=token-exchange`, `audience=<target>`, `scope=svc-<target>`)
   and caches results per (subject, audience) — never once per request.
@@ -47,6 +57,44 @@ token with the target's audience:
   It does **not** emit nested RFC 8693 `act` chains; `fm_runtime` parses
   `act` when present (future-proof), and OPA combines `azp` with the mTLS
   workload identity for delegation constraints.
+
+## Agent identity — the `fm_origin` claim
+
+Runtime AI agents (the `agents` service) act **as the human**: they exchange
+the human's token but keep `preferred_username` unchanged, so persisted
+records still belong to the user (owner = `preferred_username`). What
+distinguishes an agent-initiated call is a propagated **`fm_origin` claim**:
+
+- **`agents` mints; everyone else passes through.** The `agents` client carries
+  its own hardcoded `fm_origin=agent` mapper — the **mint** on the first hop.
+  Every other client (browser + all service clients) carries the `fm-origin`
+  client scope as a **default** scope. That scope's mapper is a **script mapper**
+  (`script-fm-origin-passthrough.js`, from the `fm-origin-provider` script
+  provider) that **copies the inbound subject token's `fm_origin` onto the newly
+  issued token, defaulting to `user`**. On a normal login (no subject token) it
+  yields `user`.
+- **Propagation is KEYCLOAK-NATIVE and survives every hop.** A hardcoded
+  `fm_origin=user` mapper on an intermediate client would re-stamp `user` and
+  lose the agent origin (KC standard exchange re-runs the *exchanging* client's
+  mappers). The passthrough script instead reads the `subject_token` being
+  exchanged, so `agents → mcp → search → leads` all keep `fm_origin=agent`,
+  while a purely human chain stays `user`. The broker does **not** send
+  `fm_origin` as a request param, and the script reads **only** the subject
+  token (never a caller-supplied `fm_origin`/`claims` param), so origin cannot
+  be forged. Requires Keycloak feature `scripts` (enabled in compose + the k3s
+  Keycloak manifests) and the provider JAR in `/opt/keycloak/providers`
+  (`deploy/keycloak/providers/`). This is a realm ⇄ `fm_runtime` handoff
+  (coordinate realm + `grants.py`/broker changes together) and a
+  security-review item.
+- **Depth limit (KC 26.2 standard exchange):** a token that has already been
+  exchanged **twice** is issued without a user session (`sid` becomes null on
+  the 2nd exchange) and **cannot be exchanged a 3rd time** ("Invalid token").
+  This bounds deep chains like `agents → mcp → search → leads` regardless of
+  `fm_origin`; see the token-exchange notes / `fm_runtime` for how detached
+  chains are handled.
+- Records store `origin=fm_origin` and `actor=azp` alongside the owner, so a
+  UI renders "alice" or "alice (via agent)". There are **no synthetic
+  per-user agent users** in Keycloak.
 
 ## What each application does (fm_runtime)
 
@@ -104,9 +152,10 @@ reaches leads is authorized at the gateway (frontend token, aud search),
 then again at leads (exchanged token, aud leads) — defense in depth;
 internal ≠ trusted.
 
-**Machine/AI agents:** confidential clients (see `agent-example`) obtain
-client-credentials tokens (`aud: mcp`) and call the MCP server; each tool
-call carries the token (`session_token` argument or Authorization header).
+**Machine/AI agents:** the `agents` confidential client acts as the human via
+token exchange (`fm_origin=agent`); a runtime agent calls the MCP server and
+each tool call carries the token (`session_token` argument or Authorization
+header).
 The MCP server exchanges it toward leads, so the agent acts as its own
 principal with `azp: mcp`, and OPA can constrain the delegation.
 

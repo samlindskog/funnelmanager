@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from fm_runtime.context import current_principal, current_trace_headers
-from fm_runtime.tokens import TokenBroker, get_broker
+from fm_runtime.tokens import TokenBroker, get_broker, resolve_origin
 
 
 class InternalClient:
@@ -31,27 +31,36 @@ class InternalClient:
         *,
         subject_token: str | None = None,
         follow_context: bool = True,
+        origin: str | None = None,
         timeout: httpx.Timeout | float | None = 30.0,
         broker: TokenBroker | None = None,
     ) -> None:
         """follow_context=True (default): the subject token and trace headers
-        are read from the current request context on every call.
+        are read from the current request context on every call, and the
+        fm_origin cache dimension is resolved from the live principal
+        (`resolve_origin`) unless `origin` pins it.
         follow_context=False: `subject_token` (possibly None → service
-        identity) and captured trace headers are frozen in — for detached
-        jobs."""
+        identity), `origin`, and captured trace headers are frozen in — for
+        detached jobs. `origin` may also be pinned in follow_context mode to
+        force agent attribution."""
         self.base_url = base_url.rstrip("/")
         self.audience = audience
         self._broker = broker or get_broker()
         self._follow_context = follow_context
         self._fixed_subject = subject_token
+        self._fixed_origin = origin
         self._fixed_trace = {} if follow_context else current_trace_headers()
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
     @classmethod
     def detached(cls, base_url: str, audience: str, **kwargs: Any) -> "InternalClient":
         """Freeze the current principal's token + trace context for a
-        background job started inside a request."""
+        background job started inside a request. The fm_origin is resolved from
+        the principal now and frozen (so an agent-initiated job keeps its agent
+        attribution even after it downgrades to the service's own
+        client-credentials identity once the captured subject token expires)."""
         principal = current_principal()
+        kwargs.setdefault("origin", resolve_origin(principal, get_broker().settings))
         return cls(
             base_url,
             audience,
@@ -65,11 +74,19 @@ class InternalClient:
             principal = current_principal()
             subject = principal.raw_token if principal else None
             trace = current_trace_headers()
+            # A caller-pinned origin (forced agent attribution) wins; otherwise
+            # derive it from the live principal. Origin only splits the broker
+            # cache here — Keycloak's mapper stamps the real fm_origin claim
+            # (see tokens.py).
+            origin = self._fixed_origin or resolve_origin(principal, self._broker.settings)
         else:
             subject = self._fixed_subject
             trace = dict(self._fixed_trace)
+            # Detached: origin was resolved from the principal at capture time
+            # and frozen — the request context is gone by the time this runs.
+            origin = self._fixed_origin
         headers = dict(trace)
-        token = await self._broker.token_for(self.audience, subject)
+        token = await self._broker.token_for(self.audience, subject, origin=origin)
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if extra:

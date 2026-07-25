@@ -32,6 +32,15 @@ _ALLOWED_ALGS = ["RS256", "RS384", "RS512", "ES256", "ES384", "PS256"]
 _JWKS_TTL_SECONDS = 600.0
 _JWKS_MIN_REFRESH_INTERVAL_SECONDS = 30.0
 
+# fm_origin: attributes a persisted record's initiator. `user` (default) = a
+# human-initiated request; `agent` = the request was started by a runtime AI
+# agent (the `agents` service) acting on a human's behalf. The claim is minted
+# and PROPAGATED across RFC 8693 exchanges (see tokens.py) so every downstream
+# hop can render "alice (via agent)". The human stays the subject either way.
+FM_ORIGIN_CLAIM = "fm_origin"
+ORIGIN_USER = "user"
+ORIGIN_AGENT = "agent"
+
 
 @dataclass(frozen=True)
 class Actor:
@@ -66,6 +75,21 @@ class Principal:
     @property
     def is_delegated(self) -> bool:
         return bool(self.act_chain)
+
+    @property
+    def origin(self) -> str:
+        """`user` or `agent` — who initiated this request (the `fm_origin`
+        claim, minted/propagated by TokenBroker). Downstream services persist
+        this so a record can render "alice (via agent)". Defaults to `user`."""
+        value = str(self.claims.get(FM_ORIGIN_CLAIM) or ORIGIN_USER)
+        return value if value in (ORIGIN_USER, ORIGIN_AGENT) else ORIGIN_USER
+
+    @property
+    def actor(self) -> str:
+        """The client that performed the last exchange (`azp`). KC 26.2 stamps
+        the exchanging client here rather than emitting nested `act` chains, so
+        this is the machine identity to attribute alongside `origin`."""
+        return self.client_id
 
 
 @dataclass(frozen=True)
@@ -274,10 +298,18 @@ def summarize_for_log(principal: Principal | None) -> str:
     if principal.act_chain:
         actors = ">".join(a.client_id or a.sub for a in principal.act_chain)
         return f"{principal.username}(via {actors})"
+    # KC 26.2 has no act chain; an agent-initiated request is marked by
+    # fm_origin=agent with the exchanging client in azp.
+    if principal.origin == ORIGIN_AGENT:
+        via = principal.actor or ORIGIN_AGENT
+        return f"{principal.username}(via {via})"
     return principal.username
 
 
 __all__ = [
+    "FM_ORIGIN_CLAIM",
+    "ORIGIN_AGENT",
+    "ORIGIN_USER",
     "Actor",
     "AuthUnavailableError",
     "Peer",

@@ -1,0 +1,4 @@
+# The Keycloak fm_origin script provider is zipped byte-for-byte into a
+# deterministic JAR (deploy/keycloak/providers/build.sh) and verified in CI.
+# Force LF so a CRLF checkout can never change the embedded bytes.
+deploy/keycloak/providers/src/** -text

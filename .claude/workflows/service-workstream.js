@@ -12,7 +12,10 @@ export const meta = {
 // implement -> parallel adversarial review. Opus/high is forced on every agent()
 // call per the program's "team uses Opus on high effort" rule. The capture +
 // self-improvement hooks fire automatically for both the domain agent and the reviewers.
-const workstreams = (args && args.workstreams) || []
+// args may arrive as an object or as a JSON-encoded string — tolerate both.
+let _args = args
+if (typeof _args === 'string') { try { _args = JSON.parse(_args) } catch (e) { _args = {} } }
+const workstreams = (_args && _args.workstreams) || []
 if (!workstreams.length) { log('no workstreams provided in args.workstreams'); return { results: [] } }
 
 const REVIEWERS = ['bug-hunter', 'security-reviewer', 'quality-reviewer']

@@ -27,7 +27,10 @@ spec:
           effect: NoSchedule
       containers:
         - name: keycloak
-          image: quay.io/keycloak/keycloak:26.2
+          # Pinned to a concrete 26.2.x patch + digest (verified on quay.io).
+          # The script-mapper mechanism was proven on 26.2; stay on 26.2.x.
+          # Bump both the tag and the digest together.
+          image: quay.io/keycloak/keycloak:26.2.5@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9
           args:
             - start
             - --import-realm
@@ -53,6 +56,12 @@ spec:
                   key: hostname
             - name: KC_PROXY_HEADERS
               value: xforwarded
+            # Enables the fm-origin-provider script mapper (mounted below), which
+            # propagates the fm_origin claim across RFC 8693 token exchanges so an
+            # agent-initiated origin survives every hop. 'scripts' is a preview
+            # feature; `start` auto-augments the mounted provider on boot.
+            - name: KC_FEATURES
+              value: scripts
             - name: KC_HTTP_ENABLED
               value: "true"
             - name: KC_HEALTH_ENABLED
@@ -102,7 +111,16 @@ spec:
             - name: realm-import
               mountPath: /opt/keycloak/data/import
               readOnly: true
+            # Script provider JAR (subPath keeps the image's providers/ dir
+            # intact and only adds this one file).
+            - name: providers
+              mountPath: /opt/keycloak/providers/fm-origin-provider.jar
+              subPath: fm-origin-provider.jar
+              readOnly: true
       volumes:
         - name: realm-import
           secret:
             secretName: keycloak-realm
+        - name: providers
+          configMap:
+            name: keycloak-providers

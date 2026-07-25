@@ -58,7 +58,7 @@ overlay, not in base).
   overlays via the kustomize `images:` transformer (`sha-<gitsha>`; the
   prod overlay carries the currently-deployed pin). Never `:latest`.
 - Third-party images pinned to exact versions:
-  `quay.io/keycloak/keycloak:26.2`, `mongo:7.0.21`,
+  `quay.io/keycloak/keycloak:26.2.5@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9`, `mongo:7.0.21`,
   `milvusdb/milvus:v2.5.4`, `quay.io/coreos/etcd:v3.5.18`,
   `minio/minio:RELEASE.2024-12-18T13-15-44Z`,
   `openpolicyagent/opa:1.6.0-envoy` (envoy ext_authz build),

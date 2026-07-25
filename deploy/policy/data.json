@@ -35,9 +35,12 @@
         "mcp": []
       },
       "azp_allow": {
-        "search": ["frontend"],
-        "mail": ["frontend"],
-        "leads": ["search", "mcp"]
+        "search": ["frontend", "mcp", "jobs"],
+        "mail": ["frontend", "mcp", "search"],
+        "leads": ["search", "mcp"],
+        "mcp": ["agents"],
+        "jobs": ["mcp"],
+        "agents": ["jobs"]
       },
       "anonymous": [
         {

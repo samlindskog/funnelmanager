@@ -94,3 +94,18 @@ jobs:
           touch .env
           docker compose -f docker-compose.dev.yml config -q
           docker compose -f docker-compose.prod.yml config -q
+
+  keycloak-provider:
+    # The fm-origin script-provider JAR + its k3s ConfigMap are CI-reproduced
+    # from src/ (never hand-authored). Fail if the committed artifacts drift
+    # from a fresh deterministic build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild provider JAR + ConfigMap from src/
+        run: deploy/keycloak/providers/build.sh
+      - name: Fail if committed artifacts differ from a fresh build
+        run: |
+          git diff --exit-code -- \
+            deploy/keycloak/providers/fm-origin-provider.jar \
+            deploy/infrastructure/identity/providers-configmap.yaml

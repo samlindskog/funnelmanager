@@ -1,0 +1,9 @@
+{
+  "mappers": [
+    {
+      "name": "fm-origin-passthrough",
+      "fileName": "fm-origin-passthrough.js",
+      "description": "Propagate the inbound subject token's fm_origin claim across an RFC 8693 exchange (default 'user')."
+    }
+  ]
+}

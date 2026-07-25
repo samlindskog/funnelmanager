@@ -239,7 +239,10 @@ services:
   # be the browser-facing URL (e.g. https://kc.<domain>/realms/funnelmanager)
   # with a TLS reverse proxy in front of the published port.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.2
+    # Pinned to a concrete 26.2.x patch + digest (verified on quay.io). The
+    # script-mapper mechanism was proven on 26.2; stay on 26.2.x. Bump both the
+    # tag and the digest together.
+    image: quay.io/keycloak/keycloak:26.2.5@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9
     restart: unless-stopped
     mem_limit: 1g
     command: ["start-dev", "--import-realm", "--proxy-headers", "xforwarded"]
@@ -252,12 +255,20 @@ services:
       # backchannel hostname would stamp the container-DNS issuer and break
       # every service's pinned-issuer verification.
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
+      # Enables the fm-origin-provider script mapper (below), which propagates
+      # the fm_origin claim across RFC 8693 token exchanges so an agent-initiated
+      # origin survives every hop. 'scripts' is a preview feature.
+      KC_FEATURES: scripts
     volumes:
       # No default on purpose: the tracked realm file is the DEV realm
       # (admin/admin application user, published client secrets) and must
       # never reach prod. Start from
       # deploy/keycloak/realm-funnelmanager-prod.example.json.
       - ${KEYCLOAK_REALM_FILE:?point KEYCLOAK_REALM_FILE at a hardened realm export — never the tracked dev realm}:/opt/keycloak/data/import/realm.json:ro
+      # Script provider: carries fm_origin across every exchange hop. The
+      # hardened prod realm's fm-origin scope references its mapper
+      # (script-fm-origin-passthrough.js), so the JAR must be present.
+      - ./deploy/keycloak/providers/fm-origin-provider.jar:/opt/keycloak/providers/fm-origin-provider.jar:ro
       - keycloak_data:/opt/keycloak/data/h2
     ports:
       - "${HOST_BIND:-127.0.0.1:}${PROD_KC_PORT:-8080}:8080"

@@ -25,20 +25,46 @@ from fastapi import HTTPException, Request, status
 
 from fm_runtime.annotations import anonymous, collect_anonymous
 from fm_runtime.client import InternalClient
+from fm_runtime.confirmation import (
+    ConfirmationRequired,
+    confirmation_threshold,
+    make_confirm_token,
+    require_confirmation,
+)
 from fm_runtime.context import RequestContext, current_context, current_principal
+from fm_runtime.job_events import (
+    JobControlAction,
+    JobEvent,
+    JobStatus,
+    control_path,
+)
 from fm_runtime.logging import configure_logging
 from fm_runtime.middleware import PrincipalMiddleware
 from fm_runtime.observability import install_observability
-from fm_runtime.principal import Actor, AuthUnavailableError, Peer, Principal, TokenError
+from fm_runtime.principal import (
+    ORIGIN_AGENT,
+    ORIGIN_USER,
+    Actor,
+    AuthUnavailableError,
+    Peer,
+    Principal,
+    TokenError,
+)
 from fm_runtime.settings import RuntimeSettings, get_runtime_settings
-from fm_runtime.tokens import ExchangeError, TokenBroker, get_broker
+from fm_runtime.tokens import ExchangeError, TokenBroker, get_broker, resolve_origin
 from fm_runtime.whoami import install_whoami
 
 __all__ = [
+    "ORIGIN_AGENT",
+    "ORIGIN_USER",
     "Actor",
     "AuthUnavailableError",
+    "ConfirmationRequired",
     "ExchangeError",
     "InternalClient",
+    "JobControlAction",
+    "JobEvent",
+    "JobStatus",
     "Peer",
     "Principal",
     "RequestContext",
@@ -48,13 +74,18 @@ __all__ = [
     "anonymous",
     "collect_anonymous",
     "configure_logging",
+    "confirmation_threshold",
+    "control_path",
     "current_context",
     "current_principal",
     "get_broker",
     "get_runtime_settings",
     "install",
+    "make_confirm_token",
     "optional_principal",
+    "require_confirmation",
     "require_principal",
+    "resolve_origin",
 ]
 
 

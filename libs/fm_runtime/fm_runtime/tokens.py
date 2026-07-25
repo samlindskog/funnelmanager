@@ -2,9 +2,10 @@
 
 Rule: a service NEVER forwards the token it received. For every outbound
 internal hop it exchanges the inbound subject token for a new token whose
-`aud` names the target service (Keycloak appends the `act` claim, preserving
-the delegation chain). Exchanged tokens are cached per (subject, audience) —
-never exchange per request.
+`aud` names the target service (KC 26.2 keeps the subject and stamps the
+exchanging client in `azp` — no nested `act` chain — while a Keycloak mapper
+preserves the inbound `fm_origin` claim across the hop). Exchanged tokens are
+cached per (subject, audience, origin) — never exchange per request.
 
 Two modes:
 - exchange (normal): FM_OIDC_TOKEN_URL + client credentials configured.
@@ -24,6 +25,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from fm_runtime.principal import ORIGIN_AGENT, ORIGIN_USER, Principal
 from fm_runtime.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,33 @@ TOKEN_TYPE_ACCESS = "urn:ietf:params:oauth:token-type:access_token"
 
 _CACHE_MAX_ENTRIES = 2048
 _EXPIRY_SLACK_SECONDS = 30.0
+
+
+def resolve_origin(principal: Principal | None, settings: RuntimeSettings) -> str:
+    """Decide the fm_origin the broker associates with the next exchange.
+
+    This is now a CACHE-KEY dimension, not a wire value: Keycloak's mapper sets
+    the real fm_origin claim on the issued token (see TokenBroker.token_for).
+    Returns:
+
+    - `agent` if the inbound principal already carries fm_origin=agent (PROPAGATE
+      — once agent, always agent for the rest of the call chain),
+    - `agent` if the client initiating this exchange is the agents service
+      (MINT — either this very service, or the inbound token's azp/actor),
+    - `user` otherwise (the default for every human-initiated request).
+
+    Attribution/caching only; it never widens access (audience + role grants
+    still gate), and it mirrors what Keycloak's mapper will stamp so the two
+    stay consistent.
+    """
+    agents_client = settings.agents_client_id
+    if principal is not None and principal.origin == ORIGIN_AGENT:
+        return ORIGIN_AGENT
+    if agents_client and settings.effective_client_id == agents_client:
+        return ORIGIN_AGENT
+    if principal is not None and agents_client and principal.actor == agents_client:
+        return ORIGIN_AGENT
+    return ORIGIN_USER
 
 
 class ExchangeError(Exception):
@@ -69,12 +98,29 @@ class TokenBroker:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def token_for(self, audience: str, subject_token: str | None) -> str:
+    async def token_for(
+        self,
+        audience: str,
+        subject_token: str | None,
+        *,
+        origin: str | None = None,
+    ) -> str:
         """Access token to call `audience` with.
 
-        With a subject token: RFC 8693 exchange (delegation — `act` chain).
-        Without one (background jobs, anonymous-webhook-triggered work): a
-        client-credentials token for this service's own identity.
+        With a subject token: RFC 8693 exchange (KC 26.2 keeps the subject and
+        stamps the exchanging client in `azp` — no nested `act`). Without one
+        (background jobs, anonymous-webhook-triggered work): a client-credentials
+        token for this service's own identity.
+
+        `origin` (``user``/``agent``) is a CACHE-KEY dimension only. Propagation
+        of fm_origin onto the issued token is KEYCLOAK-NATIVE: a hardcoded/script
+        mapper preserves the inbound subject token's fm_origin claim across every
+        hop (and mints it on the agents client) while IGNORING request form
+        params — so the broker does NOT send fm_origin to the token endpoint. It
+        only folds `origin` (sourced from the current principal via
+        ``resolve_origin``) into the cache key so an agent-context and a
+        user-context token for the same subject+audience never collide.
+        Attribution only — it never changes what the token may access.
         """
         if not self.settings.exchange_enabled:
             # Bare dev only (no token endpoint at all) — RuntimeSettings
@@ -85,8 +131,15 @@ class TokenBroker:
         # The svc-<audience> optional client scope carries the audience mapper;
         # Keycloak only honors the audience request when it is in scope.
         scope = self.settings.exchange_scope_template.format(audience=audience)
+        origin_suffix = f":{origin}" if origin else ""
         if subject_token:
-            key = "x:" + hashlib.sha256(subject_token.encode()).hexdigest() + ":" + audience
+            key = (
+                "x:"
+                + hashlib.sha256(subject_token.encode()).hexdigest()
+                + ":"
+                + audience
+                + origin_suffix
+            )
             form = {
                 "grant_type": GRANT_TOKEN_EXCHANGE,
                 "subject_token": subject_token,
@@ -96,8 +149,13 @@ class TokenBroker:
                 "scope": scope,
             }
         else:
-            key = "cc:" + audience
+            key = "cc:" + audience + origin_suffix
             form = {"grant_type": GRANT_CLIENT_CREDENTIALS, "scope": scope}
+        # NOTE: fm_origin is deliberately NOT sent as a form param. Propagation
+        # is KEYCLOAK-NATIVE — a hardcoded/script mapper on the exchange stamps
+        # fm_origin on the issued token (minting it on the agents client,
+        # preserving the inbound subject token's claim on every other hop) and
+        # ignores request params. `origin` here is only a cache-key dimension.
 
         cached = self._cache.get(key)
         if cached and cached.fresh:
