@@ -1,13 +1,10 @@
-"""HTTP client for the leads backend.
+"""Generic HTTP client for an internal backend.
 
-Every tool call carries the acting principal's token (the `session_token`
-argument or the Authorization header on the /mcp request). It is the
-*subject* token: fm_runtime's TokenBroker exchanges it (RFC 8693, cached) for
-a leads-audience token on every upstream call, so leads sees the original
-principal with this server in the `act` chain.
-
-With MCP_SHARED_LOGIN_FALLBACK=true (dev only), tokenless calls act as the
-MCP server's own service identity via a client-credentials token instead.
+One ``BackendClient(base_url, audience)`` is created per upstream (leads, search,
+jobs). It resolves the per-call token to the client's audience via
+``TokenResolver.resolve(audience, subject)`` and issues the request with the
+exchanged bearer. Adding an upstream is a new instance + a ``mcp->{audience}``
+svc scope — no client subclass.
 """
 
 from __future__ import annotations
@@ -16,23 +13,9 @@ from typing import Any
 
 import httpx
 
-from fm_runtime import ExchangeError, get_broker
 from fm_runtime.context import current_trace_headers
 
-from app.config import Settings
-
-LEADS_AUDIENCE = "leads"
-
-
-class UpstreamError(RuntimeError):
-    """Raised when a backend call fails; message is surfaced to the MCP client."""
-
-
-MISSING_TOKEN_MESSAGE = (
-    "No token was provided for this tool call. Pass session_token explicitly "
-    "or send an Authorization: Bearer header on the MCP request. Tokens "
-    "expire — fetch a fresh one if this keeps failing."
-)
+from app.tokens import TokenResolver, UpstreamError
 
 INVALID_TOKEN_MESSAGE = (
     "The token was rejected (expired or revoked). Fetch a fresh one and retry."
@@ -59,34 +42,17 @@ def _raise_for_auth(response: httpx.Response, context: str) -> None:
         raise UpstreamError(f"{context}: {FORBIDDEN_MESSAGE}")
 
 
-class TokenResolver:
-    """Explicit per-call subject token, else (dev fallback only) the server's
-    own service identity via client credentials."""
+class BackendClient:
+    """Calls one internal backend with an exchanged (per-hop-audience) bearer."""
 
-    def __init__(self, settings: Settings):
-        self._settings = settings
-
-    async def resolve(self, explicit: str | None) -> str:
-        """Returns the *outbound* leads-audience bearer."""
-        subject = (explicit or "").strip() or None
-        if subject is None and not self._settings.mcp_shared_login_fallback:
-            raise UpstreamError(MISSING_TOKEN_MESSAGE)
-        try:
-            # subject=None -> client-credentials (service identity, dev only).
-            return await get_broker().token_for(LEADS_AUDIENCE, subject)
-        except ExchangeError as exc:
-            raise UpstreamError(f"Token exchange failed: {exc}") from exc
-
-
-class LeadsBackendClient:
-    """Calls the internal leads backend with an exchanged bearer token."""
-
-    def __init__(self, settings: Settings, tokens: TokenResolver):
-        self._settings = settings
+    def __init__(self, name: str, base_url: str, audience: str, tokens: TokenResolver):
+        self._name = name
+        self._base_url = base_url
+        self._audience = audience
         self._tokens = tokens
 
     def _url(self, path: str) -> str:
-        base = self._settings.leads_backend_url.rstrip("/")
+        base = self._base_url.rstrip("/")
         return f"{base}/{path.lstrip('/')}"
 
     async def request(
@@ -98,7 +64,7 @@ class LeadsBackendClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
     ) -> Any:
-        bearer = await self._tokens.resolve(token)
+        bearer = await self._tokens.resolve(self._audience, token)
         headers = current_trace_headers()
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
@@ -110,11 +76,11 @@ class LeadsBackendClient:
                 json=json_body,
                 headers=headers,
             )
-        _raise_for_auth(response, f"Leads backend {method} {path}")
+        context = f"{self._name} backend {method} {path}"
+        _raise_for_auth(response, context)
         if response.status_code >= 400:
             raise UpstreamError(
-                f"Leads backend {method} {path} failed "
-                f"({response.status_code}): {_error_detail(response)}"
+                f"{context} failed ({response.status_code}): {_error_detail(response)}"
             )
         if response.status_code == 204:
             return None

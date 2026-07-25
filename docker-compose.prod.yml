@@ -285,6 +285,8 @@ services:
       # prod — clients must pass the acting principal's token per call.
       MCP_SHARED_LOGIN_FALLBACK: ${MCP_SHARED_LOGIN_FALLBACK:-false}
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
+      SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://search:8000}
+      JOBS_BACKEND_URL: ${JOBS_BACKEND_URL:-http://jobs:8005}
       FM_SERVICE_NAME: mcp
       FM_JWT_VERIFY: "true"
       FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}

@@ -93,6 +93,10 @@ spec:
               value: INFO
             - name: LEADS_BACKEND_URL
               value: http://leads:8001
+            - name: SEARCH_BACKEND_URL
+              value: http://search:8000
+            - name: JOBS_BACKEND_URL
+              value: http://jobs:8005
             # Tokenless tool calls must fail outside dev-compose; every caller
             # supplies the acting principal's token.
             - name: MCP_SHARED_LOGIN_FALLBACK

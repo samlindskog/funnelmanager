@@ -16,8 +16,12 @@ class Settings(BaseSettings):
 
     app_name: str = "Funnel Manager MCP"
 
-    # Internal service URL for the leads backend.
+    # Internal service URLs for the upstream backends. One BackendClient is
+    # created per upstream (leads/search/jobs), each with its own audience so
+    # tokens.resolve() exchanges for the right per-hop audience.
     leads_backend_url: str = "http://leads:8001"
+    search_backend_url: str = "http://search:8000"
+    jobs_backend_url: str = "http://jobs:8005"
 
     # Optional dev fallback for tool calls that arrive WITHOUT a token: act
     # as this server's own service identity (client-credentials token). When

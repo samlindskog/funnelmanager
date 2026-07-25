@@ -12,7 +12,7 @@
 #         - protocol: TCP
 #           port: 8003
 #
-# Egress: leads (the only backend it fronts) and Keycloak. DNS via allow-dns.
+# Egress: leads, search, jobs (the backends its tools front) and Keycloak. DNS via allow-dns.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -35,6 +35,22 @@ spec:
       ports:
         - protocol: TCP
           port: 8001
+    # search + jobs: MCP tools call their /api/{svc}/mcp/v1/* endpoints
+    # (OPA still gates on the mcp->{svc} exchange edge + workload identity).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: jobs
+      ports:
+        - protocol: TCP
+          port: 8005
     - to:
         - namespaceSelector:
             matchLabels:

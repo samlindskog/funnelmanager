@@ -289,6 +289,8 @@ services:
       - .env
     environment:
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
+      SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://search:8000}
+      JOBS_BACKEND_URL: ${JOBS_BACKEND_URL:-http://jobs:8005}
       FM_SERVICE_NAME: mcp
       FM_JWT_VERIFY: "true"
       FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
