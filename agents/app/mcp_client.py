@@ -27,12 +27,16 @@ IDENTITY / EXCHANGE (security-review surface):
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import httpx
 from fm_runtime import ExchangeError, TokenBroker, get_broker
 from pydantic_ai.mcp import MCPToolset, StreamableHttpTransport
 
 from app.config import Settings
+
+if TYPE_CHECKING:
+    from pydantic_ai.mcp import ProcessToolCallback
 
 logger = logging.getLogger(__name__)
 
@@ -84,20 +88,29 @@ class _AgentExchangeAuth(httpx.Auth):
 
 
 def build_mcp_toolset(
-    settings: Settings, *, subject_token: str | None, origin: str
+    settings: Settings,
+    *,
+    subject_token: str | None,
+    origin: str,
+    process_tool_call: "ProcessToolCallback | None" = None,
 ) -> MCPToolset:
     """Build the pydantic-ai toolset backed by the internal MCP server.
 
     The whole tool surface (search/leads/jobs/mail) is discovered from the MCP
     server at connect time — the agent's capability + situational-awareness
     surface — and every call authenticates via ``_AgentExchangeAuth``.
+
+    ``process_tool_call`` (the runner's) wraps every tool call to enforce the
+    Principle-4 human-approval gate: it detects a ``needs_human_approval`` result,
+    pauses the run for the initiating human, and re-issues the call with the
+    minted approval token — the LLM can never self-confirm an expensive action.
     """
     auth = _AgentExchangeAuth(get_broker(), subject_token, origin)
     transport = StreamableHttpTransport(url=settings.mcp_url, auth=auth)
     # tool_error_behavior='retry' (default): a failing MCP tool call is surfaced
     # to the model as a retry prompt so the agent can adapt (e.g. re-plan after a
     # 409 confirmation_required) rather than crashing the whole run.
-    return MCPToolset(transport, id="mcp")
+    return MCPToolset(transport, id="mcp", process_tool_call=process_tool_call)
 
 
 __all__ = ["MCP_AUDIENCE", "build_mcp_toolset"]

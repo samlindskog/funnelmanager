@@ -50,6 +50,31 @@ class Settings(BaseSettings):
     sync_interval_seconds: int = 180
     backfill_pages_per_cycle: int = 10
 
+    # --- Full-backup-on-init gate (Principle 4) ----------------------------
+    # Default size threshold above which a full mailbox backup must be
+    # confirmed (bytes). Read through fm_runtime's confirmation_threshold so
+    # FM_CONFIRM_MAIL_BACKUP_BYTES / MAIL_BACKUP_CONFIRM_BYTES can override at
+    # runtime; this is only the fallback default (2 GiB).
+    backup_confirm_bytes_default: int = 2 * 1024**3
+    # Sampled-average-size estimate: how many messages to sample for avg bytes.
+    backup_estimate_sample: int = 25
+
+    # --- Campaigns ---------------------------------------------------------
+    # Default per-domain daily send cap (throttle) when a campaign does not
+    # specify one.
+    campaign_per_domain_daily_default: int = 20
+    # Recipient count above which STARTING a campaign is an expensive action
+    # requiring confirmation (Principle 4; origin-aware). Fallback default.
+    campaign_confirm_recipients_default: int = 1000
+    # Campaign pacer cadence and per-(campaign,domain) sends per cycle, so a
+    # campaign trickles rather than bursting its whole daily cap at once.
+    campaign_interval_seconds: int = 60
+    campaign_sends_per_domain_per_cycle: int = 10
+    # Cross-campaign per-person suppression window (days). A person contacted
+    # by ANY campaign within this many days is suppressed. 0 = suppress forever
+    # once contacted.
+    campaign_suppression_cooldown_days: int = 0
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

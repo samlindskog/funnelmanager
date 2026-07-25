@@ -36,6 +36,34 @@ logger = logging.getLogger(__name__)
 _CATCH_UP_MAX_PAGES = 50
 
 
+async def estimate_backup_bytes(client: GmailClient, sample: int = 25) -> tuple[int, int]:
+    """Estimate the total bytes a full backup of this mailbox would pull.
+
+    ``messagesTotal`` (from the profile) times the average ``sizeEstimate`` of a
+    small sample of messages. Returns ``(estimated_bytes, messages_total)``.
+    Cheap: one profile call plus one list page plus a handful of message gets.
+    """
+    profile = await client.get_profile()
+    messages_total = int(profile.get("messagesTotal") or 0)
+    if messages_total <= 0:
+        return 0, 0
+    listing = await client.list_messages(max_results=min(max(sample, 1), 100))
+    ids = [m["id"] for m in listing.get("messages") or [] if m.get("id")][:sample]
+    if not ids:
+        return 0, messages_total
+    sizes: list[int] = []
+    for gmail_id in ids:
+        try:
+            payload = await client.get_message(gmail_id)
+        except GmailError:
+            continue
+        sizes.append(int(payload.get("sizeEstimate") or 0))
+    if not sizes:
+        return 0, messages_total
+    avg = sum(sizes) / len(sizes)
+    return int(avg * messages_total), messages_total
+
+
 def apply_parsed(message: MailMessage, parsed: dict) -> None:
     """Copy a parse_message() dict onto a MailMessage row."""
     message.thread_id = parsed["thread_id"]
@@ -116,7 +144,10 @@ class SyncManager:
                         account.history_id = str(profile.get("historyId") or "")
                     else:
                         await self._sync_incremental(session, account, client)
-                    if not account.backfill_done:
+                    # Full-mailbox backfill only runs once authorized by the
+                    # Principle-4 backup gate (auto when the estimate is under
+                    # threshold at connect, else an explicit confirmed backup).
+                    if account.backfill_authorized and not account.backfill_done:
                         await self._sync_backfill(
                             session, account, client, settings.backfill_pages_per_cycle
                         )

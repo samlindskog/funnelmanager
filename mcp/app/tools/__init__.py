@@ -2,7 +2,7 @@
 
 Each ``tools/<svc>.py`` exposes ``register(mcp, deps)``; ``register_all`` wires
 them onto the server. Adding a service's tools = a drop-in module here + a client
-on ``Deps`` + an ``mcp->{svc}`` scope. The mail module is a Phase-5 stub (no-op).
+on ``Deps`` + an ``mcp->{svc}`` scope.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ def register_all(mcp: FastMCP, deps: Deps) -> None:
     leads.register(mcp, deps)
     search.register(mcp, deps)
     jobs.register(mcp, deps)
-    mail.register(mcp, deps)  # no-op until Phase 5
+    mail.register(mcp, deps)
 
 
 __all__ = ["register_all"]

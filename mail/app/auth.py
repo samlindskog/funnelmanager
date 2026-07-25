@@ -31,4 +31,6 @@ async def get_current_user() -> UserOut:
     return UserOut(
         username=principal.username,
         role="admin" if "admin" in principal.roles else "",
+        origin=principal.origin,
+        actor=principal.actor,
     )

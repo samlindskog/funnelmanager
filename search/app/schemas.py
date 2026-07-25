@@ -176,10 +176,12 @@ class McpEnrichRequest(BaseModel):
 class McpExportRequest(BaseModel):
     """Export a search's stored results as a record list (MCP surface).
 
-    ``exclude_contacted`` drops leads already messaged by a campaign (read from
-    mail's contacted set). Deferred until mail's Phase 5 endpoint exists: when the
-    filter is disabled/unavailable it is a graceful no-op (nothing is dropped) and
-    the response reports ``exclude_contacted_applied=false``.
+    ``exclude_contacted`` drops leads already messaged by a campaign, read from
+    mail's contacted set over the search->mail hop. ``campaign_id`` scopes the
+    exclusion to one campaign; omit it to exclude anyone contacted by any campaign.
+    If mail can't be consulted the filter is a graceful no-op (nothing dropped) and
+    the response reports ``exclude_contacted_applied=false``; the authoritative
+    dedupe still happens at send time in mail.
     """
 
     exclude_contacted: bool = False

@@ -260,12 +260,20 @@ async def mcp_list_results(
     search_id: int,
     limit: int = 200,
     offset: int = 0,
+    exclude_contacted: bool = False,
+    campaign_id: str | None = None,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
     _: UserOut = Depends(get_current_user),
 ) -> list[McpExportRow]:
-    """List a page of a search's stored results as compact records (cross-user)."""
+    """List a page of a search's stored results as compact records (cross-user).
+
+    ``exclude_contacted`` drops leads already messaged (via the search->mail hop),
+    optionally scoped to one ``campaign_id`` (omit for all campaigns). It filters
+    the hydrated page, so a filtered page may return fewer than ``limit`` rows; if
+    mail can't be consulted the filter is a graceful no-op (nothing dropped). The
+    authoritative dedupe still happens at send time in mail."""
     await _get_search_any(db, search_id)
     limit = max(1, min(int(limit), _MCP_EXPORT_MAX))
     offset = max(0, int(offset))
@@ -273,7 +281,10 @@ async def mcp_list_results(
     window = all_ids[offset : offset + limit]
     client = LeadsClient(settings, token)
     records = await _hydrate_results(client, window)
-    return [_export_row(record) for record in records]
+    rows = [_export_row(record) for record in records]
+    if exclude_contacted:
+        rows, _excluded, _applied = await _filter_contacted(settings, rows, campaign_id)
+    return rows
 
 
 @router.post("/searches/{search_id}/export", response_model=McpExportResponse)
@@ -286,9 +297,10 @@ async def mcp_export_search(
     _: UserOut = Depends(get_current_user),
 ) -> McpExportResponse:
     """Export a search's stored results, optionally dropping already-contacted
-    leads (via the search->mail hop). ``exclude_contacted`` is a **graceful
-    no-op** until mail's Phase 5 contacted endpoint exists / is enabled — the
-    response reports whether it was actually applied."""
+    leads (via the search->mail hop, reading mail's contacted set). Scope with
+    ``campaign_id`` (omit for all campaigns). If mail can't be consulted the filter
+    is a graceful no-op — ``exclude_contacted_applied`` reports whether it actually
+    ran. The authoritative dedupe still happens at send time in mail."""
     await _get_search_any(db, search_id)
     all_ids = await _load_all_mongo_ids(db, search_id=search_id)
     total = len(all_ids)
@@ -301,17 +313,9 @@ async def mcp_export_search(
     excluded = 0
     applied = False
     if body.exclude_contacted:
-        contacted = await MailClient(settings).contacted_emails(body.campaign_id)
-        if contacted is not None:
-            applied = True
-            kept: list[McpExportRow] = []
-            for row in rows:
-                email = (row.email or "").strip().lower()
-                if email and email in contacted:
-                    excluded += 1
-                    continue
-                kept.append(row)
-            rows = kept
+        rows, excluded, applied = await _filter_contacted(
+            settings, rows, body.campaign_id
+        )
 
     return McpExportResponse(
         search_id=search_id,
@@ -322,6 +326,31 @@ async def mcp_export_search(
         exclude_contacted_applied=applied,
         results=rows,
     )
+
+
+async def _filter_contacted(
+    settings: Settings,
+    rows: list[McpExportRow],
+    campaign_id: str | None,
+) -> tuple[list[McpExportRow], int, bool]:
+    """Drop rows whose email is in mail's contacted set (search->mail hop).
+
+    Returns ``(kept_rows, excluded_count, applied)``. ``applied`` is ``False``
+    when mail could not be consulted (down / exchange refused): the filter then
+    degrades to a graceful no-op and nothing is dropped, preserving the invariant
+    that a search/export never fails because mail is unavailable."""
+    contacted = await MailClient(settings).contacted_emails(campaign_id)
+    if contacted is None:
+        return rows, 0, False
+    kept: list[McpExportRow] = []
+    excluded = 0
+    for row in rows:
+        email = (row.email or "").strip().lower()
+        if email and email in contacted:
+            excluded += 1
+            continue
+        kept.append(row)
+    return kept, excluded, True
 
 
 def _export_row(record: dict[str, Any]) -> McpExportRow:

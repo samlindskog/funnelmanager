@@ -6,6 +6,11 @@ from pydantic import BaseModel, Field
 class UserOut(BaseModel):
     username: str
     role: str = ""
+    # fm_origin of the acting principal ("user" | "agent") and the exchanging
+    # client (azp) — recorded for attribution and used by the Principle-4
+    # confirmation gate (an agent can never self-confirm an expensive action).
+    origin: str = "user"
+    actor: str = ""
 
 
 class AccountOut(BaseModel):
@@ -16,6 +21,9 @@ class AccountOut(BaseModel):
     status: str
     last_error: str = ""
     backfill_done: bool = False
+    backfill_authorized: bool = False
+    backup_estimate_bytes: int = 0
+    messages_total: int = 0
     last_sync_at: datetime | None = None
     connected_by: str = ""
     created_at: datetime | None = None
@@ -82,3 +90,122 @@ class SendRequest(BaseModel):
 
 class SyncTriggerOut(BaseModel):
     status: str = "started"
+
+
+# --- Aggregated inbox / threads --------------------------------------------
+
+
+class ThreadOut(BaseModel):
+    thread_id: str
+    account_id: int
+    messages: list[MessageDetail] = []
+
+
+# --- Backup gate -----------------------------------------------------------
+
+
+class BackupEstimateOut(BaseModel):
+    account_id: int
+    messages_total: int
+    estimated_bytes: int
+    threshold_bytes: int
+    over_threshold: bool
+    backfill_authorized: bool
+    backfill_done: bool
+
+
+class BackupStartOut(BaseModel):
+    account_id: int
+    status: str  # "authorized" | "already_authorized"
+    estimated_bytes: int
+    messages_total: int
+
+
+# --- Campaigns -------------------------------------------------------------
+
+
+class RecipientIn(BaseModel):
+    email: str
+    apollo_id: str = ""
+    name: str = ""
+
+
+class CampaignSourceIn(BaseModel):
+    search_id: str = ""
+    label: str = ""
+    recipients: list[RecipientIn] = []
+
+
+class CampaignThrottle(BaseModel):
+    per_domain_daily: int = Field(default=20, ge=1, le=10000)
+
+
+class CampaignCreate(BaseModel):
+    name: str = Field(default="", max_length=255)
+    subject: str = Field(default="", max_length=998)
+    body_text: str = ""
+    body_html: str = ""
+    send_strategy: str = Field(default="balanced")
+    throttle: CampaignThrottle = Field(default_factory=CampaignThrottle)
+    sources: list[CampaignSourceIn] = []
+
+
+class CampaignSourceOut(BaseModel):
+    id: int
+    search_id: str = ""
+    label: str = ""
+    added_by: str = ""
+    recipient_count: int = 0
+    added_count: int = 0
+    created_at: datetime | None = None
+
+
+class CampaignStats(BaseModel):
+    recipients_total: int = 0
+    pending: int = 0
+    sent: int = 0
+    suppressed: int = 0
+    failed: int = 0
+    messages_sent: int = 0
+    sent_today_by_domain: dict[str, int] = {}
+
+
+class CampaignOut(BaseModel):
+    id: int
+    owner: str
+    origin: str = "user"
+    actor: str = ""
+    name: str = ""
+    status: str
+    send_strategy: str = "balanced"
+    throttle: dict = {}
+    subject: str = ""
+    body_text: str = ""
+    body_html: str = ""
+    last_error: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    sources: list[CampaignSourceOut] = []
+    stats: CampaignStats = Field(default_factory=CampaignStats)
+
+
+class SourceMergeOut(BaseModel):
+    """Result of adding/continuing a source: how the recipients landed after
+    dedupe + suppression."""
+
+    source_id: int
+    submitted: int = 0
+    added: int = 0
+    duplicate_in_campaign: int = 0
+    suppressed: int = 0
+
+
+class ContactOut(BaseModel):
+    email: str
+    last_contacted: datetime | None = None
+    campaign_ids: list[int] = []
+
+
+class ContactedOut(BaseModel):
+    emails: list[str] = []
+    contacts: list[ContactOut] = []

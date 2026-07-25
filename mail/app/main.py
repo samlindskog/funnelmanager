@@ -7,9 +7,10 @@ from sqlalchemy import text
 from fm_runtime import anonymous, install
 
 from app import models  # noqa: F401 — register ORM metadata
+from app.campaigns import campaign_manager
 from app.config import get_settings
 from app.database import engine, init_db
-from app.routers import mail
+from app.routers import mail, mcp
 from app.sync import sync_manager
 
 
@@ -17,7 +18,9 @@ from app.sync import sync_manager
 async def lifespan(_: FastAPI):
     await init_db()
     sync_manager.start()
+    campaign_manager.start()
     yield
+    await campaign_manager.stop()
     await sync_manager.stop()
 
 
@@ -40,6 +43,7 @@ app.add_middleware(
 )
 
 app.include_router(mail.router)
+app.include_router(mcp.router)
 
 
 @app.get("/api/mail/health")

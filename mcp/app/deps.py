@@ -18,4 +18,4 @@ class Deps:
     leads: BackendClient
     search: BackendClient
     jobs: BackendClient
-    # mail: BackendClient  # deferred to Phase 5 (mail MCP endpoints + mcp->mail)
+    mail: BackendClient

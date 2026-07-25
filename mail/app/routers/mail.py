@@ -19,27 +19,46 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import delete, func, or_, select
 
-from fm_runtime import anonymous
+from fm_runtime import anonymous, confirmation_threshold, require_confirmation
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import gmail
+from app import campaigns, gmail
 from app.auth import get_current_user
 from app.config import Settings, get_settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.gmail import GmailAuthError, GmailClient, GmailError
-from app.models import MailAccount, MailMessage, MailOauthState
+from app.models import (
+    CAMPAIGN_CANCELLED,
+    CAMPAIGN_COMPLETED,
+    CAMPAIGN_PAUSED,
+    CAMPAIGN_RUNNING,
+    Campaign,
+    MailAccount,
+    MailMessage,
+    MailOauthState,
+)
 from app.schemas import (
     AccountOut,
     AttachmentOut,
+    BackupEstimateOut,
+    BackupStartOut,
+    CampaignCreate,
+    CampaignOut,
+    CampaignSourceIn,
+    ContactedOut,
+    ContactOut,
     MessageDetail,
     MessagePage,
     MessageSummary,
     OauthUrlOut,
     SendRequest,
+    SourceMergeOut,
     SyncTriggerOut,
+    ThreadOut,
     UserOut,
 )
-from app.sync import apply_parsed, sync_manager
+from app.campaigns import campaign_manager
+from app.sync import apply_parsed, estimate_backup_bytes, sync_manager
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +67,51 @@ router = APIRouter(prefix="/api/mail", tags=["mail"])
 _STATE_TTL = timedelta(minutes=10)
 # Gmail label ids we accept as list filters (system labels + user label ids).
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def _backup_threshold() -> float:
+    """Bytes above which a full mailbox backup needs confirmation (Principle 4)."""
+    return confirmation_threshold(
+        "MAIL_BACKUP_BYTES", get_settings().backup_confirm_bytes_default
+    )
+
+
+def _campaign_threshold() -> float:
+    """Recipient count above which starting a campaign needs confirmation."""
+    return confirmation_threshold(
+        "MAIL_CAMPAIGN_RECIPIENTS", get_settings().campaign_confirm_recipients_default
+    )
+
+
+async def _auto_backup_decision(account_id: int) -> None:
+    """Background: estimate the mailbox size at connect time and, when it is
+    under the confirmation threshold, authorize the full backup automatically
+    (a human just completed the OAuth flow, so origin is always ``user``). A
+    mailbox over the threshold stays unauthorized until an explicit confirmed
+    ``POST /accounts/{id}/backup`` — the Principle-4 gate."""
+    settings = get_settings()
+    async with SessionLocal() as session:
+        account = await session.get(MailAccount, account_id)
+        if account is None or account.backfill_authorized or account.backfill_done:
+            if account is not None:
+                await session.commit()
+        else:
+            try:
+                async with GmailClient(settings, account) as client:
+                    estimate, total = await estimate_backup_bytes(
+                        client, settings.backup_estimate_sample
+                    )
+            except GmailError as exc:
+                account.last_error = exc.detail
+                await session.commit()
+            else:
+                account.backup_estimate_bytes = estimate
+                account.messages_total = total
+                if estimate <= _backup_threshold():
+                    account.backfill_authorized = True
+                await session.commit()
+    # Kick a sync either way (incremental always; backfill only if authorized).
+    await sync_manager.sync_account(account_id)
 
 
 def _labels(message: MailMessage) -> list[str]:
@@ -121,6 +185,90 @@ async def _get_account(db: AsyncSession, account_id: int) -> MailAccount:
     return account
 
 
+def _message_conditions(
+    account_id: int | None, label: str, q: str, include_deleted: bool
+) -> list:
+    """Shared WHERE clause for message listings (per-account and aggregated).
+    No per-user scoping — every user sees every mailbox (Principle 1)."""
+    conditions: list = []
+    if account_id is not None:
+        conditions.append(MailMessage.account_id == account_id)
+    label = (label or "").strip().upper()
+    if label and label != "ALL":
+        if not _LABEL_RE.match(label):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid label"
+            )
+        conditions.append(MailMessage.label_ids.like(f'%"{label}"%'))
+    if not include_deleted:
+        conditions.append(MailMessage.is_deleted.is_(False))
+    needle = (q or "").strip()
+    if needle:
+        pattern = f"%{needle}%"
+        conditions.append(
+            or_(
+                MailMessage.subject.ilike(pattern),
+                MailMessage.from_addr.ilike(pattern),
+                MailMessage.to_addrs.ilike(pattern),
+                MailMessage.snippet.ilike(pattern),
+                MailMessage.body_text.ilike(pattern),
+            )
+        )
+    return conditions
+
+
+async def _message_page(
+    db: AsyncSession, conditions: list, page: int, per_page: int
+) -> MessagePage:
+    total = (
+        await db.execute(select(func.count()).select_from(MailMessage).where(*conditions))
+    ).scalar() or 0
+    rows = (
+        (
+            await db.execute(
+                select(MailMessage)
+                .where(*conditions)
+                .order_by(MailMessage.internal_date.desc().nullslast(), MailMessage.id.desc())
+                .offset((page - 1) * per_page)
+                .limit(per_page)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return MessagePage(
+        items=[_summary(message) for message in rows],
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+async def _thread(db: AsyncSession, account_id: int, thread_id: str) -> ThreadOut:
+    await _get_account(db, account_id)
+    rows = (
+        (
+            await db.execute(
+                select(MailMessage)
+                .where(
+                    MailMessage.account_id == account_id,
+                    MailMessage.thread_id == thread_id,
+                )
+                .order_by(MailMessage.internal_date.asc().nullsfirst(), MailMessage.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thread not found")
+    return ThreadOut(
+        thread_id=thread_id,
+        account_id=account_id,
+        messages=[_detail(message) for message in rows],
+    )
+
+
 # --- accounts --------------------------------------------------------------
 
 
@@ -151,6 +299,9 @@ async def list_accounts(
             status=account.status,
             last_error=account.last_error,
             backfill_done=account.backfill_done,
+            backfill_authorized=account.backfill_authorized,
+            backup_estimate_bytes=account.backup_estimate_bytes,
+            messages_total=account.messages_total,
             last_sync_at=account.last_sync_at,
             connected_by=account.connected_by,
             created_at=account.created_at,
@@ -304,7 +455,10 @@ async def oauth_callback(
         account.history_id = str(profile.get("historyId") or "")
     await db.commit()
     await db.refresh(account)
-    asyncio.create_task(sync_manager.sync_account(account.id))
+    # Estimate the mailbox size and auto-authorize the full backup only when it
+    # is under the Principle-4 threshold; larger mailboxes wait for an explicit
+    # confirmed backup. Runs in the background so the redirect stays snappy.
+    asyncio.create_task(_auto_backup_decision(account.id))
     return bounce("connected", email)
 
 
@@ -323,50 +477,35 @@ async def list_messages(
     db: AsyncSession = Depends(get_db),
 ) -> MessagePage:
     await _get_account(db, account_id)
-    label = label.strip().upper()
-    conditions = [MailMessage.account_id == account_id]
-    if label != "ALL":
-        if not _LABEL_RE.match(label):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid label"
-            )
-        conditions.append(MailMessage.label_ids.like(f'%"{label}"%'))
-    if not include_deleted:
-        conditions.append(MailMessage.is_deleted.is_(False))
-    needle = q.strip()
-    if needle:
-        pattern = f"%{needle}%"
-        conditions.append(
-            or_(
-                MailMessage.subject.ilike(pattern),
-                MailMessage.from_addr.ilike(pattern),
-                MailMessage.to_addrs.ilike(pattern),
-                MailMessage.snippet.ilike(pattern),
-                MailMessage.body_text.ilike(pattern),
-            )
-        )
-    total = (
-        await db.execute(select(func.count()).select_from(MailMessage).where(*conditions))
-    ).scalar() or 0
-    rows = (
-        (
-            await db.execute(
-                select(MailMessage)
-                .where(*conditions)
-                .order_by(MailMessage.internal_date.desc().nullslast(), MailMessage.id.desc())
-                .offset((page - 1) * per_page)
-                .limit(per_page)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    return MessagePage(
-        items=[_summary(message) for message in rows],
-        total=total,
-        page=page,
-        per_page=per_page,
-    )
+    conditions = _message_conditions(account_id, label, q, include_deleted)
+    return await _message_page(db, conditions, page, per_page)
+
+
+@router.get("/messages", response_model=MessagePage)
+async def list_all_messages(
+    label: str = Query("INBOX", description="Gmail label id, or ALL"),
+    q: str = Query("", max_length=256),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    include_deleted: bool = Query(False),
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessagePage:
+    """Aggregated inbox/sent/search across ALL connected mailboxes and domains
+    (the full multi-domain client view). No per-user scoping (Principle 1)."""
+    conditions = _message_conditions(None, label, q, include_deleted)
+    return await _message_page(db, conditions, page, per_page)
+
+
+@router.get("/accounts/{account_id}/threads/{thread_id}", response_model=ThreadOut)
+async def get_thread(
+    account_id: int,
+    thread_id: str,
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ThreadOut:
+    """All archived messages of one Gmail thread on an account, oldest first."""
+    return await _thread(db, account_id, thread_id)
 
 
 @router.get("/messages/{message_id}", response_model=MessageDetail)
@@ -418,15 +557,11 @@ async def download_attachment(
 # --- send ------------------------------------------------------------------
 
 
-@router.post("/accounts/{account_id}/send", response_model=MessageDetail)
-async def send_message(
-    account_id: int,
-    body: SendRequest,
-    _: UserOut = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings),
+async def do_send(
+    db: AsyncSession, settings: Settings, account: MailAccount, body: SendRequest
 ) -> MessageDetail:
-    account = await _get_account(db, account_id)
+    """Compose + send via the Gmail API, then mirror the sent message into the
+    archive so it appears in SENT immediately. Shared by the UI and MCP routes."""
     to = [addr.strip() for addr in body.to if addr.strip()]
     cc = [addr.strip() for addr in body.cc if addr.strip()]
     bcc = [addr.strip() for addr in body.bcc if addr.strip()]
@@ -440,6 +575,11 @@ async def send_message(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Invalid recipient: {addr}",
             )
+    # A one-off send is subject to the SAME anti-spam controls as a campaign
+    # send (cross-campaign suppression + the GLOBAL per-domain daily cap) so it
+    # cannot be looped to bulk-mail around the gated campaign path. Raises
+    # 409/429 when the send is not allowed.
+    await campaigns.enforce_direct_send(db, account, to + cc + bcc)
     thread_id = ""
     in_reply_to = ""
     if body.reply_to_message_id is not None:
@@ -493,6 +633,425 @@ async def send_message(
     if existing is None:
         db.add(message)
     apply_parsed(message, gmail.parse_message(full))
+    # Record the contact(s) into the shared per-send log so this send counts
+    # toward the global per-domain budget and the cross-campaign contacted set.
+    campaigns.record_direct_send(
+        db,
+        account,
+        to + cc + bcc,
+        gmail_message_id=gmail_id,
+        thread_id=str(full.get("threadId") or ""),
+    )
     await db.commit()
     await db.refresh(message)
     return _detail(message)
+
+
+@router.post("/accounts/{account_id}/send", response_model=MessageDetail)
+async def send_message(
+    account_id: int,
+    body: SendRequest,
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> MessageDetail:
+    account = await _get_account(db, account_id)
+    return await do_send(db, settings, account, body)
+
+
+# --- full-backup gate (Principle 4) ----------------------------------------
+
+
+@router.get("/accounts/{account_id}/backup", response_model=BackupEstimateOut)
+async def backup_estimate(
+    account_id: int,
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> BackupEstimateOut:
+    """Estimate the size of a full mailbox backup (cached, recomputed live when
+    unknown) so a UI can decide whether the >threshold confirmation applies."""
+    account = await _get_account(db, account_id)
+    estimate = account.backup_estimate_bytes
+    total = account.messages_total
+    if estimate <= 0 and not account.backfill_done:
+        try:
+            async with GmailClient(settings, account) as client:
+                estimate, total = await estimate_backup_bytes(
+                    client, settings.backup_estimate_sample
+                )
+        except GmailError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.detail)
+        account.backup_estimate_bytes = estimate
+        account.messages_total = total
+        await db.commit()
+    threshold = _backup_threshold()
+    return BackupEstimateOut(
+        account_id=account.id,
+        messages_total=total,
+        estimated_bytes=estimate,
+        threshold_bytes=int(threshold),
+        over_threshold=estimate > threshold,
+        backfill_authorized=account.backfill_authorized,
+        backfill_done=account.backfill_done,
+    )
+
+
+@router.post("/accounts/{account_id}/backup", response_model=BackupStartOut)
+async def start_backup(
+    account_id: int,
+    confirm: bool = Query(False),
+    confirm_token: str | None = Query(None),
+    human_approval: str | None = Query(None),
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> BackupStartOut:
+    """Authorize the full-mailbox backup into the never-delete archive.
+
+    Principle-4 gate: estimates size first; if it exceeds the threshold the call
+    returns 409 ``confirmation_required`` (a human re-invokes with ``confirm=true``)
+    — and for an ``origin=agent`` caller ``confirm=true`` is ignored and the gate
+    hard-enforces a human ``human_approval`` token instead."""
+    account = await _get_account(db, account_id)
+    if account.backfill_authorized or account.backfill_done:
+        return BackupStartOut(
+            account_id=account.id,
+            status="already_authorized",
+            estimated_bytes=account.backup_estimate_bytes,
+            messages_total=account.messages_total,
+        )
+    estimate = account.backup_estimate_bytes
+    total = account.messages_total
+    if estimate <= 0:
+        try:
+            async with GmailClient(settings, account) as client:
+                estimate, total = await estimate_backup_bytes(
+                    client, settings.backup_estimate_sample
+                )
+        except GmailError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.detail)
+
+    # Raises ConfirmationRequired (409) / AgentApprovalRequired (409) as needed.
+    require_confirmation(
+        float(estimate),
+        _backup_threshold(),
+        confirm=confirm,
+        confirm_token=confirm_token,
+        unit="bytes",
+        action=f"mail_backup:{account.id}",
+        origin=user.origin,
+        human_approval=human_approval,
+        subject=user.username,
+        message=(
+            f"Full backup of {account.email} is estimated at {estimate} bytes "
+            f"({total} messages); confirm to archive all of it."
+        ),
+    )
+    account.backfill_authorized = True
+    account.backup_estimate_bytes = estimate
+    account.messages_total = total
+    await db.commit()
+    asyncio.create_task(sync_manager.sync_account(account.id))
+    return BackupStartOut(
+        account_id=account.id,
+        status="authorized",
+        estimated_bytes=estimate,
+        messages_total=total,
+    )
+
+
+# --- campaigns -------------------------------------------------------------
+
+
+async def _get_campaign(db: AsyncSession, campaign_id: int) -> Campaign:
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+    return campaign
+
+
+async def _pending_count(db: AsyncSession, campaign_id: int) -> int:
+    from app.models import RECIPIENT_PENDING, CampaignRecipient
+
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(CampaignRecipient)
+            .where(
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RECIPIENT_PENDING,
+            )
+        )
+    ).scalar() or 0
+
+
+async def gate_and_start_campaign(
+    db: AsyncSession,
+    user: UserOut,
+    campaign: Campaign,
+    *,
+    confirm: bool,
+    confirm_token: str | None,
+    human_approval: str | None,
+) -> Campaign:
+    """Shared start/resume: a large campaign is an expensive action, so the
+    number of pending recipients is gated (Principle 4, origin-aware — an agent
+    cannot self-confirm; it needs a human_approval token)."""
+    if campaign.status in (CAMPAIGN_COMPLETED, CAMPAIGN_CANCELLED):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Campaign is {campaign.status}",
+        )
+    pending = await _pending_count(db, campaign.id)
+    require_confirmation(
+        float(pending),
+        _campaign_threshold(),
+        confirm=confirm,
+        confirm_token=confirm_token,
+        unit="recipients",
+        action=f"mail_campaign_start:{campaign.id}",
+        origin=user.origin,
+        human_approval=human_approval,
+        subject=user.username,
+        message=(
+            f"Campaign '{campaign.name}' will message {pending} recipients; "
+            "confirm to launch."
+        ),
+    )
+    campaign.status = CAMPAIGN_RUNNING
+    campaign.last_error = ""
+    await db.commit()
+    await db.refresh(campaign)  # reload server-side onupdate columns in async ctx
+    asyncio.create_task(campaign_manager.tick(campaign.id))
+    return campaign
+
+
+async def gate_and_add_source(
+    db: AsyncSession,
+    user: UserOut,
+    campaign: Campaign,
+    *,
+    search_id: str,
+    label: str,
+    recipients: list,
+    confirm: bool,
+    confirm_token: str | None,
+    human_approval: str | None,
+):
+    """Shared continue/add-source path. Growing a campaign's send volume is
+    itself an expensive action, so EVERY growth is gated (Principle 4,
+    origin-aware) on the campaign's CUMULATIVE total send size — not just the
+    marginal batch. This closes the bypass where an agent starts a campaign
+    sub-threshold and then grows it past the threshold with no approval: an
+    over-threshold ``origin=agent`` caller needs a human_approval token; a human
+    re-invokes with ``confirm=true``.
+
+    The recipients are merged first (so the estimate reflects post-dedupe/
+    suppression reality); if the gate raises, the surrounding request session is
+    rolled back and nothing is persisted."""
+    source, counts = await campaigns.add_source(
+        db,
+        campaign,
+        search_id=search_id,
+        label=label,
+        added_by=user.username,
+        recipients=recipients,
+    )
+    total = await campaigns.campaign_send_volume(db, campaign.id)
+    require_confirmation(
+        float(total),
+        _campaign_threshold(),
+        confirm=confirm,
+        confirm_token=confirm_token,
+        unit="recipients",
+        action=f"mail_campaign_grow:{campaign.id}",
+        origin=user.origin,
+        human_approval=human_approval,
+        subject=user.username,
+        message=(
+            f"Continuing campaign '{campaign.name}' would grow it to {total} "
+            "recipients (cumulative); confirm to proceed."
+        ),
+    )
+    await db.commit()
+    return source, counts
+
+
+@router.get("/campaigns", response_model=list[CampaignOut])
+async def list_campaigns(
+    username: str | None = Query(None, description="Filter to one owner; omit for all"),
+    status_filter: str | None = Query(None, alias="status"),
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[CampaignOut]:
+    """Cross-user: every campaign, or narrowed by ``?username=`` / ``?status=``."""
+    stmt = select(Campaign).order_by(Campaign.created_at.desc()).limit(500)
+    if username is not None:
+        stmt = stmt.where(Campaign.owner == username)
+    if status_filter is not None:
+        stmt = stmt.where(Campaign.status == status_filter)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [await campaigns.serialize_campaign(db, campaign) for campaign in rows]
+
+
+@router.post("/campaigns", response_model=CampaignOut, status_code=status.HTTP_201_CREATED)
+async def create_campaign(
+    body: CampaignCreate,
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    campaign = await campaigns.create_campaign(
+        db,
+        owner=user.username,
+        origin=user.origin,
+        actor=user.actor,
+        name=body.name,
+        subject=body.subject,
+        body_text=body.body_text,
+        body_html=body.body_html,
+        send_strategy=body.send_strategy,
+        per_domain_daily=body.throttle.per_domain_daily,
+        sources=body.sources,
+    )
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+@router.get("/campaigns/{campaign_id}", response_model=CampaignOut)
+async def get_campaign(
+    campaign_id: int,
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    campaign = await _get_campaign(db, campaign_id)
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+@router.post("/campaigns/{campaign_id}/sources", response_model=SourceMergeOut)
+async def add_campaign_source(
+    campaign_id: int,
+    body: CampaignSourceIn,
+    confirm: bool = Query(False),
+    confirm_token: str | None = Query(None),
+    human_approval: str | None = Query(None),
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SourceMergeOut:
+    """Continue a campaign: append another search's results, re-running dedupe +
+    suppression so nobody already messaged is re-added. Gated on the campaign's
+    cumulative send size (Principle 4) so growth past the threshold needs
+    approval — an agent caller cannot self-confirm."""
+    campaign = await _get_campaign(db, campaign_id)
+    source, counts = await gate_and_add_source(
+        db,
+        user,
+        campaign,
+        search_id=body.search_id,
+        label=body.label,
+        recipients=[r.model_dump() for r in body.recipients],
+        confirm=confirm,
+        confirm_token=confirm_token,
+        human_approval=human_approval,
+    )
+    return SourceMergeOut(source_id=source.id, **counts)
+
+
+@router.post("/campaigns/{campaign_id}/start", response_model=CampaignOut)
+async def start_campaign(
+    campaign_id: int,
+    confirm: bool = Query(False),
+    confirm_token: str | None = Query(None),
+    human_approval: str | None = Query(None),
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    campaign = await _get_campaign(db, campaign_id)
+    campaign = await gate_and_start_campaign(
+        db,
+        user,
+        campaign,
+        confirm=confirm,
+        confirm_token=confirm_token,
+        human_approval=human_approval,
+    )
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+@router.post("/campaigns/{campaign_id}/pause", response_model=CampaignOut)
+async def pause_campaign(
+    campaign_id: int,
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    campaign = await _get_campaign(db, campaign_id)
+    if campaign.status == CAMPAIGN_RUNNING:
+        campaign.status = CAMPAIGN_PAUSED
+        await db.commit()
+        await db.refresh(campaign)
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+@router.post("/campaigns/{campaign_id}/resume", response_model=CampaignOut)
+async def resume_campaign(
+    campaign_id: int,
+    confirm: bool = Query(False),
+    confirm_token: str | None = Query(None),
+    human_approval: str | None = Query(None),
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    campaign = await _get_campaign(db, campaign_id)
+    if campaign.status != CAMPAIGN_PAUSED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Campaign is {campaign.status}, not paused",
+        )
+    campaign = await gate_and_start_campaign(
+        db,
+        user,
+        campaign,
+        confirm=confirm,
+        confirm_token=confirm_token,
+        human_approval=human_approval,
+    )
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+@router.post("/campaigns/{campaign_id}/cancel", response_model=CampaignOut)
+async def cancel_campaign(
+    campaign_id: int,
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    campaign = await _get_campaign(db, campaign_id)
+    if campaign.status not in (CAMPAIGN_COMPLETED, CAMPAIGN_CANCELLED):
+        campaign.status = CAMPAIGN_CANCELLED
+        await db.commit()
+        await db.refresh(campaign)
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+# --- contacts / suppression set --------------------------------------------
+
+
+@router.get("/contacts/contacted", response_model=ContactedOut)
+async def contacted(
+    campaign_id: int | None = Query(None, description="Scope to one campaign; omit for all"),
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ContactedOut:
+    """The already-contacted set (from ``campaign_messages``) that search's
+    ``exclude_contacted`` filter consults over the documented search->mail hop.
+    Cross-campaign by default; ``?campaign_id=`` narrows it to one campaign."""
+    contacts = await campaigns.contacted_contacts(db, campaign_id)
+    return ContactedOut(
+        emails=[c["email"] for c in contacts],
+        contacts=[
+            ContactOut(
+                email=c["email"],
+                last_contacted=c["last_contacted"],
+                campaign_ids=c["campaign_ids"],
+            )
+            for c in contacts
+        ],
+    )

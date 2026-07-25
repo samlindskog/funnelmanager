@@ -21,17 +21,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from fm_runtime import JobStatus, get_runtime_settings
+from fm_runtime import (
+    JobStatus,
+    approval_ref as make_approval_ref,
+    get_runtime_settings,
+)
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
 
+from app.approvals import (
+    approval_coordinator,
+    create_pending_approval,
+    expire_pending_for_run,
+    is_ref_consumed,
+    mark_ref_consumed,
+)
 from app.config import Settings, get_settings
 from app.database import SessionLocal
 from app.jobs_registry import JobContext, publish_job
@@ -58,9 +70,14 @@ SYSTEM_PROMPT = (
     "activity. Do not launch a duplicate of something already in flight — wait on "
     "or reference the existing job instead.\n"
     "2. Then take the minimal set of tool actions that achieve the goal.\n"
-    "3. If a tool returns a confirmation_required response (an expensive action "
-    "over a threshold), DO NOT auto-confirm. Stop and report the estimate to the "
-    "user so a human can decide — escalation, never silent confirmation.\n"
+    "3. Expensive actions are HUMAN-gated. You must NEVER set confirm=true and "
+    "NEVER pass a human_approval token yourself — you cannot self-approve an "
+    "expensive action. If a tool reports it needs human approval, this service "
+    "pauses the run and asks your human out of band; when they approve, the SAME "
+    "action is automatically re-issued for you with their approval, so you do not "
+    "need to retry it. If a tool result says a human REJECTED the action, do not "
+    "retry it — respect the decision and continue with the rest of the goal or "
+    "stop.\n"
     "4. When done, reply with a concise natural-language summary of exactly what "
     "you did (which tools, what results) and any follow-up the user should take."
 )
@@ -93,6 +110,15 @@ class RunHandle:
     resume_event: asyncio.Event = field(default_factory=asyncio.Event)
     paused: bool = False
     task: asyncio.Task | None = None
+    # The live run-timeout context manager, so a human-approval wait can pause
+    # the wall-clock deadline (a person may take minutes to approve; that time
+    # must not count against the run's budget). Set once agent.iter is entered.
+    timeout_cm: Any = None
+    _timeout_remaining: float | None = None
+    _timeout_suspends: int = 0
+    _timeout_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # ids of pending approvals this run created — expired + discarded on finish.
+    approval_ids: set[str] = field(default_factory=set)
 
     def request_pause(self) -> None:
         self.paused = True
@@ -106,6 +132,35 @@ class RunHandle:
         self.cancel_event.set()
         # Unblock any checkpoint currently awaiting a resume.
         self.resume_event.set()
+
+    async def suspend_timeout(self) -> None:
+        """Freeze the run's wall-clock deadline while awaiting human approval.
+
+        Reference-counted so concurrent gated tool calls compose: the deadline is
+        disabled on the first suspend and its remaining budget preserved, then
+        restored only when the last approval wait finishes."""
+        cm = self.timeout_cm
+        if cm is None:
+            return
+        async with self._timeout_lock:
+            self._timeout_suspends += 1
+            if self._timeout_suspends == 1:
+                when = cm.when()
+                if when is not None:
+                    self._timeout_remaining = max(0.0, when - asyncio.get_running_loop().time())
+                    cm.reschedule(None)  # disable the deadline
+
+    async def resume_timeout(self) -> None:
+        cm = self.timeout_cm
+        if cm is None:
+            return
+        async with self._timeout_lock:
+            if self._timeout_suspends == 0:
+                return
+            self._timeout_suspends -= 1
+            if self._timeout_suspends == 0 and self._timeout_remaining is not None:
+                cm.reschedule(asyncio.get_running_loop().time() + self._timeout_remaining)
+                self._timeout_remaining = None
 
 
 def _utcnow() -> datetime:
@@ -129,6 +184,34 @@ def _usage_dict(usage: Any) -> dict[str, Any]:
         }
     except Exception:  # usage snapshot is best-effort observability only
         return {}
+
+
+# Gate marker fm_runtime.confirmation raises for an over-threshold AGENT action
+# (AgentApprovalRequired). The MCP BackendClient surfaces it verbatim as a tool
+# result (not an error), so a tool call returns this shape instead of running.
+_HUMAN_APPROVAL_ERROR = "human_approval_required"
+
+
+def _extract_approval_gate(result: Any) -> dict[str, Any] | None:
+    """The fm_runtime agent-approval gate detail if a tool result is one, else None.
+
+    A runtime agent can never self-confirm, so an over-threshold agent action
+    comes back as a structured ``needs_human_approval`` payload rather than an
+    error or a completed action. We detect ONLY that shape — an ordinary
+    ``confirmation_required`` (the human confirm=true flow) is never actioned here
+    (an agent must not answer it), and every other result flows straight through.
+    """
+    payload = result
+    if isinstance(payload, dict):
+        # BackendClient already unwraps `detail`, but be defensive if a raw
+        # HTTPException body ({"detail": {...}}) ever reaches us.
+        detail = payload.get("detail", payload)
+        if isinstance(detail, dict) and (
+            detail.get("needs_human_approval") is True
+            or detail.get("error") == _HUMAN_APPROVAL_ERROR
+        ):
+            return detail
+    return None
 
 
 class RunManager:
@@ -212,8 +295,15 @@ class RunManager:
             # the MCP client construction close to where it is used.
             from app.mcp_client import build_mcp_toolset
 
+            # process_tool_call is the single interception point for the
+            # Principle-4 agent gate: it detects a needs_human_approval tool
+            # result, pauses the run for its human, and — once approved — re-issues
+            # the SAME call with the minted token (the LLM never touches the gate).
             toolset = build_mcp_toolset(
-                settings, subject_token=subject_token, origin=handle.ctx.origin
+                settings,
+                subject_token=subject_token,
+                origin=handle.ctx.origin,
+                process_tool_call=self._make_process_tool_call(handle),
             )
             agent = Agent(
                 build_model(settings),
@@ -227,7 +317,9 @@ class RunManager:
             )
             prompt = _build_prompt(goal, params)
 
-            async with asyncio.timeout(settings.run_timeout_seconds):
+            async with asyncio.timeout(settings.run_timeout_seconds) as timeout_cm:
+                # Expose the deadline so a human-approval wait can freeze it.
+                handle.timeout_cm = timeout_cm
                 async with agent:  # opens the MCP toolset connection
                     async with agent.iter(prompt, usage_limits=limits) as agent_run:
                         async for _node in agent_run:
@@ -297,6 +389,16 @@ class RunManager:
                 exit_status="error",
             )
         finally:
+            # Any approval left undecided can never be acted on now the run is
+            # terminal — expire the rows and drop the in-memory waiters so a late
+            # approve/reject cannot resolve a dead run.
+            try:
+                await expire_pending_for_run(run_id)
+            except Exception:  # cleanup is best-effort; never mask the run outcome
+                logger.exception("agent run %s: failed to expire pending approvals", run_id)
+            for approval_id in list(handle.approval_ids):
+                approval_coordinator.discard(approval_id)
+            handle.approval_ids.clear()
             self._runs.pop(run_id, None)
 
     async def _checkpoint(self, handle: RunHandle, steps: int) -> None:
@@ -330,6 +432,154 @@ class RunManager:
                 status=JobStatus.RUNNING,
                 meta={"steps": steps},
             )
+
+    # --- Principle-4 human-approval gate ----------------------------------
+
+    def _make_process_tool_call(self, handle: RunHandle):
+        """Build the pydantic-ai ``process_tool_call`` hook for this run.
+
+        It wraps every MCP tool call: run it, and if the result is the fm_runtime
+        agent-approval gate (``needs_human_approval``), hand off to the approval
+        flow — pause the run, record a pending approval, wait for the initiating
+        human's decision, then either re-issue the exact call WITH the minted
+        token (approved) or surface the rejection to the model (rejected)."""
+
+        async def process_tool_call(ctx, call_tool, name: str, tool_args: dict[str, Any]):
+            result = await call_tool(name, tool_args)
+            gate = _extract_approval_gate(result)
+            if gate is None:
+                return result
+            return await self._await_approval(handle, call_tool, name, tool_args, gate)
+
+        return process_tool_call
+
+    async def _await_approval(
+        self,
+        handle: RunHandle,
+        call_tool,
+        name: str,
+        tool_args: dict[str, Any],
+        gate: dict[str, Any],
+    ) -> Any:
+        """Pause the run on an over-threshold agent action until the initiating
+        human decides, then re-issue (approved) or report the rejection."""
+        run_id = handle.run_id
+        subject = handle.ctx.user  # the initiating human = the run owner
+        estimate = float(gate.get("estimate") or 0.0)
+        action = str(gate.get("action") or "")
+        threshold = gate.get("threshold")
+        unit = str(gate.get("unit") or "")
+        message = str(gate.get("message") or "")
+        # Trust our own recomputed ref (never a value the upstream made up) so it
+        # is bound to exactly this subject — matches what the token binds to.
+        ref = make_approval_ref(action, estimate, subject)
+
+        approval_id = uuid.uuid4().hex
+        # Register the waiter BEFORE persisting the row so a human can never
+        # resolve an approval the run is not yet awaiting.
+        approval_coordinator.register(approval_id)
+        handle.approval_ids.add(approval_id)
+        await create_pending_approval(
+            approval_id=approval_id,
+            run_id=run_id,
+            subject=subject,
+            approval_ref=ref,
+            action=action,
+            estimate=estimate,
+            threshold=float(threshold) if isinstance(threshold, (int, float)) else None,
+            unit=unit,
+            message=message,
+            tool_name=name,
+            tool_args=tool_args,
+        )
+
+        logger.info(
+            "agent run %s paused for human approval: action=%s estimate=%s%s ref=%s",
+            run_id, action, estimate, (" " + unit) if unit else "", ref,
+        )
+
+        # Cooperatively pause: freeze the wall-clock deadline (a human may take a
+        # while) and surface a PAUSED job event flagged as awaiting approval.
+        await handle.suspend_timeout()
+        await self._mark_status(run_id, STATUS_PAUSED)
+        approval_meta = {
+            "awaiting_approval": True,
+            "approval_id": approval_id,
+            "approval_ref": ref,
+            "action": action,
+            "estimate": estimate,
+        }
+        await publish_job(
+            job_id=run_id, ctx=handle.ctx, status=JobStatus.PAUSED, meta=approval_meta
+        )
+
+        try:
+            decision = await approval_coordinator.wait(approval_id, handle.cancel_event)
+        finally:
+            await handle.resume_timeout()
+            approval_coordinator.discard(approval_id)
+
+        if decision is None:
+            # Canceled while waiting: abandon this call. The next checkpoint sees
+            # cancel_event and unwinds the run cleanly (no raise from inside a
+            # tool call, which pydantic-ai might wrap/retry).
+            return {
+                "error": "canceled",
+                "message": "The run was canceled while awaiting human approval; "
+                "this action was not performed.",
+                "action": action,
+            }
+
+        # Decided — resume the run's reported status.
+        await self._mark_status(run_id, STATUS_RUNNING)
+        await publish_job(
+            job_id=run_id,
+            ctx=handle.ctx,
+            status=JobStatus.RUNNING,
+            meta={"approval_id": approval_id, "approved": decision.approved},
+        )
+
+        if not decision.approved:
+            return {
+                "error": "human_rejected",
+                "message": "A human reviewed this expensive action and REJECTED it. "
+                "Do not retry it; continue with the rest of the task or stop.",
+                "action": action,
+            }
+
+        # Single-use guard (belt-and-suspenders): if this ref was spent between
+        # the human approving and now — a concurrent action for the same bucket —
+        # do NOT re-issue. The still-valid token would otherwise replay for a
+        # second over-threshold action. Surface it to the model, don't retry.
+        if await is_ref_consumed(ref):
+            return {
+                "error": "approval_spent",
+                "message": "This action's human approval was already used for "
+                "another action and cannot be reused; do not retry it.",
+                "action": action,
+            }
+
+        # Approved: re-issue the EXACT call with the human-minted token injected
+        # server-side (never by the LLM). The gate now allows it.
+        approved_args = {**tool_args, "human_approval": decision.token}
+        reissued = await call_tool(name, approved_args)
+        # Mark the approval_ref consumed once the gate actually let the action
+        # through (result is no longer a needs_human_approval gate) — single-use:
+        # this ref can now never authorize a second over-threshold action, and a
+        # later approval for the same bucket is rejected up front. A still-gated
+        # result (e.g. token/subject mismatch) means the action did NOT run, so we
+        # deliberately do not consume — and we return it as-is rather than loop
+        # back into the approval flow, which could spin.
+        if _extract_approval_gate(reissued) is None:
+            await mark_ref_consumed(
+                approval_ref=ref,
+                run_id=run_id,
+                approval_id=approval_id,
+                subject=subject,
+                action=action,
+                estimate=estimate,
+            )
+        return reissued
 
     # --- persistence ------------------------------------------------------
 

@@ -17,7 +17,11 @@ Tools:
     enrich_leads (write) + list_searches, get_search, list_results,
     export_results.
   - jobs (via jobs' mcp/v1): list_jobs, get_job, pause_job, resume_job, cancel_job.
-  - mail: Phase-5 stub (endpoints + mcp->mail scope not built yet).
+  - mail (via mail's mcp/v1): list_campaigns, get_campaign, contacted_contacts,
+    list_messages, get_thread (read) + start_campaign, continue_campaign,
+    send_message (write). An agent-initiated over-threshold write can return a
+    needs_human_approval gate response — the tool surfaces it faithfully (never
+    swallows or auto-confirms) so the agents service can pause the run.
 
 Invariant: **MCP never calls Apollo directly** — Apollo goes through
 search -> leads (the only Apollo holder).
@@ -52,11 +56,12 @@ settings = get_settings()
 tokens = TokenResolver(settings)
 
 # One client per upstream — each exchanges the per-call subject token for its own
-# per-hop audience (svc scopes mcp->leads / mcp->search / mcp->jobs).
+# per-hop audience (svc scopes mcp->leads / mcp->search / mcp->jobs / mcp->mail).
 deps = Deps(
     leads=BackendClient("leads", settings.leads_backend_url, "leads", tokens),
     search=BackendClient("search", settings.search_backend_url, "search", tokens),
     jobs=BackendClient("jobs", settings.jobs_backend_url, "jobs", tokens),
+    mail=BackendClient("mail", settings.mail_backend_url, "mail", tokens),
 )
 
 mcp = FastMCP(
@@ -70,7 +75,13 @@ mcp = FastMCP(
         "get_search, list_results, export_results are reads) — Apollo is reached "
         "only through the search backend, never directly. JOBS tools (list_jobs, "
         "get_job, pause_job, resume_job, cancel_job) watch and control running "
-        "work. AUTH: every tool call must pass session_token explicitly (or send "
+        "work. MAIL tools run campaigns and operate the mailbox: list_campaigns, "
+        "get_campaign, contacted_contacts, list_messages, get_thread are reads; "
+        "start_campaign, continue_campaign, send_message are writes. If a mail "
+        "write returns needs_human_approval (an agent-initiated action over the "
+        "cost threshold), STOP: do not retry or auto-confirm — surface it so a "
+        "human can approve out of band. AUTH: every tool call must pass "
+        "session_token explicitly (or send "
         "it as an Authorization: Bearer header). Tokens expire: on an auth or "
         "policy error, fetch a fresh one and retry. Never invent a token."
     ),

@@ -143,6 +143,9 @@ class GmailClient:
     async def get_message(self, gmail_id: str) -> dict:
         return await self._json("GET", f"/messages/{gmail_id}", params={"format": "full"})
 
+    async def get_thread(self, thread_id: str) -> dict:
+        return await self._json("GET", f"/threads/{thread_id}", params={"format": "full"})
+
     async def list_history(self, start_history_id: str, page_token: str = "") -> dict:
         params: dict = {"startHistoryId": start_history_id, "maxResults": 500}
         if page_token:

@@ -26,6 +26,11 @@ FORBIDDEN_MESSAGE = (
     "policy denied it). An admin can adjust the principal's permissions."
 )
 
+# HTTP 409 detail.error values the Principle-4 expensive-action gate raises
+# (fm_runtime.confirmation): the human "re-invoke with confirm=true" gate and
+# the agent "a human must approve out of band" gate. See _gate_payload.
+_GATE_ERRORS = {"confirmation_required", "human_approval_required"}
+
 
 def _error_detail(response: httpx.Response) -> Any:
     try:
@@ -40,6 +45,33 @@ def _raise_for_auth(response: httpx.Response, context: str) -> None:
         raise UpstreamError(f"{context}: {INVALID_TOKEN_MESSAGE}")
     if response.status_code == 403:
         raise UpstreamError(f"{context}: {FORBIDDEN_MESSAGE}")
+
+
+def _gate_payload(response: httpx.Response) -> dict[str, Any] | None:
+    """The structured Principle-4 gate detail if this is a gate 409, else None.
+
+    An expensive action a service guards (a large campaign, a >2 GB mailbox
+    backup, a huge search) returns HTTP 409 with a structured body — either
+    ``confirmation_required`` (a human re-invokes with ``confirm=true``) or, for
+    an agent-initiated over-threshold action, ``human_approval_required`` /
+    ``needs_human_approval`` (a human must approve out of band; an agent must
+    NOT self-confirm). This is a control-flow signal, **not** a backend error:
+    the tool must surface it faithfully so the caller (the runtime agent, via
+    the agents service) pauses instead of retrying or swallowing it. Only
+    gate-shaped 409s pass through; any other 409 stays a fail-loud error.
+    """
+    if response.status_code != 409:
+        return None
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+    if not isinstance(detail, dict):
+        return None
+    if detail.get("needs_human_approval") or detail.get("error") in _GATE_ERRORS:
+        return detail
+    return None
 
 
 class BackendClient:
@@ -78,6 +110,12 @@ class BackendClient:
             )
         context = f"{self._name} backend {method} {path}"
         _raise_for_auth(response, context)
+        # Principle-4 gate (confirmation_required / needs_human_approval): a
+        # control-flow signal, not an error — surface it faithfully instead of
+        # raising, so the caller pauses rather than retrying/auto-confirming.
+        gate = _gate_payload(response)
+        if gate is not None:
+            return gate
         if response.status_code >= 400:
             raise UpstreamError(
                 f"{context} failed ({response.status_code}): {_error_detail(response)}"
