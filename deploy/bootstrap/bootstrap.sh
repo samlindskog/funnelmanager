@@ -187,7 +187,7 @@ YAML
       --from-literal=GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET="$GFOIDC"
 
     for n in prod dev; do
-      for svc in search leads mail mcp; do
+      for svc in search leads mail mcp jobs agents; do
         read -rsp "fm-oidc client-secret for $svc ($n realm): " CS; echo
         ensure "$n" "fm-oidc-$svc" generic "fm-oidc-$svc" --from-literal=client-secret="$CS"
       done
