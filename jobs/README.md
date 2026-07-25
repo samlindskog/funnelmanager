@@ -32,21 +32,35 @@ and steers the jobs the owning apps run.
 3. **MCP-facing API** (`app/routers/mcp.py`, `/api/jobs/mcp/v1/*`) — `list` jobs
    (filter by user/app/status), `get` a job + progress, and `pause|resume|cancel`
    that **proxy** to the owning app's `POST /internal/jobs/v1/{id}/{action}`
-   (`app/control.py`, exchange → the app's audience). Idempotent. Distinct from any
-   future UI routes (principle 2). Cross-user visible.
+   (`app/control.py`). Idempotent. Distinct from any future UI routes (principle 2).
+   Cross-user visible.
 
-## Auth / exchange (flag for security review)
+## Auth / exchange — the internal-jobs trust boundary (flag for security review)
 
-- Inbound audience `jobs` (`fm_runtime` PrincipalMiddleware). The `mcp` server calls
-  these routes (svc scope `mcp→jobs`, `azp_allow[jobs] = [mcp]`).
-- Outbound: the subscriber uses `jobs→search` / `jobs→agents` as the jobs service's
-  own identity (client credentials) for the **read-only** stream. The control proxy
-  uses a context-following client, so the **acting human's** token is exchanged
-  `jobs→{app}` (human stays the subject, `azp` becomes `jobs`) — the producer
-  authorizes the `jobs` caller on its `/internal/jobs/v1/*` control API.
-- These svc scopes + `azp_allow` + grants were provisioned in **Phase 0**
-  (`fm_runtime/grants.py` `SVC_EXCHANGE_SCOPES`, `deploy/policy/data.json`,
-  the realm). Adding a producer means adding its `jobs→<app>` edge there too.
+The two-tier trust for a control action:
+
+- **Tier 1 — the human is authorized at the jobs MCP API.** Inbound audience
+  `jobs` (`fm_runtime` PrincipalMiddleware) + the `jobs-access` grant. The `mcp`
+  server reaches these routes (svc scope `mcp→jobs`, `azp_allow[jobs] = [mcp]`).
+  This is the ONLY place the human is authorized; it happens *before* the proxy.
+- **Tier 2 — the producer trusts the jobs SERVICE ACCOUNT, never the human.** A
+  producer's `/internal/jobs/v1/*` endpoints (BOTH stream read and control write)
+  are callable ONLY by `jobs`, authorized by a dedicated **`jobs-internal`** realm
+  role held by the `jobs` client's service account (defined by the runtime
+  workstream). So **both** the subscriber (read) **and** the control proxy (write)
+  authenticate as `jobs` via **client-credentials** (`azp = jobs`), exchanging
+  `jobs→search` / `jobs→agents` — the control proxy uses a non-context-following
+  `InternalClient` with no subject token, so it mints the same service-account
+  token as the subscriber rather than the acting human's.
+- **The human rides as AUDIT METADATA, not a token.** The control call carries
+  `X-FM-Acting-User` (+ `X-FM-Acting-Origin`, `X-FM-Acting-Actor`) derived from
+  the request principal, so the producer can attribute the action ("alice",
+  "alice (via agent)") without the human ever crossing the internal-jobs boundary
+  as a credential.
+- These svc scopes + `azp_allow` + the `jobs-internal` role/grant are provisioned
+  in the platform/runtime workstream (`fm_runtime/grants.py` `SVC_EXCHANGE_SCOPES`,
+  `deploy/policy/data.json`, the realm). Adding a producer means adding its
+  `jobs→<app>` edge (and granting the producer's `jobs-internal` role) there too.
 - Only anonymous route: `GET /api/jobs/health` (legacy probe; k8s uses
   `/healthz` + `/readyz`).
 
@@ -89,10 +103,16 @@ curl -X POST -H "$H" localhost:8005/api/jobs/mcp/v1/jobs/1/resume
 curl -X POST -H "$H" localhost:8005/api/jobs/mcp/v1/jobs/1/cancel
 ```
 
+The stub logs and echoes the `X-FM-Acting-User` audit header (plus origin/actor),
+so the control responses look like `{"status": "paused", "acting_user": "tester"}`
+— confirming the acting human is carried as metadata even though, in the mesh, the
+CALL itself is the jobs service account's (client-credentials, `azp=jobs`).
+
 (Bare-dev passthrough is a local shortcut — no token endpoint, so the outbound
-control call carries no exchanged token, which the auth-less stub ignores. In
-compose/mesh the exchange runs and OPA/audience enforce access. Setting the
-producer's audience via `JOBS_PRODUCERS` name must match a real `jobs→<name>`
-svc scope there.)
+control call carries no exchanged token, which the auth-less stub ignores; the
+audit headers are still sent. In compose/mesh the client-credentials exchange
+runs as the jobs service account (`jobs-internal` role) and OPA/audience enforce
+access. Setting the producer's audience via `JOBS_PRODUCERS` name must match a
+real `jobs→<name>` svc scope there.)
 
 There is **no test suite** in this repo — verify by running the service.

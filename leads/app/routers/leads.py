@@ -11,11 +11,11 @@ from urllib.parse import unquote
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from fm_runtime import anonymous, confirmation_threshold, require_confirmation
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.apollo import ApolloLeadsClient
-from fm_runtime import anonymous
 from app.apollo_endpoints import (
     ORG_BY_ID,
     ORG_SEARCH,
@@ -43,11 +43,13 @@ from app.schemas import (
     ApolloEnrichedFlags,
     ApolloParamsBody,
     BatchMongoIdsRequest,
+    EmbeddingBackfillResponse,
     LeadOut,
     SearchIdsOut,
     SimilarityHitOut,
     SimilaritySearchRequest,
     SimilaritySearchResponse,
+    StreamControlResponse,
     StreamSubscribeRequest,
 )
 from app.stream_jobs import (
@@ -57,8 +59,11 @@ from app.stream_jobs import (
     iter_stream_events,
     run_paged_search_with_embedding,
     schedule_embedding_batch,
+    set_stream_paused,
     stream_job_manager,
+    stream_status,
 )
+from fm_runtime import confirmation_threshold, require_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +139,13 @@ async def _embed_mongo_ids_batch(
     mongo_ids: list[str],
     *,
     source_precedence: int,
+    force: bool = False,
 ) -> list[str]:
-    """Embed leads (respecting precedence) and record source. Returns indexed mongo ids."""
+    """Embed leads (respecting precedence) and record source. Returns indexed mongo ids.
+
+    ``force`` re-embeds even docs that already carry a vector (backfill); see
+    ``index_lead_docs``.
+    """
     if not mongo_ids:
         return []
     db = get_db()
@@ -148,7 +158,7 @@ async def _embed_mongo_ids_batch(
     if not object_ids:
         return []
     docs = [doc async for doc in db.leads.find({"_id": {"$in": object_ids}})]
-    indexed = await index_lead_docs(docs, source_precedence=source_precedence)
+    indexed = await index_lead_docs(docs, source_precedence=source_precedence, force=force)
     if indexed:
         await _mark_embedded(indexed)
     return [mongo_id for mongo_id, _ in indexed]
@@ -1469,6 +1479,133 @@ async def apollo_proxy_post(
     )
 
 
+# Default: docs matched over this count require an explicit confirm=true. A full
+# embed of the collection is an expensive OpenAI + Milvus pass (Principle 4).
+_BACKFILL_CONFIRM_DOCS_DEFAULT = 5000.0
+# Mongo _id pages fed into the embedding stream; each is embedded in smaller
+# OpenAI sub-batches internally (see schedule_embedding_batch).
+_BACKFILL_BATCH_SIZE = 500
+
+
+def _backfill_query(force: bool) -> dict[str, Any]:
+    """Docs to embed: all when ``force`` (re-embed), else those not yet embedded.
+
+    ``{"embedding": {"$ne": True}}`` also catches legacy docs missing the field.
+    """
+    return {} if force else {"embedding": {"$ne": True}}
+
+
+async def _run_embedding_backfill(
+    *,
+    query: dict[str, Any],
+    force: bool,
+    embedding_stream_id: str,
+) -> None:
+    """Stream Mongo _id pages through the embedding infra, then close the stream.
+
+    Reuses ``schedule_embedding_batch`` so progress publishes on the embedding
+    stream and the ``embedding`` flag flips (via ``_mark_embedded``) only after
+    Milvus indexing succeeds — the same invariant as live search embedding.
+    """
+    db = get_db()
+    try:
+        batch: list[str] = []
+        cursor = db.leads.find(query, projection={"_id": 1}).sort("_id", 1)
+        async for doc in cursor:
+            batch.append(str(doc["_id"]))
+            if len(batch) >= _BACKFILL_BATCH_SIZE:
+                await schedule_embedding_batch(
+                    embedding_stream_id,
+                    batch,
+                    embed_batch=lambda ids: _embed_mongo_ids_batch(
+                        ids, source_precedence=0, force=force
+                    ),
+                )
+                batch = []
+        if batch:
+            await schedule_embedding_batch(
+                embedding_stream_id,
+                batch,
+                embed_batch=lambda ids: _embed_mongo_ids_batch(
+                    ids, source_precedence=0, force=force
+                ),
+            )
+    except Exception:
+        logger.exception("Embedding backfill failed for stream %s", embedding_stream_id)
+    finally:
+        # Marks the embedding stream done (publishes complete) even on early exit.
+        await close_embedding_stream(embedding_stream_id)
+
+
+@router.post("/embeddings/backfill", response_model=EmbeddingBackfillResponse)
+async def embeddings_backfill(
+    background_tasks: BackgroundTasks,
+    force: bool = Query(
+        default=False,
+        description="Re-embed all leads (else only those with embedding != true).",
+    ),
+    confirm: bool = Query(
+        default=False,
+        description="Proceed past the confirmation gate for a large backfill.",
+    ),
+    confirm_token: str | None = Query(default=None),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+) -> EmbeddingBackfillResponse:
+    """Embed leads missing a vector (or all, with ``force``) → OpenAI → Milvus.
+
+    Expensive-action gate (Principle 4): estimates the matched doc count first;
+    over the configurable threshold it returns ``409 confirmation_required`` with
+    the estimate and a ``confirm_token``. Re-invoke with ``confirm=true`` to run.
+
+    Reuses the embedding-stream infra: returns an ``embedding_stream_id`` to
+    subscribe to for progress. The ``embedding`` flag flips to True per doc only
+    after Milvus indexing succeeds.
+    """
+    if not settings.openai_configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OPENAI_API_KEY is not configured; cannot backfill embeddings",
+        )
+
+    query = _backfill_query(force)
+    matched = await db.leads.count_documents(query)
+
+    threshold = confirmation_threshold(
+        "LEADS_BACKFILL_CONFIRM_DOCS", _BACKFILL_CONFIRM_DOCS_DEFAULT
+    )
+    require_confirmation(
+        float(matched),
+        threshold,
+        confirm=confirm,
+        confirm_token=confirm_token,
+        verify_token=True,
+        unit="documents",
+        action="embeddings_backfill" + (":force" if force else ""),
+        message=(
+            f"Embedding backfill would (re-)embed {matched} lead(s), exceeding the "
+            f"{int(threshold)}-document threshold; re-invoke with confirm=true to proceed."
+        ),
+        meta={"force": force},
+    )
+
+    if matched == 0:
+        return EmbeddingBackfillResponse(embedding_stream_id=None, matched=0, force=force)
+
+    embedding_stream_id = await create_embedding_stream()
+    background_tasks.add_task(
+        _run_embedding_backfill,
+        query=query,
+        force=force,
+        embedding_stream_id=embedding_stream_id,
+    )
+    return EmbeddingBackfillResponse(
+        embedding_stream_id=embedding_stream_id,
+        matched=matched,
+        force=force,
+    )
+
+
 @router.get("/stream/{stream_id}")
 async def stream_one(
     stream_id: str,
@@ -1501,6 +1638,66 @@ async def stream_cancel(
     if not cancelled:
         raise HTTPException(status_code=404, detail="Unknown, finished, or expired stream_id")
     return {"stream_id": cleaned, "cancelled": True}
+
+
+# Actions the search service may issue against the leads stream engine. leads is
+# the ENGINE behind search's jobs, not a `jobs` producer: this is the internal
+# control hook search calls to pause/resume/cancel the underlying ingest or
+# embedding stream. Authorization is the standard search->leads path — the call
+# carries a leads-audience token (RFC 8693 exchange) and rides the same
+# `/api/leads` grant as every other search->leads request. It is deliberately NOT
+# a `/internal/jobs/v1/*` route (leads does not publish to the jobs service).
+_STREAM_CONTROL_ACTIONS = frozenset({"pause", "resume", "cancel"})
+
+
+@router.post("/stream/{stream_id}/control/{action}", response_model=StreamControlResponse)
+async def stream_control(
+    stream_id: str,
+    action: str,
+) -> StreamControlResponse:
+    """Pause, resume, or cancel a running ingest or embedding stream job.
+
+    Idempotent: re-issuing an action that is already in effect returns
+    ``applied=false`` with the current ``status`` (still 200). Unknown/finished
+    streams 404. Pausing an ingest stream stops it before the next Apollo page so
+    it stops spending credits; resuming continues from where it left off.
+    """
+    cleaned = stream_id.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="stream_id is required")
+    normalized = action.strip().lower()
+    if normalized not in _STREAM_CONTROL_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported control action {action!r}; expected pause, resume, or cancel",
+        )
+
+    if normalized == "cancel":
+        before = stream_status(cleaned)
+        cancelled = await cancel_stream(cleaned)
+        if not cancelled and before is None:
+            raise HTTPException(
+                status_code=404, detail="Unknown, finished, or expired stream_id"
+            )
+        return StreamControlResponse(
+            stream_id=cleaned,
+            action=normalized,
+            status=stream_status(cleaned) or "canceled",
+            applied=cancelled,
+        )
+
+    before = stream_status(cleaned)
+    found, label = await set_stream_paused(cleaned, paused=(normalized == "pause"))
+    if not found and label is None:
+        raise HTTPException(status_code=404, detail="Unknown, finished, or expired stream_id")
+    target = "paused" if normalized == "pause" else "running"
+    applied = bool(found) and before != target and label == target
+    return StreamControlResponse(
+        stream_id=cleaned,
+        action=normalized,
+        status=label or target,
+        applied=applied,
+    )
 
 
 @router.post("/stream")

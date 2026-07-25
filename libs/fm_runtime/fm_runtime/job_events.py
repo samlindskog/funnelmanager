@@ -20,6 +20,15 @@ word is preserved (``JobEvent.raw_status`` / ``meta['raw_status']``) and the
 event falls back to a safe non-terminal status so it is **never dropped** and a
 job is never wedged in a status this version does not understand.
 
+**Strict vs lenient (who gets which):** leniency applies **only** to the
+wire-decode paths (``from_dict`` / ``from_json_line``) — the boundary where a
+newer peer's additive value legitimately arrives. **Direct construction**
+(``JobEvent(...)`` by a first-party producer in *this* codebase) is **strict**:
+an unrecognized status is a typo/bug, not additive evolution, so it raises
+rather than silently degrading to ``RUNNING``. This makes a producer's status
+mistake fail loud in its own process instead of misreporting a job's lifecycle
+everywhere downstream.
+
 Dependency-free (stdlib dataclasses + enums), so it imports anywhere a producer
 or the consumer runs without pulling a validation stack.
 """
@@ -142,13 +151,15 @@ class JobEvent:
     raw_status: str | None = None
 
     def __post_init__(self) -> None:
-        # Accept a bare string status/progress from callers and normalize. An
-        # unrecognized status is read leniently (never raises): keep the raw word
-        # and fall back to a safe non-terminal status so the event is not lost.
+        # Direct construction is STRICT. A bare status string from a first-party
+        # producer is coerced against the known set and a typo RAISES (never a
+        # silent degrade to RUNNING). Known words stay exact. The lenient
+        # wire-decode paths (from_dict / from_json_line) pre-parse the status
+        # into a real JobStatus (preserving raw_status) before calling us, so an
+        # unknown status from a newer peer arrives here already a JobStatus and
+        # skips this strict branch — leniency lives only at the wire boundary.
         if not isinstance(self.status, JobStatus):
-            self.status, raw = JobStatus.parse(self.status)
-            if raw is not None and self.raw_status is None:
-                self.raw_status = raw
+            self.status = JobStatus.coerce(self.status)
         if self.raw_status is not None:
             self.meta.setdefault("raw_status", self.raw_status)
         if self.progress is not None:
@@ -182,8 +193,12 @@ class JobEvent:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> JobEvent:
-        """Parse a wire event. Unknown keys are preserved under ``meta`` so a
-        v1 consumer tolerates additive fields from a newer producer."""
+        """Parse a wire event — the LENIENT boundary. Unknown keys are preserved
+        under ``meta`` so a v1 consumer tolerates additive fields from a newer
+        producer, and an unrecognized ``status`` is read leniently: the raw word
+        is preserved and ``status`` falls back to a safe non-terminal value so
+        the event is **never dropped**. (Direct ``JobEvent(...)`` construction is
+        strict — see ``__post_init__``.)"""
         known = {
             "job_id",
             "type",
@@ -200,16 +215,30 @@ class JobEvent:
         for key, value in data.items():
             if key not in known:
                 meta[key] = value
-        # Pass the bare status through so __post_init__ reads it leniently — an
-        # unknown word is preserved (raw_status) and falls back, never dropped.
-        raw_status = meta.get("raw_status")
+        # Pre-parse the status LENIENTLY here (never raises), then hand a real
+        # JobStatus to the strict constructor so the unknown word bypasses the
+        # strict branch. An unrecognized status is preserved as raw_status and
+        # falls back to a safe non-terminal value, never dropped.
+        wire_status = data.get("status")
+        if wire_status is None:
+            status, parsed_raw = JobStatus.RUNNING, None
+        else:
+            status, parsed_raw = JobStatus.parse(wire_status)
+        # raw_status survives a to_dict round-trip via meta['raw_status']: prefer
+        # a freshly-parsed unknown word, else recover one carried through meta.
+        meta_raw = meta.get("raw_status")
+        raw_status = (
+            parsed_raw
+            if parsed_raw is not None
+            else (str(meta_raw) if meta_raw is not None else None)
+        )
         event = cls(
             job_id=str(data.get("job_id") or ""),
             type=str(data.get("type") or ""),
             user=str(data.get("user") or ""),
             origin=str(data.get("origin") or "user"),
             actor=str(data.get("actor") or ""),
-            status=data.get("status") or JobStatus.RUNNING.value,
+            status=status,
             progress=(
                 None if data.get("progress") is None else float(data["progress"])
             ),
@@ -218,7 +247,7 @@ class JobEvent:
                 None if data.get("exit_status") is None else str(data["exit_status"])
             ),
             meta=meta,
-            raw_status=str(raw_status) if raw_status is not None else None,
+            raw_status=raw_status,
         )
         return event
 

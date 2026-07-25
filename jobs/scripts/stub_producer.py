@@ -8,7 +8,10 @@ producers exist:
   each job's whole buffered history to a late subscriber, then tails live
   events (mirrors how a real producer buffers per-job history).
 - ``POST /internal/jobs/v1/{job_id}/{action}`` — pause|resume|cancel; maps onto
-  the in-memory job and returns ``{"status": <new JobStatus>}``.
+  the in-memory job and returns ``{"status": <new JobStatus>}``. It logs and
+  echoes the ``X-FM-Acting-User`` audit header the jobs control proxy sends
+  (Phase 2 trust boundary), so verification can confirm the acting human is
+  carried as metadata even though the CALL is the jobs service account's.
 
 On startup it launches one long-running fake job (``stub-job-1``) that walks
 progress 0->1 so you can watch it appear, progress, and be paused/canceled
@@ -28,10 +31,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fm_runtime.job_events import (
     JOBS_STREAM_PATH,
@@ -41,6 +45,10 @@ from fm_runtime.job_events import (
 )
 
 _STEP_SECONDS = float(os.environ.get("JOBS_STUB_STEP_SECONDS", "2"))
+
+# Use uvicorn's configured logger so audit lines actually surface in the harness
+# output (a bare getLogger would fall through to an unconfigured root logger).
+logger = logging.getLogger("uvicorn.error")
 
 
 class FakeJob:
@@ -154,7 +162,18 @@ async def stream() -> StreamingResponse:
 
 
 @app.post("/internal/jobs/v1/{job_id}/{action}")
-async def control(job_id: str, action: str) -> JSONResponse:
+async def control(job_id: str, action: str, request: Request) -> JSONResponse:
+    # The jobs control proxy authenticates as the jobs service account and
+    # carries the acting human here as audit metadata. Surface it so
+    # verification can confirm the header is sent (a real producer would persist
+    # it for attribution).
+    acting_user = request.headers.get("X-FM-Acting-User")
+    acting_origin = request.headers.get("X-FM-Acting-Origin")
+    acting_actor = request.headers.get("X-FM-Acting-Actor")
+    logger.info(
+        "control %s/%s acting_user=%r origin=%r actor=%r",
+        job_id, action, acting_user, acting_origin, acting_actor,
+    )
     job = jobs.get(job_id)
     if job is None:
         return JSONResponse({"detail": f"no job {job_id}"}, status_code=404)
@@ -163,7 +182,7 @@ async def control(job_id: str, action: str) -> JSONResponse:
     except ValueError:
         return JSONResponse({"detail": f"bad action {action}"}, status_code=400)
     new_status = job.control(parsed)
-    return JSONResponse({"status": new_status.value})
+    return JSONResponse({"status": new_status.value, "acting_user": acting_user})
 
 
 if __name__ == "__main__":

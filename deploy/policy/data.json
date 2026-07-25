@@ -19,7 +19,10 @@
         "/": "frontend"
       },
       "callers": {
-        "search": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "search": [
+          {"ns": "istio-ingress", "sa": "istio-ingress"},
+          {"ns": "env", "sa": "jobs", "path_prefixes": ["/internal/jobs"]}
+        ],
         "mail": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "frontend": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "mailui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
@@ -32,7 +35,8 @@
             "path_prefixes": ["/api/leads/webhooks/"]
           }
         ],
-        "mcp": []
+        "mcp": [],
+        "jobs": [{"ns": "env", "sa": "mcp"}]
       },
       "azp_allow": {
         "search": ["frontend", "mcp", "jobs"],
@@ -94,7 +98,8 @@
         {"from": "leads", "to": "mongo"},
         {"from": "leads", "to": "milvus"},
         {"from": "milvus", "to": "etcd"},
-        {"from": "milvus", "to": "minio"}
+        {"from": "milvus", "to": "minio"},
+        {"from": "jobs", "to": "jobs-db"}
       ]
     },
     "roles": {
@@ -132,6 +137,13 @@
         "description": "Human access to the agents API. Full methods within /api/agents (principle 1). Keep in sync with fm_runtime/grants.py.",
         "grants": [
           {"service": "agents", "methods": ["*"], "path_prefix": "/api/agents"}
+        ]
+      },
+      "jobs-internal": {
+        "description": "Internal-jobs trust boundary: the ONLY role that may reach a producer's /internal/jobs/* endpoints (job-event stream reads + pause/resume/cancel control). Machine role held by the jobs client's SERVICE ACCOUNT (client-credentials, azp=jobs) — NOT a human; the acting human rides as audit metadata (X-FM-Acting-User). Scoped to /internal/jobs on the v1 producers search+agents only. Pairs with the jobs->search / jobs->agents exchange edges. Keep in sync with fm_runtime/grants.py.",
+        "grants": [
+          {"service": "search", "methods": ["*"], "path_prefix": "/internal/jobs"},
+          {"service": "agents", "methods": ["*"], "path_prefix": "/internal/jobs"}
         ]
       }
     }

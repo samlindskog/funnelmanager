@@ -4,12 +4,13 @@ import io
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from fm_runtime import JobStatus, current_principal
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,11 +18,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user, oauth2_scheme
 from app.config import Settings, get_settings
 from app.database import SessionLocal, get_db
-from app.leads_client import APOLLO_MAX_PER_PAGE, LeadsClient, lead_to_record, normalize_domain
-
+from app.jobs_registry import (
+    JOB_TYPE_APOLLO_SEARCH,
+    JOB_TYPE_EMBEDDING,
+    JobContext,
+    job_progress_fraction,
+    publish_job,
+)
+from app.leads_client import (
+    APOLLO_MAX_PER_PAGE,
+    LeadsClient,
+    lead_to_record,
+    normalize_domain,
+)
 from app.models import SearchHistory, SearchResult
 from app.schemas import (
     CompanyPeopleSearchRequest,
+    HistoryOwnerOut,
     SearchHistoryDetail,
     SearchHistorySummary,
     SearchRequest,
@@ -33,6 +46,18 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _principal_attribution() -> tuple[str, str]:
+    """(origin, actor) of the acting principal for record attribution.
+
+    origin = ``user``/``agent`` (fm_origin); actor = the exchanging client (azp).
+    Defaults to a direct human call when no principal is present (the route is
+    non-anonymous, so the middleware has already ensured one on real requests)."""
+    principal = current_principal()
+    if principal is None:
+        return "user", ""
+    return principal.origin, principal.actor
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
@@ -384,8 +409,18 @@ async def _ingest_leads_via_stream(
     *,
     search: SearchHistory,
     params: dict[str, Any],
+    job_ctx: JobContext | None = None,
+    on_started: Callable[[str, str | None], Awaitable[None]] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Start leads ingest + embedding streams; persist Mongo `_id`s as pages arrive."""
+    """Start leads ingest + embedding streams; persist Mongo `_id`s as pages arrive.
+
+    When ``job_ctx`` is set this doubles as a **job producer**: it publishes
+    ``JobEvent``s (job_id = the leads stream id, so control maps 1:1) to the
+    in-process registry that ``/internal/jobs/v1/stream`` fans out to the jobs
+    service. ``on_started`` (if given) is awaited once the leads streams exist,
+    so a non-streaming caller (the MCP surface) can return the stream handles
+    while the ingest keeps running detached.
+    """
     entity_type = str(params.get("entity_type") or search.entity_type)
     apollo_params, meta = await _apollo_params_for_stream(client, params=params)
 
@@ -411,6 +446,28 @@ async def _ingest_leads_via_stream(
     embedding_stream_id = str(stream_handles.get("embedding_stream_id") or "").strip() or None
     if not ingest_stream_id:
         raise HTTPException(status_code=502, detail="Leads search missing ingest_stream_id")
+
+    # The leads streams now exist: hand their ids back (MCP non-streaming start)
+    # and register the jobs so they surface in the jobs service immediately.
+    if on_started is not None:
+        await on_started(ingest_stream_id, embedding_stream_id)
+    await publish_job(
+        job_id=ingest_stream_id,
+        job_type=JOB_TYPE_APOLLO_SEARCH,
+        ctx=job_ctx,
+        status=JobStatus.RUNNING,
+        progress=0.0,
+        meta={"kind": "ingest", "embedding_stream_id": embedding_stream_id},
+    )
+    if embedding_stream_id and job_ctx is not None:
+        await publish_job(
+            job_id=embedding_stream_id,
+            job_type=JOB_TYPE_EMBEDDING,
+            ctx=job_ctx,
+            status=JobStatus.QUEUED,
+            progress=0.0,
+            meta={"kind": "embedding", "ingest_stream_id": ingest_stream_id},
+        )
 
     subscribe_ids = [ingest_stream_id]
     if embedding_stream_id:
@@ -442,31 +499,60 @@ async def _ingest_leads_via_stream(
 
         if event_kind == "embedding":
             if event_type == "progress":
+                done = int(event.get("done") or 0)
+                total = int(event.get("total") or 0)
+                await publish_job(
+                    job_id=embedding_stream_id or "",
+                    job_type=JOB_TYPE_EMBEDDING,
+                    ctx=job_ctx,
+                    status=JobStatus.RUNNING,
+                    progress=job_progress_fraction(done, total),
+                    meta={"kind": "embedding", "done": done, "total": total},
+                )
                 yield {
                     "type": "embedding_progress",
                     "kind": "embedding",
-                    "done": int(event.get("done") or 0),
-                    "total": int(event.get("total") or 0),
+                    "done": done,
+                    "total": total,
                     "embedding_stream_id": embedding_stream_id,
                 }
             elif event_type == "complete":
                 embedding_done = True
+                total = int(event.get("total") or 0)
+                await publish_job(
+                    job_id=embedding_stream_id or "",
+                    job_type=JOB_TYPE_EMBEDDING,
+                    ctx=job_ctx,
+                    status=JobStatus.COMPLETED,
+                    progress=1.0,
+                    exit_status="ok",
+                    meta={"kind": "embedding", "total": total},
+                )
                 yield {
                     "type": "embedding_progress",
                     "kind": "embedding",
                     "done": int(event.get("done") or event.get("total") or 0),
-                    "total": int(event.get("total") or 0),
+                    "total": total,
                     "complete": True,
                     "embedding_stream_id": embedding_stream_id,
                 }
             elif event_type == "error":
                 embedding_done = True
+                detail = str(event.get("detail") or "Embedding failed")
+                await publish_job(
+                    job_id=embedding_stream_id or "",
+                    job_type=JOB_TYPE_EMBEDDING,
+                    ctx=job_ctx,
+                    status=JobStatus.FAILED,
+                    exit_status=detail,
+                    meta={"kind": "embedding"},
+                )
                 yield {
                     "type": "embedding_progress",
                     "kind": "embedding",
                     "done": int(event.get("done") or 0),
                     "total": int(event.get("total") or 0),
-                    "error": str(event.get("detail") or "Embedding failed"),
+                    "error": detail,
                     "embedding_stream_id": embedding_stream_id,
                 }
         else:
@@ -483,11 +569,26 @@ async def _ingest_leads_via_stream(
                 position += added
                 search.total_results = position
                 await db.commit()
+                page = int(event.get("page") or 0)
+                total_pages = int(event.get("total_pages") or 1)
+                await publish_job(
+                    job_id=ingest_stream_id,
+                    job_type=JOB_TYPE_APOLLO_SEARCH,
+                    ctx=job_ctx,
+                    status=JobStatus.RUNNING,
+                    progress=job_progress_fraction(page, total_pages),
+                    meta={
+                        "kind": "ingest",
+                        "stored": position,
+                        "page": page,
+                        "total_pages": total_pages,
+                    },
+                )
                 yield {
                     "type": "progress",
                     "kind": "ingest",
-                    "page": int(event.get("page") or 0),
-                    "total_pages": int(event.get("total_pages") or 1),
+                    "page": page,
+                    "total_pages": total_pages,
                     "stored": position,
                     "ids": mongo_ids,
                     "ingest_stream_id": ingest_stream_id,
@@ -495,12 +596,29 @@ async def _ingest_leads_via_stream(
                 }
             elif event_type == "error":
                 detail = event.get("detail") or "Leads stream failed"
+                await publish_job(
+                    job_id=ingest_stream_id,
+                    job_type=JOB_TYPE_APOLLO_SEARCH,
+                    ctx=job_ctx,
+                    status=JobStatus.FAILED,
+                    exit_status=str(detail),
+                    meta={"kind": "ingest", "stored": position},
+                )
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
             elif event_type == "complete":
                 ingest_done = True
                 search.total_results = position
                 await db.commit()
                 await db.refresh(search)
+                await publish_job(
+                    job_id=ingest_stream_id,
+                    job_type=JOB_TYPE_APOLLO_SEARCH,
+                    ctx=job_ctx,
+                    status=JobStatus.COMPLETED,
+                    progress=1.0,
+                    exit_status="ok",
+                    meta={"kind": "ingest", "stored": position},
+                )
                 yield {
                     "type": "ingest_complete",
                     "kind": "ingest",
@@ -516,6 +634,15 @@ async def _ingest_leads_via_stream(
         search.total_results = position
         await db.commit()
         await db.refresh(search)
+        await publish_job(
+            job_id=ingest_stream_id,
+            job_type=JOB_TYPE_APOLLO_SEARCH,
+            ctx=job_ctx,
+            status=JobStatus.COMPLETED,
+            progress=1.0,
+            exit_status="ok",
+            meta={"kind": "ingest", "stored": position},
+        )
         yield {
             "type": "ingest_complete",
             "kind": "ingest",
@@ -531,11 +658,14 @@ async def _search_ndjson_events(
     *,
     search: SearchHistory,
     params: dict[str, Any],
+    job_ctx: JobContext | None = None,
+    on_started: Callable[[str, str | None], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Emit ingest/embedding progress, first_page ASAP, then search complete after ingest.
 
     Embedding progress may continue after ``complete``. Page navigation stays on the
-    synchronous ``POST /searches/{id}/page`` endpoint.
+    synchronous ``POST /searches/{id}/page`` endpoint. ``job_ctx``/``on_started`` are
+    threaded to ``_ingest_leads_via_stream`` for job publication + non-streaming start.
     """
     first_page_sent = False
     search_complete_sent = False
@@ -580,6 +710,8 @@ async def _search_ndjson_events(
         client,
         search=search,
         params=params,
+        job_ctx=job_ctx,
+        on_started=on_started,
     ):
         event_type = event.get("type")
         if event_type == "embedding_progress":
@@ -644,6 +776,11 @@ def _to_detail(row: SearchHistory, results: list[dict[str, Any]] | None = None) 
         per_page=row.per_page,
         total_results=row.total_results,
         created_at=row.created_at,
+        # Attribution so any viewer (cross-user) sees whose search it is +
+        # "alice (via agent)". Legacy rows default to a direct human call.
+        username=row.username,
+        origin=row.origin,
+        actor=row.actor,
         results=results,
     )
 
@@ -661,11 +798,120 @@ def _pagination_for(row: SearchHistory) -> dict[str, Any]:
 
 
 async def _get_owned_search(db: AsyncSession, search_id: int, user: UserOut) -> SearchHistory:
-    """Load a search owned by the caller; another user's row 404s like a missing one."""
+    """Load a search owned by the caller; another user's row 404s like a missing one.
+
+    Retained only for the **mutating** delete path — a user may remove their own
+    history but not another's. READ paths use :func:`_get_search_any` (principle 1:
+    any search-access principal may browse any user's history; row ownership is
+    not an access gate)."""
     row = await db.get(SearchHistory, search_id)
     if not row or row.username != user.username:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
     return row
+
+
+async def _get_search_any(db: AsyncSession, search_id: int) -> SearchHistory:
+    """Load any search by id, regardless of owner (cross-user read).
+
+    Access is already gated by the search-access role (mesh OPA / in-process
+    grants); this deliberately does NOT filter by ``username``."""
+    row = await db.get(SearchHistory, search_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Search not found")
+    return row
+
+
+async def _run_search_job(
+    settings: Settings,
+    token: str | None,
+    *,
+    username: str,
+    origin: str,
+    actor: str,
+    history_query: str,
+    entity_type: str,
+    per_page: int,
+    search_params: dict[str, Any],
+    emit: Callable[[str | None], Awaitable[None]],
+    started_future: asyncio.Future[dict[str, Any]] | None = None,
+) -> None:
+    """Detached search job: create the history row, run the leads ingest, persist
+    ids, publish job events. Shared by the UI streaming path and the MCP
+    non-streaming start.
+
+    ``emit`` receives each NDJSON line (a queue push for streaming, or a sink that
+    drops them for MCP) and a terminal ``None``. ``started_future`` (MCP) resolves
+    with ``{search_id, ingest_stream_id, embedding_stream_id}`` once the leads
+    streams exist, so the caller can return handles while ingest keeps running.
+
+    Never raises out of the streaming relay: every failure becomes an ``error``
+    line via ``emit`` (and a FAILED job event upstream). Only ``started_future``
+    carries an exception, and only before the response has started.
+    """
+    client = LeadsClient(settings, token)
+    try:
+        async with SessionLocal() as job_db:
+            row = SearchHistory(
+                username=username,
+                origin=origin,
+                actor=actor,
+                query=_clip_history_query(history_query),
+                entity_type=entity_type,
+                page=1,
+                per_page=per_page,
+                total_results=0,
+                results_json="[]",
+                search_params_json=json.dumps(search_params),
+            )
+            job_db.add(row)
+            await job_db.commit()
+            await job_db.refresh(row)
+            job_ctx = JobContext(
+                user=username,
+                origin=origin,
+                actor=actor,
+                search_id=row.id,
+                job_type=JOB_TYPE_APOLLO_SEARCH,
+            )
+
+            async def _on_started(ingest_id: str, embedding_id: str | None) -> None:
+                if started_future is not None and not started_future.done():
+                    started_future.set_result(
+                        {
+                            "search_id": row.id,
+                            "ingest_stream_id": ingest_id,
+                            "embedding_stream_id": embedding_id,
+                        }
+                    )
+
+            async for line in _search_ndjson_events(
+                job_db,
+                client,
+                search=row,
+                params=search_params,
+                job_ctx=job_ctx,
+                on_started=_on_started,
+            ):
+                await emit(line)
+    except HTTPException as exc:
+        if started_future is not None and not started_future.done():
+            started_future.set_exception(exc)
+        await emit(_ndjson_line({"type": "error", "detail": exc.detail}))
+    except Exception as exc:
+        logger.exception("Search stream job failed")
+        if started_future is not None and not started_future.done():
+            started_future.set_exception(exc)
+        await emit(_ndjson_line({"type": "error", "detail": f"Search failed: {exc}"}))
+    finally:
+        await emit(None)
+
+
+def _spawn_search_job(coro: Awaitable[None], *, name: str) -> asyncio.Task[None]:
+    """Start a detached search job and keep a strong ref until it finishes."""
+    task = asyncio.create_task(coro, name=name)
+    _search_jobs.add(task)
+    task.add_done_callback(_search_jobs.discard)
+    return task
 
 
 def _search_stream_response(
@@ -673,6 +919,8 @@ def _search_stream_response(
     token: str,
     *,
     username: str,
+    origin: str,
+    actor: str,
     history_query: str,
     entity_type: str,
     per_page: int,
@@ -695,38 +943,21 @@ def _search_stream_response(
         if relay_alive or line is None:
             await queue.put(line)
 
-    async def _run_job() -> None:
-        client = LeadsClient(settings, token)
-        try:
-            async with SessionLocal() as job_db:
-                row = SearchHistory(
-                    username=username,
-                    query=_clip_history_query(history_query),
-                    entity_type=entity_type,
-                    page=1,
-                    per_page=per_page,
-                    total_results=0,
-                    results_json="[]",
-                    search_params_json=json.dumps(search_params),
-                )
-                job_db.add(row)
-                await job_db.commit()
-                await job_db.refresh(row)
-                async for line in _search_ndjson_events(
-                    job_db, client, search=row, params=search_params
-                ):
-                    await _emit(line)
-        except HTTPException as exc:
-            await _emit(_ndjson_line({"type": "error", "detail": exc.detail}))
-        except Exception as exc:
-            logger.exception("Search stream job failed")
-            await _emit(_ndjson_line({"type": "error", "detail": f"Search failed: {exc}"}))
-        finally:
-            await _emit(None)
-
-    task = asyncio.create_task(_run_job(), name="search-stream-job")
-    _search_jobs.add(task)
-    task.add_done_callback(_search_jobs.discard)
+    _spawn_search_job(
+        _run_search_job(
+            settings,
+            token,
+            username=username,
+            origin=origin,
+            actor=actor,
+            history_query=history_query,
+            entity_type=entity_type,
+            per_page=per_page,
+            search_params=search_params,
+            emit=_emit,
+        ),
+        name="search-stream-job",
+    )
 
     async def event_stream() -> AsyncIterator[str]:
         nonlocal relay_alive
@@ -749,6 +980,50 @@ def _search_stream_response(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def _start_search_job_detached(
+    settings: Settings,
+    token: str,
+    *,
+    username: str,
+    origin: str,
+    actor: str,
+    history_query: str,
+    entity_type: str,
+    per_page: int,
+    search_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Start a detached search and return once the leads streams exist (MCP surface).
+
+    The job keeps running (persisting ids + publishing job events) after this
+    returns; the caller watches progress via the jobs service. Errors before the
+    streams start propagate as an exception (a synchronous handler, not a stream)."""
+    loop = asyncio.get_running_loop()
+    started_future: asyncio.Future[dict[str, Any]] = loop.create_future()
+
+    async def _sink(_line: str | None) -> None:
+        # MCP start is non-streaming: the detached job's NDJSON lines are dropped;
+        # progress is observed via the jobs service, results via the read APIs.
+        return
+
+    _spawn_search_job(
+        _run_search_job(
+            settings,
+            token,
+            username=username,
+            origin=origin,
+            actor=actor,
+            history_query=history_query,
+            entity_type=entity_type,
+            per_page=per_page,
+            search_params=search_params,
+            emit=_sink,
+            started_future=started_future,
+        ),
+        name="search-mcp-job",
+    )
+    return await started_future
 
 
 @router.post("/search")
@@ -799,10 +1074,13 @@ async def search(
         keywords=body.query.strip() if body.entity_type == "companies" else None,
     )
 
+    origin, actor = _principal_attribution()
     return _search_stream_response(
         settings,
         token,
         username=user.username,
+        origin=origin,
+        actor=actor,
         history_query=history_query,
         entity_type=body.entity_type,
         per_page=body.per_page or _UI_PER_PAGE,
@@ -828,10 +1106,13 @@ async def search_company_people(
         keywords=body.keywords,
     )
 
+    origin, actor = _principal_attribution()
     return _search_stream_response(
         settings,
         token,
         username=user.username,
+        origin=origin,
+        actor=actor,
         history_query=history_query,
         entity_type="people",
         per_page=body.per_page or _UI_PER_PAGE,
@@ -846,9 +1127,12 @@ async def search_page(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    user: UserOut = Depends(get_current_user),
+    _: UserOut = Depends(get_current_user),
 ) -> SearchResponse:
-    source = await _get_owned_search(db, search_id, user)
+    # Cross-user read (principle 1): any search-access principal may page any
+    # user's search. ``results_json``/``page`` on the row are a shared page cache,
+    # not a per-user view.
+    source = await _get_search_any(db, search_id)
 
     stored = await _count_stored_results(db, search_id)
     if stored == 0:
@@ -867,16 +1151,42 @@ async def search_page(
 
 @router.get("/searches", response_model=list[SearchHistorySummary])
 async def list_searches(
+    username: str | None = None,
     db: AsyncSession = Depends(get_db),
-    user: UserOut = Depends(get_current_user),
+    _: UserOut = Depends(get_current_user),
 ) -> list[SearchHistory]:
-    result = await db.execute(
-        select(SearchHistory)
-        .where(SearchHistory.username == user.username)
-        .order_by(SearchHistory.created_at.desc())
-        .limit(100)
-    )
+    """List searches. Cross-user by default (principle 1); ``?username=`` narrows
+    to one owner's history for the browse-by-user view."""
+    stmt = select(SearchHistory).order_by(SearchHistory.created_at.desc()).limit(200)
+    if username is not None:
+        stmt = (
+            select(SearchHistory)
+            .where(SearchHistory.username == username)
+            .order_by(SearchHistory.created_at.desc())
+            .limit(200)
+        )
+    result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+@router.get("/users", response_model=list[HistoryOwnerOut])
+async def list_history_owners(
+    db: AsyncSession = Depends(get_db),
+    _: UserOut = Depends(get_current_user),
+) -> list[HistoryOwnerOut]:
+    """Distinct history owners + their search counts — the browse-by-user index
+    (principle 1: anyone may see whose searches exist). Empty-username legacy rows
+    are skipped."""
+    result = await db.execute(
+        select(SearchHistory.username, func.count())
+        .where(SearchHistory.username != "")
+        .group_by(SearchHistory.username)
+        .order_by(func.count().desc())
+    )
+    return [
+        HistoryOwnerOut(username=str(username), search_count=int(count))
+        for username, count in result.all()
+    ]
 
 
 @router.get("/searches/{search_id}", response_model=SearchHistoryDetail)
@@ -885,9 +1195,10 @@ async def get_search(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    user: UserOut = Depends(get_current_user),
+    _: UserOut = Depends(get_current_user),
 ) -> SearchHistoryDetail:
-    row = await _get_owned_search(db, search_id, user)
+    # Cross-user read (principle 1).
+    row = await _get_search_any(db, search_id)
 
     stored = await _count_stored_results(db, search_id)
     if stored > 0:
@@ -941,10 +1252,11 @@ async def export_search_csv(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     token: str = Depends(oauth2_scheme),
-    user: UserOut = Depends(get_current_user),
+    _: UserOut = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Export every stored result for a search as CSV (name, email)."""
-    row = await _get_owned_search(db, search_id, user)
+    """Export every stored result for a search as CSV (name, email). Cross-user
+    read (principle 1)."""
+    row = await _get_search_any(db, search_id)
 
     mongo_ids = await _load_all_mongo_ids(db, search_id=search_id)
     if not mongo_ids:
@@ -978,22 +1290,28 @@ async def apollo_credits(
     return await client.get_apollo_credits()
 
 
-@router.post("/similarity-search", response_model=SimilaritySearchResponse)
-async def similarity_search(
-    body: SimilaritySearchRequest,
-    db: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-    token: str = Depends(oauth2_scheme),
-    user: UserOut = Depends(get_current_user),
-) -> SimilaritySearchResponse:
-    """Proxy Milvus similarity search; persist history and paginate at 100/page."""
-    query = body.query.strip()
+async def _run_similarity_search(
+    db: AsyncSession,
+    client: LeadsClient,
+    *,
+    query: str,
+    limit: int,
+    username: str,
+    origin: str,
+    actor: str,
+) -> tuple[SimilaritySearchResponse, SearchHistory]:
+    """Milvus similarity search + persist a (cross-user-visible) history row.
+
+    Shared by the UI ``/similarity-search`` endpoint and the MCP semantic-search
+    endpoint. Attributes the row to ``username``/``origin``/``actor`` and emits a
+    terminal ``semantic_search`` job event so the run is visible in the jobs
+    service (semantic search is synchronous — there is no leads stream to pause)."""
+    query = query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="query must not be empty")
 
-    client = LeadsClient(settings, token)
     try:
-        hits = await client.similarity_search(query, limit=body.limit)
+        hits = await client.similarity_search(query, limit=limit)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1021,11 +1339,13 @@ async def similarity_search(
     search_params = {
         "source": "similarity",
         "query": query,
-        "limit": body.limit,
+        "limit": limit,
         "entity_type": "people",
     }
     row = SearchHistory(
-        username=user.username,
+        username=username,
+        origin=origin,
+        actor=actor,
         query=history_query,
         entity_type="people",
         page=1,
@@ -1053,11 +1373,47 @@ async def similarity_search(
     await db.commit()
     await db.refresh(row)
 
-    return SimilaritySearchResponse(
+    await publish_job(
+        job_id=f"sem-{row.id}",
+        job_type="semantic_search",
+        ctx=JobContext(
+            user=username, origin=origin, actor=actor, search_id=row.id
+        ),
+        status=JobStatus.COMPLETED,
+        progress=1.0,
+        exit_status="ok",
+        meta={"kind": "semantic", "total": len(records)},
+    )
+
+    response = SimilaritySearchResponse(
         query=query,
         results=scored[:per_page],
         history=_to_detail(row, page_results),
     )
+    return response, row
+
+
+@router.post("/similarity-search", response_model=SimilaritySearchResponse)
+async def similarity_search(
+    body: SimilaritySearchRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    user: UserOut = Depends(get_current_user),
+) -> SimilaritySearchResponse:
+    """Proxy Milvus similarity search; persist history and paginate at 100/page."""
+    client = LeadsClient(settings, token)
+    origin, actor = _principal_attribution()
+    response, _row = await _run_similarity_search(
+        db,
+        client,
+        query=body.query,
+        limit=body.limit,
+        username=user.username,
+        origin=origin,
+        actor=actor,
+    )
+    return response
 
 
 @router.get("/leads/{mongo_id}")

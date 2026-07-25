@@ -69,6 +69,35 @@ class StreamSubscribeRequest(BaseModel):
     stream_ids: list[str] = Field(default_factory=list, min_length=1, max_length=50)
 
 
+class EmbeddingBackfillResponse(BaseModel):
+    """Result of starting an embedding backfill.
+
+    ``matched`` is the estimated doc count the run will (re-)embed. When it is 0
+    there is nothing to do and ``embedding_stream_id`` is null; otherwise the
+    caller subscribes to ``embedding_stream_id`` for progress (``GET
+    /api/leads/stream/{id}``), and the ``embedding`` flag flips to True per doc
+    only after Milvus indexing succeeds.
+    """
+
+    embedding_stream_id: str | None = None
+    matched: int = 0
+    force: bool = False
+
+
+class StreamControlResponse(BaseModel):
+    """Result of a pause/resume/cancel control action on a stream job.
+
+    ``status`` is one of ``running`` / ``paused`` / ``canceled`` / ``complete`` /
+    ``error``. ``applied`` is False when the action was a no-op (idempotent
+    re-invocation), but the request still succeeded and reports the status.
+    """
+
+    stream_id: str
+    action: str
+    status: str
+    applied: bool
+
+
 class SimilaritySearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=8000)
     limit: int = Field(default=25, ge=1, le=10000)

@@ -65,7 +65,7 @@ spec:
             # otherwise blackhole raw-TCP traffic (Postgres/Mongo/Milvus)
             # in the namespace (istioctl IST0133). TCP callers are gated by
             # OPA (workload identity) + the L4 policies + NetworkPolicies.
-            ports: ["8000", "8001", "8003", "8004", "8080", "80"]
+            ports: ["8000", "8001", "8003", "8004", "8005", "8080", "80"]
             notPaths:
               # The security-reviewed public-anonymous allowlist (Phase 0).
               - "/api/leads/webhooks/apollo"
@@ -112,7 +112,7 @@ spec:
             # otherwise blackhole raw-TCP traffic (Postgres/Mongo/Milvus)
             # in the namespace (istioctl IST0133). TCP callers are gated by
             # OPA (workload identity) + the L4 policies + NetworkPolicies.
-            ports: ["8000", "8001", "8003", "8004", "8080", "80"]
+            ports: ["8000", "8001", "8003", "8004", "8005", "8080", "80"]
             notPaths:
               - "/api/leads/webhooks/apollo"
               - "/api/leads/webhooks/apollo/*"

@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jobs
+  labels:
+    app.kubernetes.io/name: jobs
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jobs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jobs
+        app.kubernetes.io/part-of: funnelmanager
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8005"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: jobs
+      nodeSelector:
+        role: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jobs
+          # Tag is pinned only in overlays via the images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/jobs
+          ports:
+            - name: http
+              containerPort: 8005
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: jobs
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            # In-cluster token endpoint (split horizon) — the public issuer
+            # host is unreachable under the namespace's default-deny egress.
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
+            - name: FM_OIDC_CLIENT_ID
+              value: jobs
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-jobs
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            # CNPG's generated `jobs-db-app` secret has key `uri` (plain
+            # postgresql://); the app forces the asyncpg driver itself.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: jobs-db-app
+                  key: uri
+            # Config-driven producer registry: v1 = search only (agents not
+            # wired yet). name=base_url; name is BOTH the Job.app value and the
+            # token-exchange audience (svc scope jobs->search). Cross-service
+            # DNS: search.<ns>.svc — kustomize sets the namespace per overlay.
+            - name: JOBS_PRODUCERS
+              value: search=http://search:8000

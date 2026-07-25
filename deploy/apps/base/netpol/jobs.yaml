@@ -1,0 +1,56 @@
+# jobs is internal-only: never routed from the gateway. Ingress is limited to
+# mcp (its MCP-facing API at /api/jobs/mcp/v1/*). Egress: the producers whose
+# job-event streams it subscribes to and whose control API it proxies (v1:
+# search), Keycloak (token exchange), and its own Postgres (jobs-db). DNS via
+# allow-dns; the monitoring scrape is granted by allow-monitoring-scrape.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jobs
+  labels:
+    app.kubernetes.io/name: jobs
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: jobs
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - protocol: TCP
+          port: 8005
+  egress:
+    # v1 producer: search (job-event stream + control proxy on /internal/jobs).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Dedicated Postgres (jobs-db). CNPG labels instance pods with
+    # cnpg.io/cluster, not app.kubernetes.io/name.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: jobs-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Keycloak (in-cluster token endpoint for RFC 8693 exchange).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080

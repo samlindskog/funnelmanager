@@ -33,6 +33,17 @@ from fm_runtime.settings import get_runtime_settings
 # leads-only (detached-job client-credentials identity). Humans get NO direct
 # `leads` grant — leads is internal, reached via search/mcp. Change this table
 # and deploy/policy/data.json together (verify_policy asserts they are equal).
+#
+# SECURITY-REVIEW (internal-jobs trust boundary): `jobs-internal` is the ONLY
+# role that may reach a producer's `/internal/jobs/*` endpoints (job-event stream
+# reads + pause/resume/cancel control). It is a MACHINE role held by the `jobs`
+# client's SERVICE ACCOUNT (client-credentials, azp=jobs) — NOT any human. BOTH
+# the jobs stream subscriber AND the jobs control proxy authenticate as that
+# service account; the acting human's identity rides only as AUDIT METADATA
+# (e.g. an `X-FM-Acting-User` header), because the human was already authorized
+# at the jobs MCP API. The grant is deliberately scoped to `/internal/jobs` on
+# exactly the v1 job producers (`search`, `agents`) — no `/api/*` reach, no other
+# services. It pairs with the jobs->search / jobs->agents exchange edges below.
 _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
     "admin": [{"service": "*", "methods": ["*"], "path_prefix": "/"}],
     "internal-service": [
@@ -49,6 +60,10 @@ _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
     ],
     "agents-access": [
         {"service": "agents", "methods": ["*"], "path_prefix": "/api/agents"}
+    ],
+    "jobs-internal": [
+        {"service": "search", "methods": ["*"], "path_prefix": "/internal/jobs"},
+        {"service": "agents", "methods": ["*"], "path_prefix": "/internal/jobs"},
     ],
 }
 
@@ -181,6 +196,13 @@ def verify_policy(
       (e.g. a superseded example client that still holds ``svc-mcp``) that
       Keycloak would otherwise still honor even though the one-hop allowlist no
       longer includes it.
+    - **Realm role definitions (when a realm is supplied):** the realm must
+      define **every** role in ``_DEFAULT_ROLE_GRANTS`` (else a grant the code
+      enforces names a role Keycloak can never issue — dead policy), and the
+      ``admin`` role must be a Keycloak **composite of exactly the ``-access``
+      roles** (so ``admin`` actually confers each service's access; drift here
+      would silently under- or over-grant admins). This is the third leg of the
+      code ⇔ data.json ⇔ realm lockstep — previously kept by hand.
     """
     errors: list[str] = []
     config = data.get("funnelmanager", {}).get("config", {}) if isinstance(data, dict) else {}
@@ -211,6 +233,7 @@ def verify_policy(
         )
 
     if realm is not None:
+        errors.extend(_verify_realm_roles(realm))
         for client in realm.get("clients", []) or []:
             cid = str(client.get("clientId") or "")
             for scope in client.get("optionalClientScopes", []) or []:
@@ -224,6 +247,55 @@ def verify_policy(
                         "— least-privilege over-grant; remove the scope or add "
                         "the edge (and its azp_allow entry)"
                     )
+    return errors
+
+
+def _verify_realm_roles(realm: dict[str, Any]) -> list[str]:
+    """Assert the Keycloak realm defines every role the code grants against, and
+    that ``admin`` is a composite of exactly the ``-access`` roles. Returns drift
+    messages (empty == in sync). This is the realm leg of the code ⇔ data.json ⇔
+    realm role lockstep — see :func:`verify_policy`."""
+    errors: list[str] = []
+    realm_roles: dict[str, dict[str, Any]] = {
+        str(role.get("name")): role
+        for role in (realm.get("roles", {}) or {}).get("realm", []) or []
+        if isinstance(role, dict)
+    }
+
+    for role in _DEFAULT_ROLE_GRANTS:
+        if role not in realm_roles:
+            errors.append(
+                f"realm does not define realm role {role!r} that grants.py "
+                "_DEFAULT_ROLE_GRANTS enforces — the grant names a role "
+                "Keycloak can never issue (add it to the realm)"
+            )
+
+    access_roles = {
+        role for role in _DEFAULT_ROLE_GRANTS if role.endswith("-access")
+    }
+    admin = realm_roles.get("admin")
+    if admin is not None:
+        if not admin.get("composite"):
+            errors.append(
+                "realm role 'admin' must be a composite of the -access roles "
+                "but its 'composite' flag is not set"
+            )
+        admin_composites = set(
+            (admin.get("composites") or {}).get("realm", []) or []
+        )
+        missing = access_roles - admin_composites
+        extra = admin_composites - access_roles
+        if missing:
+            errors.append(
+                "realm role 'admin' composite is missing -access role(s) "
+                f"{sorted(missing)!r} — admins would not confer that service's "
+                "access"
+            )
+        if extra:
+            errors.append(
+                "realm role 'admin' composite includes non -access role(s) "
+                f"{sorted(extra)!r} — it must be exactly the -access roles"
+            )
     return errors
 
 

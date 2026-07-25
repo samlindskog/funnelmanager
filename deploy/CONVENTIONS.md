@@ -39,9 +39,10 @@ overlay, not in base).
 ## Names, labels, service accounts
 
 - App/workload names are the short service names: `search`, `leads`,
-  `mail`, `mcp`, `frontend`, `mailui`, `keycloak`, `opa`.
+  `mail`, `mcp`, `jobs`, `frontend`, `mailui`, `keycloak`, `opa`.
 - Data workloads: `app-db` (search's Postgres, CNPG), `mail-db` (CNPG),
-  `kc-db` (CNPG, in `identity`), `mongo`, `milvus`, `etcd`, `minio`.
+  `jobs-db` (CNPG), `kc-db` (CNPG, in `identity`), `mongo`, `milvus`,
+  `etcd`, `minio`.
 - Every Deployment/StatefulSet has its own ServiceAccount named exactly
   like the workload → SPIFFE `spiffe://cluster.local/ns/<ns>/sa/<name>`.
   No workload uses `default`, none is cluster-admin.
@@ -49,7 +50,8 @@ overlay, not in base).
   `app.kubernetes.io/part-of: funnelmanager`. Selectors use
   `app.kubernetes.io/name` only.
 - Container ports keep the compose numbers: search 8000, leads 8001,
-  mcp 8003, mail 8004, static nginx 8080 (non-root nginx), Keycloak 8080.
+  mcp 8003, mail 8004, jobs 8005, static nginx 8080 (non-root nginx),
+  Keycloak 8080.
   Service port == container port; Service names == workload names.
 
 ## Images
@@ -76,9 +78,10 @@ istiod values (64Mi/256Mi). The summed budget lives in
 | leads | 100m / 256Mi | 1000m / 1536Mi |
 | mail | 50m / 128Mi | 500m / 512Mi |
 | mcp | 50m / 128Mi | 500m / 768Mi |
+| jobs | 50m / 128Mi | 500m / 512Mi |
 | frontend (nginx) | 10m / 16Mi | 100m / 64Mi |
 | mailui (nginx) | 10m / 16Mi | 100m / 64Mi |
-| app-db / mail-db / kc-db (CNPG, each) | 100m / 192Mi | 500m / 512Mi |
+| app-db / mail-db / jobs-db / kc-db (CNPG, each) | 100m / 192Mi | 500m / 512Mi |
 | mongo | 100m / 384Mi | 1000m / 1536Mi |
 | milvus | 200m / 512Mi | 1500m / 2560Mi |
 | etcd | 50m / 128Mi | 300m / 512Mi |
@@ -127,7 +130,7 @@ Dev overlay halves app requests, keeps limits, replicas 1 everywhere.
 ## Storage
 
 k3s default StorageClass `local-path`. PVCs: app-db 5Gi, mail-db 10Gi,
-kc-db 2Gi, mongo 20Gi, milvus 10Gi, etcd 2Gi, minio 10Gi, prometheus 10Gi,
+jobs-db 5Gi, kc-db 2Gi, mongo 20Gi, milvus 10Gi, etcd 2Gi, minio 10Gi, prometheus 10Gi,
 loki 5Gi (cache; chunks go to object storage).
 
 ## Mesh & dedicated dependencies
@@ -136,7 +139,7 @@ loki 5Gi (cache; chunks go to object storage).
   guarded three ways: (1) OPA data-document pairing rules, (2) an Istio
   L4 `AuthorizationPolicy` allowing only the owner's SA principal, (3) a
   NetworkPolicy admitting only the owner. Pairings:
-  `search→app-db`, `mail→mail-db`, `keycloak→kc-db`, `leads→mongo`,
-  `leads→milvus`, `milvus→etcd`, `milvus→minio` (nested).
+  `search→app-db`, `mail→mail-db`, `jobs→jobs-db`, `keycloak→kc-db`,
+  `leads→mongo`, `leads→milvus`, `milvus→etcd`, `milvus→minio` (nested).
 - Never routed from the gateway: leads (except `/api/leads/webhooks/`),
-  mcp, all data stores, OPA.
+  mcp, jobs, all data stores, OPA.

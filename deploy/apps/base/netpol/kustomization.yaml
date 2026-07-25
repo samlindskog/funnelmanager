@@ -9,10 +9,12 @@ resources:
   - leads.yaml
   - mail.yaml
   - mcp.yaml
+  - jobs.yaml
   - frontend.yaml
   - mailui.yaml
   - app-db.yaml
   - mail-db.yaml
+  - jobs-db.yaml
   - mongo.yaml
   - milvus.yaml
   - etcd.yaml

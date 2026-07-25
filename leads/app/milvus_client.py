@@ -195,6 +195,7 @@ async def index_lead_docs(
     docs: list[dict[str, Any]],
     *,
     source_precedence: int,
+    force: bool = False,
     settings: Settings | None = None,
 ) -> list[tuple[str, int]]:
     """Embed and upsert person/organization Mongo docs, respecting embedding precedence.
@@ -203,6 +204,10 @@ async def index_lead_docs(
     (search < complete-info < match). A doc is skipped when its existing Milvus
     vector was produced from a strictly higher precedence source, so e.g. a broad
     search never overwrites a match/complete-info embedding.
+
+    ``force`` bypasses that never-downgrade skip so a backfill can re-embed docs
+    that already carry a vector (e.g. after an embedding-model/text change); the
+    stored precedence still reflects the doc's own best data tier, never lowered.
 
     Soft-fails; returns ``[(mongo_id, stored_precedence), ...]`` for docs indexed.
     """
@@ -223,8 +228,10 @@ async def index_lead_docs(
         if not mongo_id or not apollo_id:
             continue
         existing_precedence = int(doc.get("embedding_source") or 0)
-        # Never downgrade: skip if a higher-precedence vector is already stored.
-        if existing_precedence and source_precedence < existing_precedence:
+        # Never downgrade: skip if a higher-precedence vector is already stored
+        # (unless force — a re-embed must rewrite every doc regardless of precedence,
+        # e.g. after an embedding-model or embedding-text change).
+        if not force and existing_precedence and source_precedence < existing_precedence:
             continue
         text = lead_embedding_text(doc)
         if not text.strip():

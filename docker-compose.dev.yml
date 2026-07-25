@@ -310,6 +310,67 @@ services:
       - leads
       - keycloak
 
+  # Dedicated Postgres for the jobs store — the jobs service is the only
+  # consumer (own db funnelmanager_jobs; follows the mail-db pattern).
+  jobs-db:
+    image: postgres:16-alpine
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-funnel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-funnel}
+      POSTGRES_DB: funnelmanager_jobs
+    volumes:
+      - jobs_postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-funnel} -d funnelmanager_jobs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Jobs service (:8005) — subscribes to each producer's
+  # /internal/jobs/v1/stream and proxies its control API. v1 producer = search
+  # only (agents not wired yet). Internal only: never routed through nginx;
+  # published on loopback in dev for host-local inspection (prod is loopback too).
+  jobs:
+    build:
+      context: .
+      dockerfile: jobs/Dockerfile.dev
+    mem_limit: 512m
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@jobs-db:5432/funnelmanager_jobs
+      FM_SERVICE_NAME: jobs
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: jobs
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_JOBS_SECRET:-dev-jobs-secret}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json). The jobs service account holds the
+      # jobs-internal role (reaches producers' /internal/jobs/*).
+      FM_ENFORCE_GRANTS: "true"
+      # Config-driven producer registry: v1 = search only (agents not wired
+      # yet). name=base_url; name is BOTH the Job.app value and the
+      # token-exchange audience (svc scope jobs->search).
+      JOBS_PRODUCERS: ${JOBS_PRODUCERS:-search=http://search:8000}
+    volumes:
+      - ./jobs:/app
+      - ./libs/fm_runtime:/libs/fm_runtime
+    # Loopback publish for host-local inspection; nginx never routes to it.
+    ports:
+      - "${HOST_BIND:-}8005:8005"
+    expose:
+      - "8005"
+    depends_on:
+      jobs-db:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      search:
+        condition: service_started
+
   frontend:
     build:
       context: ./frontend
@@ -351,6 +412,7 @@ services:
 volumes:
   postgres_data_dev:
   mail_postgres_data_dev:
+  jobs_postgres_data_dev:
   mongo_data_dev:
   etcd_data_dev:
   minio_data_dev:

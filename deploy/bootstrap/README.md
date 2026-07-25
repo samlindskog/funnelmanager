@@ -149,15 +149,19 @@ kubectl -n prod exec deploy/frontend -- wget -qO- --timeout=3 http://leads:8001/
 
 | worker1 (8GB) | requests |
 |---|---|
-| apps (search/leads/mail/mcp/frontend/mailui) | 672Mi |
-| app sidecars (6 × 64Mi) | 384Mi |
-| data (app-db, mail-db, mongo, milvus, etcd, minio) | 1536Mi |
+| apps (search/leads/mail/mcp/jobs/frontend/mailui) | 800Mi |
+| app sidecars (7 × 64Mi) | 448Mi |
+| data (app-db, mail-db, jobs-db, mongo, milvus, etcd, minio) | 1728Mi |
 | data sidecars (6 × 64Mi) | 384Mi |
 | kc-db (identity) | 192Mi |
 | observability (prom/loki/grafana/ksm/fluent-bit/node-exp) | ~1056Mi |
 | platform (cnpg op, cert-manager, flux, opa, coredns) | ~640Mi |
 | kubelet reservations (kube+system) | 1024Mi |
-| **total** | **≈ 5.9GB of 8GB** |
+| **total** | **≈ 6.3GB of 8GB** |
+
+`jobs` + `jobs-db` (added with the jobs service) account for ≈ 0.4GB of the
+above; the meshed CNPG data clusters (`app-db`/`mail-db`/`jobs-db`) run with
+sidecar injection disabled, so `jobs-db` adds no sidecar.
 
 `edge` (4GB): gateway 128Mi + keycloak 640Mi + opa 64Mi + agents/reserved
 ≈ 1.7GB. `cp` (4GB): k3s server ≈ 1–1.5GB + istiod 384Mi + opa 64Mi.

@@ -19,8 +19,23 @@ class SearchHistory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # Owning profile (auth username); '' on legacy rows, which match nobody.
+    # NB (principle 1 / cross-user history): `username` still *attributes* a row
+    # to its initiating human — writes record the owner — but READ endpoints no
+    # longer filter by it. Any principal holding the search-access role may
+    # browse every user's history; row ownership is not an access gate.
     username: Mapped[str] = mapped_column(
         String(64), nullable=False, default="", server_default="", index=True
+    )
+    # Attribution of the initiating request (fm_origin): "user" (a human) or
+    # "agent" (a runtime AI agent acting on the human's behalf). Rendered as
+    # "alice (via agent)" when origin == "agent".
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="user", server_default="user"
+    )
+    # The machine client that performed the acting exchange (azp) — pairs with
+    # `origin` for attribution. Empty for a direct human/browser call.
+    actor: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="", server_default=""
     )
     query: Mapped[str] = mapped_column(String(512), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(32), nullable=False)  # people | companies

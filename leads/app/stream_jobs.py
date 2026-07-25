@@ -43,6 +43,13 @@ class StreamJobStatus(str, Enum):
     ERROR = "error"
 
 
+def _set_event() -> asyncio.Event:
+    """A fresh, already-set event — the default ``_resume`` gate (not paused)."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
 class StreamJob:
     stream_id: str
@@ -54,6 +61,9 @@ class StreamJob:
     error: str | None = None
     subscribers: int = 0
     cancelled: bool = False
+    paused: bool = False
+    # Cleared while paused; set to release the ingest loop (resume or cancel).
+    _resume: asyncio.Event = field(default_factory=_set_event, repr=False)
     _condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     _cleanup_handle: asyncio.TimerHandle | None = field(default=None, repr=False)
 
@@ -193,10 +203,44 @@ class EmbeddingStreamState:
     accepting: bool = True
     failed: bool = False
     cancelled: bool = False
+    paused: bool = False
+    # Cleared while paused; set to release embedding chunks (resume or cancel).
+    _resume: asyncio.Event = field(default_factory=_set_event, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 _embedding_states: dict[str, EmbeddingStreamState] = {}
+
+
+# Control-hook status labels (leads is the engine; search maps these onto job
+# lifecycle). Deliberately terse data — no UI shaping happens here.
+CONTROL_STATUS_RUNNING = "running"
+CONTROL_STATUS_PAUSED = "paused"
+CONTROL_STATUS_CANCELED = "canceled"
+CONTROL_STATUS_COMPLETE = "complete"
+CONTROL_STATUS_ERROR = "error"
+
+
+def _job_status_label(job: StreamJob) -> str:
+    if job.status is StreamJobStatus.COMPLETE:
+        return CONTROL_STATUS_COMPLETE
+    if job.status is StreamJobStatus.ERROR:
+        return CONTROL_STATUS_ERROR
+    if job.cancelled:
+        return CONTROL_STATUS_CANCELED
+    if job.paused:
+        return CONTROL_STATUS_PAUSED
+    return CONTROL_STATUS_RUNNING
+
+
+def _embedding_status_label(state: EmbeddingStreamState) -> str:
+    if state.failed:
+        return CONTROL_STATUS_ERROR
+    if state.cancelled:
+        return CONTROL_STATUS_CANCELED
+    if state.paused:
+        return CONTROL_STATUS_PAUSED
+    return CONTROL_STATUS_RUNNING
 
 
 async def cancel_stream(stream_id: str) -> bool:
@@ -215,6 +259,8 @@ async def cancel_stream(stream_id: str) -> bool:
                 return False
             state.cancelled = True
             state.accepting = False
+            # Wake any chunk waiting on a pause so it observes the cancel.
+            state._resume.set()
             done = state.done
             total = state.total
         await stream_job_manager.publish(
@@ -238,8 +284,84 @@ async def cancel_stream(stream_id: str) -> bool:
         if job.cancelled:
             return False
         job.cancelled = True
+        # Release a paused ingest loop so it observes the cancel and stops.
+        job._resume.set()
         job._condition.notify_all()
     return True
+
+
+async def set_stream_paused(stream_id: str, paused: bool) -> tuple[bool, str | None]:
+    """Pause or resume an ingest or embedding stream job.
+
+    Mirrors ``cancel_stream``: resolves ``stream_id`` to an embedding state first,
+    else an ingest job. Idempotent — re-pausing/re-resuming is a no-op that still
+    reports the current status. Returns ``(found, status_label)`` where ``found``
+    is False for an unknown/finished stream (the caller maps that to 404) and
+    ``status_label`` is one of the ``CONTROL_STATUS_*`` values.
+    """
+    cleaned = str(stream_id or "").strip()
+    if not cleaned:
+        return False, None
+
+    state = _embedding_states.get(cleaned)
+    if state is not None:
+        async with state._lock:
+            if state.failed or state.cancelled:
+                # Terminal already — nothing to toggle.
+                return False, _embedding_status_label(state)
+            state.paused = paused
+            if paused:
+                state._resume.clear()
+            else:
+                state._resume.set()
+            label = _embedding_status_label(state)
+        await stream_job_manager.publish(
+            cleaned,
+            {
+                "type": "paused" if paused else "resumed",
+                "kind": "embedding",
+                "done": state.done,
+                "total": state.total,
+            },
+        )
+        return True, label
+
+    job = stream_job_manager.get(cleaned)
+    if job is None or job.status in {StreamJobStatus.COMPLETE, StreamJobStatus.ERROR}:
+        return False, None
+    async with job._condition:
+        if job.cancelled:
+            return False, _job_status_label(job)
+        job.paused = paused
+        if paused:
+            job._resume.clear()
+        else:
+            job._resume.set()
+        job._condition.notify_all()
+        label = _job_status_label(job)
+    await stream_job_manager.publish(
+        cleaned,
+        {
+            "type": "paused" if paused else "resumed",
+            "kind": "ingest",
+            "stored": job.total_ids,
+        },
+    )
+    return True, label
+
+
+def stream_status(stream_id: str) -> str | None:
+    """Current control status of a stream (``None`` if unknown/expired)."""
+    cleaned = str(stream_id or "").strip()
+    if not cleaned:
+        return None
+    state = _embedding_states.get(cleaned)
+    if state is not None:
+        return _embedding_status_label(state)
+    job = stream_job_manager.get(cleaned)
+    if job is None:
+        return None
+    return _job_status_label(job)
 
 
 async def create_embedding_stream() -> str:
@@ -333,6 +455,15 @@ async def schedule_embedding_batch(
             await _maybe_finish_embedding(state_inner)
 
     for start in range(0, len(unique_ids), _EMBED_PROGRESS_CHUNK):
+        # Hold before spending the next chunk of OpenAI/Milvus work while paused;
+        # resume() or cancel() sets the event. cancel_stream sets it too so a
+        # paused-then-cancelled batch is released and observes the cancel below.
+        pause_state = _embedding_states.get(stream_id)
+        if pause_state is not None and pause_state.paused and not pause_state.cancelled:
+            await pause_state._resume.wait()
+        gate_state = _embedding_states.get(stream_id)
+        if gate_state is None or gate_state.cancelled:
+            return
         chunk = unique_ids[start : start + _EMBED_PROGRESS_CHUNK]
         try:
             # Soft-failures inside embed_batch return fewer ids; still advance by chunk size.
@@ -437,6 +568,12 @@ async def run_paged_search_stream(
         while page <= _MAX_APOLLO_PAGES and job.total_ids < _MAX_SEARCH_ENTRIES:
             if job.cancelled:
                 break
+            if job.paused:
+                # Hold before spending the next Apollo page of credits; resume()
+                # or cancel() sets the event. Pause takes effect within one page.
+                await job._resume.wait()
+                if job.cancelled:
+                    break
             page_params = {**base_params, "page": page, "per_page": per_page}
             mongo_ids, apollo_raw, result_count = await fetch_page(page_params)
             if job.cancelled:

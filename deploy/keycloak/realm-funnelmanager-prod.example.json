@@ -41,6 +41,10 @@
       {
         "name": "agents-access",
         "description": "Human access to the agents API (/api/agents, all methods). Per-service access role — gates API access, not rows. Assign to human users in the Keycloak console. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
+      },
+      {
+        "name": "jobs-internal",
+        "description": "Internal-jobs trust boundary: the ONLY role that may reach a producer's /internal/jobs/* endpoints (job-event stream reads + pause/resume/cancel control). MACHINE role held by the jobs client's service account (client-credentials, azp=jobs) — NOT a human; the acting human rides as audit metadata. Scoped to /internal/jobs on the v1 producers search+agents. Deliberately NOT a composite of admin. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
       }
     ]
   },
@@ -59,6 +63,14 @@
       "serviceAccountClientId": "mcp",
       "realmRoles": [
         "internal-service"
+      ]
+    },
+    {
+      "username": "service-account-jobs",
+      "enabled": true,
+      "serviceAccountClientId": "jobs",
+      "realmRoles": [
+        "jobs-internal"
       ]
     }
   ],

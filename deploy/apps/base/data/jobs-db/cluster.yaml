@@ -1,0 +1,53 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: jobs-db
+  labels:
+    app.kubernetes.io/name: jobs-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  # Single instance today; anti-affinity is already in place so flipping
+  # instances to 2 spreads replicas across workers with no other change.
+  instances: 1
+  inheritedMetadata:
+    labels:
+      app.kubernetes.io/name: jobs-db
+      app.kubernetes.io/part-of: funnelmanager
+    annotations:
+      # CNPG's init jobs fight sidecars (the Envoy container never exits, so
+      # the bootstrap Job never completes) and the non-mesh operator must
+      # reach the instance manager — same reason the identity namespace is
+      # not injected. NetworkPolicies fence these pods instead.
+      sidecar.istio.io/inject: "false"
+  bootstrap:
+    initdb:
+      database: funnelmanager_jobs
+      owner: funnel
+  storage:
+    size: 5Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  affinity:
+    nodeSelector:
+      role: worker
+    enablePodAntiAffinity: true
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+  backup:
+    retentionPolicy: "14d"
+    barmanObjectStore:
+      destinationPath: s3://funnelmanager-1/jobs-db
+      endpointURL: https://us-lax-4.linodeobjects.com
+      s3Credentials:
+        accessKeyId:
+          name: objectstore-backups
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: objectstore-backups
+          key: ACCESS_SECRET_KEY

@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - app-db
   - mail-db
+  - jobs-db
   - mongo
   - mongo-backup
   - milvus

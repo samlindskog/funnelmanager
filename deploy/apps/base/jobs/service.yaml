@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jobs
+  labels:
+    app.kubernetes.io/name: jobs
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: jobs
+  ports:
+    - name: http
+      port: 8005
+      targetPort: 8005

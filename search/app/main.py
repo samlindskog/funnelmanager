@@ -2,14 +2,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
-
 from fm_runtime import anonymous, install
+from sqlalchemy import text
 
 from app import models  # noqa: F401 — register ORM metadata
 from app.config import get_settings
 from app.database import engine, init_db
-from app.routers import search
+from app.routers import internal_jobs, mcp, search
 
 
 @asynccontextmanager
@@ -37,6 +36,11 @@ app.add_middleware(
 )
 
 app.include_router(search.router)
+# MCP-facing surface (/api/search/mcp/v1/*) — distinct handlers from the UI routes.
+app.include_router(mcp.router)
+# Producer side of the jobs contract (/internal/jobs/v1/*) — jobs service only
+# (jobs-internal role); not nginx-routed.
+app.include_router(internal_jobs.router)
 
 
 @app.get("/api/search/health")

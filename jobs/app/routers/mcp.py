@@ -109,9 +109,14 @@ async def control_job(
     job_id: int,
     action: str,
     db: AsyncSession = _DB,
-    _principal: Principal = _PRINCIPAL,
+    principal: Principal = _PRINCIPAL,
 ) -> ControlResultOut:
     """Pause/resume/cancel a job by PROXYING to its owning app's control API.
+
+    The human is authorized HERE (audience ``jobs`` + grant, via
+    ``require_principal`` / PrincipalMiddleware). The downstream control call
+    then authenticates as the jobs service account and carries ``principal`` only
+    as audit metadata (see :func:`app.control.proxy_control`).
 
     Idempotent: re-issuing an action returns the resulting status; controlling a
     job already in a terminal status is a no-op returning that status."""
@@ -124,7 +129,7 @@ async def control_job(
         ) from exc
 
     job = await _get_job_or_404(db, job_id)
-    new_status = await proxy_control(db, job, control_action)
+    new_status = await proxy_control(db, job, control_action, principal)
     return ControlResultOut(
         id=job.id,
         app=job.app,

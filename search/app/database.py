@@ -83,3 +83,12 @@ async def init_db() -> None:
                 "ON search_history (username)"
             )
         )
+        # Cross-user attribution (fm_origin / azp). create_all won't alter an
+        # existing table, so add these here; legacy rows default to a direct
+        # human call (origin='user', actor='').
+        await _add_column_if_missing(
+            conn, "search_history", "origin", "VARCHAR(16) NOT NULL DEFAULT 'user'"
+        )
+        await _add_column_if_missing(
+            conn, "search_history", "actor", "VARCHAR(128) NOT NULL DEFAULT ''"
+        )

@@ -595,6 +595,30 @@ class LeadsClient:
         )
         return data if isinstance(data, dict) else {"stream_id": cleaned, "cancelled": True}
 
+    async def stream_control(self, stream_id: str, action: str) -> dict[str, Any]:
+        """Pause/resume/cancel a leads stream via its internal control hook.
+
+        This is the leads-side hook search's ``/internal/jobs/v1/{id}/{action}``
+        control proxy maps onto. Idempotent on the leads side; returns
+        ``{stream_id, action, status, applied}``.
+        """
+        cleaned = str(stream_id or "").strip()
+        normalized = str(action or "").strip().lower()
+        if not cleaned:
+            raise HTTPException(status_code=400, detail="stream_id is required")
+        if normalized not in {"pause", "resume", "cancel"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported control action {action!r}; expected pause, resume, or cancel",
+            )
+        data = await self._request(
+            "POST",
+            f"/api/leads/stream/{quote(cleaned, safe='')}/control/{normalized}",
+        )
+        if isinstance(data, dict):
+            return data
+        return {"stream_id": cleaned, "action": normalized, "status": "unknown", "applied": False}
+
     async def subscribe_streams(self, stream_ids: list[str]) -> AsyncIterator[dict[str, Any]]:
         """Yield NDJSON events from one or more leads stream jobs."""
         cleaned = [str(item).strip() for item in stream_ids if str(item or "").strip()]

@@ -7,13 +7,17 @@ the producer's ``GET /internal/jobs/v1/stream`` (NDJSON of
 
 Design rules from the build plan:
 
-- **Exchange, never forward.** Each subscriber calls through
-  :class:`fm_runtime.InternalClient` with ``audience = <producer name>`` and NO
-  request principal, so the broker mints a client-credentials token for this
-  service's own identity (``azp = jobs``) scoped to the producer's audience
-  (``svc-<producer>`` optional client scope — v1: ``jobs->search``,
-  ``jobs->agents``). The producer authorizes the ``jobs`` caller on its
-  internal stream; the stream is READ-ONLY.
+- **Exchange, never forward — as the jobs SERVICE ACCOUNT.** Each subscriber
+  calls through :class:`fm_runtime.InternalClient` with
+  ``audience = <producer name>`` and NO request principal, so the broker mints a
+  client-credentials token for this service's own identity (``azp = jobs``)
+  scoped to the producer's audience (``svc-<producer>`` optional client scope —
+  v1: ``jobs->search``, ``jobs->agents``). The producer authorizes that ``jobs``
+  service account by the dedicated ``jobs-internal`` realm role (Phase 2 trust
+  boundary): its ``/internal/jobs/v1/*`` endpoints are callable ONLY by ``jobs``.
+  The control proxy (:mod:`app.control`) authenticates the SAME way against the
+  SAME grant — the only difference is that the stream is READ-ONLY while control
+  is a write carrying the acting human as audit metadata.
 - **Tolerate an absent/unreachable producer.** v1 producers (`search`,
   `agents`) do not exist yet. A connection that fails or ends reconnects with
   capped exponential backoff; the task NEVER crashes and never brings down the

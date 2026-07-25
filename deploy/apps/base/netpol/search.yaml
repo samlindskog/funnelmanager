@@ -22,6 +22,16 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+    # jobs subscribes to search's /internal/jobs/v1 stream and proxies its
+    # control API (search is the v1 job producer). OPA still gates the
+    # request on the jobs-internal role + the jobs->search exchange edge.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: jobs
+      ports:
+        - protocol: TCP
+          port: 8000
   egress:
     - to:
         - podSelector:

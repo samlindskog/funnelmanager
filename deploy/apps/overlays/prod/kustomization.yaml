@@ -6,6 +6,7 @@ resources:
   - ../../base/leads
   - ../../base/mail
   - ../../base/mcp
+  - ../../base/jobs
   - ../../base/frontend
   - ../../base/mailui
   # Data stack (CNPG clusters, mongo, milvus, etcd, minio) — authored under
@@ -24,6 +25,8 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/mail
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
   - name: ghcr.io/samlindskog/funnelmanager/mcp
+    newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
+  - name: ghcr.io/samlindskog/funnelmanager/jobs
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
   - name: ghcr.io/samlindskog/funnelmanager/frontend
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6

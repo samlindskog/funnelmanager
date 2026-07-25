@@ -81,13 +81,24 @@ The platform runs **runtime AI agents** that complete a user's task by
 driving the product's own APIs through MCP. Three new workloads, same
 conventions (dir = compose service = container/DNS = image = `/api/{name}`):
 
-- **`jobs`** (`:8005`, internal/loopback like `mcp`, own db
-  `funnelmanager_jobs`) — the one place that knows every running job.
-  Subscribes to each producer's internal NDJSON stream
+- **`jobs`** (`:8005`, internal/loopback like `mcp`, own dedicated Postgres
+  `jobs-db` / db `funnelmanager_jobs`) — the one place that knows every running
+  job. Subscribes to each producer's internal NDJSON stream
   (`GET /internal/jobs/v1/stream`, exchanging → the producer's audience) and
   persists job state; proxies `pause|resume|cancel` to the owning app's
-  `/internal/jobs/v1/*`. v1 producers are **`search` + `agents`** only
-  (config-driven). Exposes MCP tools (`/api/jobs/mcp/v1/*`).
+  `/internal/jobs/v1/*`. Reaching those `/internal/jobs/*` endpoints is the
+  machine-only **`jobs-internal`** realm role, held by the `jobs` client's
+  service account (`azp=jobs`, client-credentials) — never a human; the acting
+  human rides as audit metadata. The producer list is **config-driven**
+  (`JOBS_PRODUCERS`, `name=base_url` pairs): v1 producers are **`search` +
+  `agents`**, but until the `agents` service is deployed the wired config points
+  at **`search` only** (`search=http://search:8000`) — add `agents`/`mail` later
+  with no code change. Exposes MCP tools (`/api/jobs/mcp/v1/*`). **Now wired**
+  into `docker-compose.{dev,prod}.yml` (with a dedicated `jobs-db` container,
+  the `mail-db` pattern) and k3s (`deploy/apps/base/jobs`,
+  `deploy/apps/base/data/jobs-db`, netpol `jobs`/`jobs-db`, both overlays); the
+  `jobs→search` caller edge + `jobs→jobs-db` TCP pairing live in
+  `deploy/policy/data.json`.
 - **`agents`** (`:8006`, `/api/agents/*`) — a pydantic-ai backend that runs
   runtime AI agents. Each agent is an **MCP client** acting under the human's
   identity via exchange with `fm_origin=agent`; it acts **exclusively**
