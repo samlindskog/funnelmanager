@@ -265,7 +265,10 @@ services:
       # Script provider: carries fm_origin across every exchange hop so an
       # agent-initiated origin ("alice (via agent)") survives mcp->search->....
       - ./deploy/keycloak/providers/fm-origin-provider.jar:/opt/keycloak/providers/fm-origin-provider.jar:ro
-      - keycloak_data_dev:/opt/keycloak/data/h2
+      # No H2 named volume: a fresh named volume mounted at data/h2 is root-owned,
+      # so KC (uid 1000) can't write its H2 files (AccessDenied on startup). Dev
+      # re-imports the realm from the bind mount every start, so ephemeral
+      # in-container H2 is correct and avoids stale-realm drift.
     ports:
       - "${HOST_BIND:-}8080:8080"
     healthcheck:
@@ -417,6 +420,5 @@ volumes:
   etcd_data_dev:
   minio_data_dev:
   milvus_data_dev:
-  keycloak_data_dev:
   frontend_node_modules:
   mailui_node_modules:
