@@ -39,6 +39,13 @@ agent fleet (`.claude/agents/`). Each owning agent reads this plus the project
    confirmation to its human** (never auto-confirm). Concrete default: **mailbox backup
    > 2 GB** requires confirmation. Provide the estimate→confirm helper in `fm_runtime`
    so every service does it identically. (Folded into `CLAUDE.md` in Phase 0.)
+   **Agent hard-enforcement (decided Phase 4, built Phase 5):** the gate **rejects
+   `confirm=true` when `origin=agent`** on an over-threshold action — a runtime agent
+   can never self-confirm. Instead the run **pauses** and surfaces a *pending approval*
+   to the initiating human (in `agentsui`); the human approves out-of-band and the run
+   resumes. The confirmation helper becomes origin-aware; `agents` gains a pending-
+   approval store + resume path; `agentsui` renders the approval. This is prompt-only
+   today — Phase 5 makes it real (agent-started campaigns are the key case).
 
 ## Locked cross-cutting decisions
 - **Naming (total convention):** new services `jobs`, `agents` (pydantic-ai backend),
