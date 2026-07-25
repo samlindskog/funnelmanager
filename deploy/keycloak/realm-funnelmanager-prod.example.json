@@ -11,11 +11,36 @@
     "realm": [
       {
         "name": "admin",
-        "description": "Full access to every Funnel Manager service (checked by OPA data documents)"
+        "description": "Full access to every Funnel Manager service (service:* in OPA data documents / fm_runtime grants). Composite of the per-service *-access roles so an admin can reach every API even where policy is later narrowed to specific service grants.",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "search-access",
+            "mail-access",
+            "jobs-access",
+            "agents-access"
+          ]
+        }
       },
       {
         "name": "internal-service",
         "description": "Service-account identity for detached background work (search/mcp continue jobs under client credentials once the principal's token expires) — grants leads API access only (OPA data documents / fm_runtime grants)"
+      },
+      {
+        "name": "search-access",
+        "description": "Human access to the search API (/api/search, all methods). Per-service access role — gates whether a principal may call the search API at all; within the service every user sees the same data (no per-row hiding). Assign to human users in the Keycloak console. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
+      },
+      {
+        "name": "mail-access",
+        "description": "Human access to the mail API (/api/mail, all methods). Per-service access role — gates API access, not rows. Assign to human users in the Keycloak console. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
+      },
+      {
+        "name": "jobs-access",
+        "description": "Human access to the jobs API (/api/jobs, all methods). Per-service access role — gates API access, not rows. Assign to human users in the Keycloak console. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
+      },
+      {
+        "name": "agents-access",
+        "description": "Human access to the agents API (/api/agents, all methods). Per-service access role — gates API access, not rows. Assign to human users in the Keycloak console. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
       }
     ]
   },

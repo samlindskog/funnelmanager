@@ -24,10 +24,31 @@ from typing import Any
 from fm_runtime.settings import get_runtime_settings
 
 # Keep in sync with deploy/policy/data.json (funnelmanager.roles).
+#
+# SECURITY-REVIEW: authorization model = one realm role per human-facing service
+# API. Each `<service>-access` role grants FULL methods within exactly that
+# service's `/api/<service>` prefix (principle 1: within a service every user
+# sees the same data — the role only gates whether you may call the API at all,
+# not which rows). `admin` keeps service:* (everything); `internal-service` stays
+# leads-only (detached-job client-credentials identity). Humans get NO direct
+# `leads` grant — leads is internal, reached via search/mcp. Change this table
+# and deploy/policy/data.json together (verify_policy asserts they are equal).
 _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
     "admin": [{"service": "*", "methods": ["*"], "path_prefix": "/"}],
     "internal-service": [
         {"service": "leads", "methods": ["*"], "path_prefix": "/api/leads"}
+    ],
+    "search-access": [
+        {"service": "search", "methods": ["*"], "path_prefix": "/api/search"}
+    ],
+    "mail-access": [
+        {"service": "mail", "methods": ["*"], "path_prefix": "/api/mail"}
+    ],
+    "jobs-access": [
+        {"service": "jobs", "methods": ["*"], "path_prefix": "/api/jobs"}
+    ],
+    "agents-access": [
+        {"service": "agents", "methods": ["*"], "path_prefix": "/api/agents"}
     ],
 }
 

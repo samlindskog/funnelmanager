@@ -14,7 +14,11 @@ the `jobs` consumer never drift:
 Versioning (stability contract): these routes are ``/internal/jobs/v1/*``.
 Within v1, changes are **additive only** (new optional fields, new status/type
 values are read leniently); a breaking change ships as ``/internal/jobs/v2/*``.
-``JobEvent.from_dict`` therefore tolerates unknown keys and preserves them.
+``JobEvent.from_dict`` therefore tolerates unknown keys and preserves them, and
+an unrecognized ``status`` from a newer producer is read leniently — the raw
+word is preserved (``JobEvent.raw_status`` / ``meta['raw_status']``) and the
+event falls back to a safe non-terminal status so it is **never dropped** and a
+job is never wedged in a status this version does not understand.
 
 Dependency-free (stdlib dataclasses + enums), so it imports anywhere a producer
 or the consumer runs without pulling a validation stack.
@@ -45,16 +49,41 @@ class JobStatus(str, Enum):
 
     @classmethod
     def coerce(cls, value: object) -> JobStatus:
+        """Strict parse — raises ``ValueError`` on an unknown status. Use this to
+        **validate** a value (e.g. a user-supplied query filter or a control
+        reply) where an unrecognized word should be rejected. To read a value off
+        the job-event wire without ever dropping it, use :meth:`parse`."""
         try:
             return cls(str(value))
         except ValueError as exc:
             raise ValueError(f"unknown job status {value!r}") from exc
+
+    @classmethod
+    def parse(cls, value: object) -> tuple[JobStatus, str | None]:
+        """Lenient parse for the event wire — **never raises**.
+
+        Returns ``(status, raw)``: for a known word, ``(that_status, None)``; for
+        an unrecognized one, ``(UNKNOWN_STATUS_FALLBACK, <raw string>)`` so the
+        caller can preserve the original value while falling back to a safe
+        non-terminal status. This is what keeps a newer producer's additive
+        status from dropping an event or wedging a job (additive-within-v1)."""
+        raw = str(value)
+        try:
+            return cls(raw), None
+        except ValueError:
+            return UNKNOWN_STATUS_FALLBACK, raw
 
 
 #: Statuses a job never leaves — the consumer stops expecting further events.
 TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
     {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELED}
 )
+
+#: Safe fallback for an unrecognized wire status. Deliberately **non-terminal**
+#: (``RUNNING``) so a status this version does not know can never park a job in a
+#: terminal state and stop it from receiving further events; the raw word is kept
+#: alongside (see :meth:`JobStatus.parse` / ``JobEvent.raw_status``).
+UNKNOWN_STATUS_FALLBACK: JobStatus = JobStatus.RUNNING
 
 
 class JobControlAction(str, Enum):
@@ -94,6 +123,10 @@ class JobEvent:
     - ``exit_status``: terminal detail (e.g. ``ok`` / an error summary); omitted
       until the job reaches a terminal status.
     - ``meta``: app-specific extras (counts, stream ids, cancel handles, …).
+    - ``raw_status``: set only when the wire carried a status word this version
+      does not recognize — the original string, preserved so nothing is lost
+      while ``status`` falls back to a safe non-terminal value. Also mirrored
+      into ``meta['raw_status']`` so it survives ``to_dict`` round-trips.
     """
 
     job_id: str
@@ -106,11 +139,18 @@ class JobEvent:
     ts: str = field(default_factory=_now_iso)
     exit_status: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    raw_status: str | None = None
 
     def __post_init__(self) -> None:
-        # Accept a bare string status/progress from callers and normalize.
+        # Accept a bare string status/progress from callers and normalize. An
+        # unrecognized status is read leniently (never raises): keep the raw word
+        # and fall back to a safe non-terminal status so the event is not lost.
         if not isinstance(self.status, JobStatus):
-            self.status = JobStatus.coerce(self.status)
+            self.status, raw = JobStatus.parse(self.status)
+            if raw is not None and self.raw_status is None:
+                self.raw_status = raw
+        if self.raw_status is not None:
+            self.meta.setdefault("raw_status", self.raw_status)
         if self.progress is not None:
             self.progress = float(self.progress)
 
@@ -160,13 +200,16 @@ class JobEvent:
         for key, value in data.items():
             if key not in known:
                 meta[key] = value
+        # Pass the bare status through so __post_init__ reads it leniently — an
+        # unknown word is preserved (raw_status) and falls back, never dropped.
+        raw_status = meta.get("raw_status")
         event = cls(
             job_id=str(data.get("job_id") or ""),
             type=str(data.get("type") or ""),
             user=str(data.get("user") or ""),
             origin=str(data.get("origin") or "user"),
             actor=str(data.get("actor") or ""),
-            status=JobStatus.coerce(data.get("status") or JobStatus.RUNNING.value),
+            status=data.get("status") or JobStatus.RUNNING.value,
             progress=(
                 None if data.get("progress") is None else float(data["progress"])
             ),
@@ -175,6 +218,7 @@ class JobEvent:
                 None if data.get("exit_status") is None else str(data["exit_status"])
             ),
             meta=meta,
+            raw_status=str(raw_status) if raw_status is not None else None,
         )
         return event
 
@@ -193,6 +237,7 @@ __all__ = [
     "JOBS_CONTROL_PATH_TEMPLATE",
     "JOBS_STREAM_PATH",
     "TERMINAL_STATUSES",
+    "UNKNOWN_STATUS_FALLBACK",
     "JobControlAction",
     "JobEvent",
     "JobStatus",

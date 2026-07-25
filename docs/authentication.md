@@ -110,12 +110,23 @@ distinguishes an agent-initiated call is a propagated **`fm_origin` claim**:
 - With `FM_ENFORCE_GRANTS=true` (set in both compose files) the middleware
   also applies the **role grants** — the same
   `{service, methods, path_prefix}` rule OPA's `grant_ok_for` enforces in
-  the mesh, keyed by the JWT's realm roles. Grant data comes from
-  `FM_ROLE_GRANTS` (inline JSON) or `FM_ROLE_GRANTS_FILE` (a full OPA
-  `data.json` works); unset, the built-in default mirrors
-  `deploy/policy/data.json` (`admin` = everything, `internal-service` =
-  leads only). No covering grant ⇒ 403. This keeps compose deployments
-  fail-closed per request even though they run no OPA.
+  the mesh, keyed by the JWT's realm roles. The human-facing model is **one
+  access role per service**: `search-access` → `/api/search`, `mail-access` →
+  `/api/mail`, `jobs-access` → `/api/jobs`, `agents-access` → `/api/agents`
+  (full methods within that prefix, nothing else). A principal may call a
+  service **only if it holds that service's access role**; the role gates
+  *whether you may call the API*, not *which rows* you see — within a service
+  every principal with access sees the same data (principle 1). Humans get
+  **no direct `leads` grant** — leads is internal, reached via search/mcp.
+  `admin` = everything (`service:*`, and it is a Keycloak composite of the four
+  `-access` roles); `internal-service` = leads only (the detached-job
+  client-credentials identity). Grant data comes from `FM_ROLE_GRANTS` (inline
+  JSON) or `FM_ROLE_GRANTS_FILE` (a full OPA `data.json` works); unset, the
+  built-in default mirrors `deploy/policy/data.json`. No covering grant ⇒ 403.
+  This keeps compose deployments fail-closed per request even though they run
+  no OPA. Code ⇔ policy ⇔ realm stay provably in lockstep — verify with
+  `python -m fm_runtime.export --check deploy/policy/data.json
+  --realm deploy/keycloak/realm-funnelmanager-dev.json`.
 - Routes annotated `@anonymous("reason")` tolerate an absent principal.
   That annotation is the **single source of truth** for the
   public-anonymous allowlist (exported with `python -m fm_runtime.export`,
@@ -160,9 +171,14 @@ The MCP server exchanges it toward leads, so the agent acts as its own
 principal with `azp: mcp`, and OPA can constrain the delegation.
 
 **Admin/user management:** the Keycloak console (linked from the hub for
-admin-role users). There is exactly one human principal today (`admin`,
-realm role `admin`); adding users/roles is realm + OPA-data change, not a
-code change.
+admin-role users). The bundled dev realm ships one human principal (`admin`,
+realm role `admin` — a composite of every `-access` role, so it reaches all
+services). To grant a non-admin human access to specific services, assign the
+per-service `-access` realm roles (`search-access`, `mail-access`,
+`jobs-access`, `agents-access`) in the console — a user with only
+`search-access` may call `/api/search` and gets 403 elsewhere. Adding
+users/roles is a realm change (mirrored in `deploy/policy/data.json` +
+`fm_runtime/grants.py`), not a code change.
 
 ## Dev vs prod
 
