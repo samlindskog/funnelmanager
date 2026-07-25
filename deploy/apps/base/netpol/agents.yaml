@@ -1,0 +1,67 @@
+# agents: reached from the ingress gateway (its /api/agents task API) and from
+# jobs (agents is a v1 job producer — jobs subscribes to its /internal/jobs/v1
+# stream and proxies its control API). Egress: mcp (the runtime agent's ONLY
+# capability surface — it acts exclusively through MCP tools), its own Postgres
+# (agents-db), and Keycloak (RFC 8693 agents->mcp exchange). DNS via allow-dns.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents
+  labels:
+    app.kubernetes.io/name: agents
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agents
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 8006
+    # jobs subscribes to agents' /internal/jobs/v1 stream and proxies its
+    # control API (agents is a v1 job producer). OPA still gates the request
+    # on the jobs-internal role + the jobs->agents exchange edge.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: jobs
+      ports:
+        - protocol: TCP
+          port: 8006
+  egress:
+    # mcp: the runtime agent acts exclusively through MCP tools (OPA gates on
+    # the agents->mcp exchange edge + workload identity).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - protocol: TCP
+          port: 8003
+    # Dedicated Postgres (agents-db). CNPG labels instance pods with
+    # cnpg.io/cluster, not app.kubernetes.io/name.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: agents-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Keycloak (in-cluster token endpoint for RFC 8693 exchange).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080

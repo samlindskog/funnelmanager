@@ -65,7 +65,7 @@ spec:
             # otherwise blackhole raw-TCP traffic (Postgres/Mongo/Milvus)
             # in the namespace (istioctl IST0133). TCP callers are gated by
             # OPA (workload identity) + the L4 policies + NetworkPolicies.
-            ports: ["8000", "8001", "8003", "8004", "8005", "8080", "80"]
+            ports: ["8000", "8001", "8003", "8004", "8005", "8006", "8080", "80"]
             notPaths:
               # The security-reviewed public-anonymous allowlist (Phase 0).
               - "/api/leads/webhooks/apollo"
@@ -79,6 +79,7 @@ spec:
               - "/api/search/health"
               - "/api/leads/health"
               - "/api/mail/health"
+              - "/api/agents/health"
               - "/health"
               # MCP transport: the principal token rides inside tool calls;
               # OPA still gates on the calling workload identity.
@@ -94,6 +95,7 @@ spec:
               - "/callback"
               - "/search"
               - "/mail/*"
+              - "/agents/*"
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -112,7 +114,7 @@ spec:
             # otherwise blackhole raw-TCP traffic (Postgres/Mongo/Milvus)
             # in the namespace (istioctl IST0133). TCP callers are gated by
             # OPA (workload identity) + the L4 policies + NetworkPolicies.
-            ports: ["8000", "8001", "8003", "8004", "8005", "8080", "80"]
+            ports: ["8000", "8001", "8003", "8004", "8005", "8006", "8080", "80"]
             notPaths:
               - "/api/leads/webhooks/apollo"
               - "/api/leads/webhooks/apollo/*"
@@ -123,6 +125,7 @@ spec:
               - "/api/search/health"
               - "/api/leads/health"
               - "/api/mail/health"
+              - "/api/agents/health"
               - "/health"
               - "/mcp"
               - "/mcp/*"
@@ -135,3 +138,4 @@ spec:
               - "/callback"
               - "/search"
               - "/mail/*"
+              - "/agents/*"

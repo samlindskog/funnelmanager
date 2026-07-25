@@ -7,8 +7,10 @@ resources:
   - ../../base/mail
   - ../../base/mcp
   - ../../base/jobs
+  - ../../base/agents
   - ../../base/frontend
   - ../../base/mailui
+  - ../../base/agentsui
   # Data stack (CNPG clusters, mongo, milvus, etcd, minio) — authored under
   # base/data; this overlay just instantiates it in the prod namespace.
   - ../../base/data
@@ -28,9 +30,13 @@ images:
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
   - name: ghcr.io/samlindskog/funnelmanager/jobs
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
+  - name: ghcr.io/samlindskog/funnelmanager/agents
+    newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
   - name: ghcr.io/samlindskog/funnelmanager/frontend
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
   - name: ghcr.io/samlindskog/funnelmanager/mailui
+    newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
+  - name: ghcr.io/samlindskog/funnelmanager/agentsui
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
   - name: ghcr.io/samlindskog/funnelmanager/backup
     newTag: sha-a1f68f9221f147420f5d63e6078a8b3831340ae6
@@ -50,7 +56,11 @@ configMapGenerator:
       - domain=x9bc433.win
       - cors-origins=https://x9bc433.win
       - public-base-url=https://x9bc433.win
-      - web-apps=
+      # Hub tiles (probe-gated: a tile shows only when its /whoami answers 2xx
+      # under the user's token — the backing service's authz is the source of
+      # truth). Setting web-apps replaces the built-in Search+Mail default, so
+      # list all three here.
+      - 'web-apps=[{"name":"Search","description":"Apollo person/company search","url":"/search","probe":"/api/search/whoami"},{"name":"Mail","description":"Google Workspace inboxes & sending","url":"/mail/","probe":"/api/mail/whoami"},{"name":"Agents","description":"AI agents that run tasks for you","url":"/agents/","probe":"/api/agents/whoami"}]'
       - 'admin-apps=[{"name":"Grafana","description":"Metrics, logs & dashboards","url":"https://grafana.x9bc433.win"}]'
 
 patches:

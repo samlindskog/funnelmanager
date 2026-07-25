@@ -58,6 +58,20 @@ spec:
         - name: mailui
           namespace: prod
           port: 8080
+    # Agents task API (browser-facing, like search/mail).
+    - matches:
+        - path: { type: PathPrefix, value: /api/agents/ }
+      backendRefs:
+        - name: agents
+          namespace: prod
+          port: 8006
+    # Standalone agents SPA (its nginx does the /agents/ SPA fallback).
+    - matches:
+        - path: { type: PathPrefix, value: /agents/ }
+      backendRefs:
+        - name: agentsui
+          namespace: prod
+          port: 8080
     # Hub/search SPA — catch-all last (its nginx does try_files fallback).
     - matches:
         - path: { type: PathPrefix, value: / }
@@ -100,6 +114,18 @@ spec:
         - path: { type: PathPrefix, value: /mail/ }
       backendRefs:
         - name: mailui
+          namespace: dev
+          port: 8080
+    - matches:
+        - path: { type: PathPrefix, value: /api/agents/ }
+      backendRefs:
+        - name: agents
+          namespace: dev
+          port: 8006
+    - matches:
+        - path: { type: PathPrefix, value: /agents/ }
+      backendRefs:
+        - name: agentsui
           namespace: dev
           port: 8080
     - matches:

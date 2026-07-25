@@ -315,7 +315,8 @@ all), because Keycloak let him into each service (principle 1).
 - Campaign sender = the initiating user's **own** connected mailboxes, possibly across
   **multiple domains**; `send_strategy` = `balanced` | `sequential` (user-configurable);
   the per-domain daily cap is always enforced.
-- Runtime-agent LLM defaults to a Claude model; provider/key config is a Phase-4 detail.
+- Runtime-agent LLM: **OpenAI** (user decision, Phase 4) via pydantic-ai; model configurable
+  via `AGENTS_LLM_MODEL`, `OPENAI_API_KEY` from the shared openai secret (as leads uses).
 - `jobs` has no UI in v1 (surfaced inside `agentsui`/mail/search progress + MCP). Add a
   jobs dashboard later if wanted.
 - `mail` is a **full mailbox client** (compose/send, inbox/sent/threads, search) across all

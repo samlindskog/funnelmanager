@@ -4,6 +4,7 @@ resources:
   - app-db
   - mail-db
   - jobs-db
+  - agents-db
   - mongo
   - mongo-backup
   - milvus

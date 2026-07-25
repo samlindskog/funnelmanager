@@ -1,0 +1,12 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+httpx==0.28.1
+pydantic-settings==2.9.1
+sqlalchemy==2.0.40
+asyncpg==0.30.0
+greenlet==3.2.1
+# Runtime AI-agent engine + its OpenAI model and MCP client. The *runtime*
+# agents' LLM is app config (AGENTS_LLM_MODEL / OPENAI_API_KEY) — separate from
+# whatever model builds this service. `mcp` extra pulls the FastMCP client used
+# to reach the internal MCP server; `openai` pulls the OpenAI provider.
+pydantic-ai-slim[openai,mcp]==2.18.0

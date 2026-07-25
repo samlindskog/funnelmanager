@@ -328,7 +328,7 @@ services:
       retries: 10
 
   # Jobs service (:8005) — subscribes to each producer's job-event stream and
-  # proxies its control API. v1 producer = search only (agents not wired yet).
+  # proxies its control API. v1 producers = search + agents.
   # Internal only: nginx never routes to it; published on loopback like mcp.
   jobs:
     image: ghcr.io/samlindskog/funnelmanager/jobs:${IMAGE_TAG:-prod}
@@ -348,10 +348,10 @@ services:
       # (mirrors deploy/policy/data.json). The jobs service account holds the
       # jobs-internal role (reaches producers' /internal/jobs/*).
       FM_ENFORCE_GRANTS: "true"
-      # Config-driven producer registry: v1 = search only (agents not wired
-      # yet). name=base_url; name is BOTH the Job.app value and the
-      # token-exchange audience (svc scope jobs->search).
-      JOBS_PRODUCERS: ${JOBS_PRODUCERS:-search=http://search:8000}
+      # Config-driven producer registry: v1 = search + agents. name=base_url;
+      # name is BOTH the Job.app value and the token-exchange audience (svc
+      # scopes jobs->search, jobs->agents).
+      JOBS_PRODUCERS: ${JOBS_PRODUCERS:-search=http://search:8000,agents=http://agents:8006}
     # Loopback-only publish like mcp: host-local inspection at 127.0.0.1:8005;
     # the internet cannot reach it and nginx never routes to it. PROD_JOBS_PORT
     # frees the host port when a second stack coexists on the box.
@@ -366,6 +366,78 @@ services:
         condition: service_started
       search:
         condition: service_started
+      agents:
+        condition: service_started
+
+  # Dedicated Postgres for the agents store — the agents service is the only
+  # consumer (own db funnelmanager_agents; follows the mail-db pattern).
+  agents-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: funnelmanager_agents
+    volumes:
+      - agents_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d funnelmanager_agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Agents service (:8006) — pydantic-ai runtime agents that act EXCLUSIVELY
+  # through MCP tools (agents->mcp RFC 8693 exchange, fm_origin=agent).
+  # Browser-facing (nginx-routed at /api/agents) AND a v1 job producer.
+  agents:
+    image: ghcr.io/samlindskog/funnelmanager/agents:${IMAGE_TAG:-prod}
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      # Dedicated agents-db container above.
+      DATABASE_URL: ${AGENTS_DATABASE_URL}
+      FM_SERVICE_NAME: agents
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: agents
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_AGENTS_SECRET}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      # The runtime agent's ONLY capability surface (internal MCP mount).
+      MCP_URL: ${MCP_URL:-http://mcp:8003/mcp}
+      # Runtime-agent LLM (OpenAI) — key shared with leads, model is plain config.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENTS_LLM_MODEL: ${AGENTS_LLM_MODEL:-gpt-4o-mini}
+    depends_on:
+      agents-db:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      mcp:
+        condition: service_started
+    expose:
+      - "8006"
+
+  # Standalone agents UI — static app served same-origin at /agents/ behind the
+  # frontend nginx so it shares the hub's session token.
+  agentsui:
+    image: ghcr.io/samlindskog/funnelmanager/agentsui:${IMAGE_TAG:-prod}
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      # Baked into /agents/config.js at container start (shared OIDC session
+      # with the hub — same public client).
+      FRONTEND_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FRONTEND_OIDC_CLIENT_ID: ${FRONTEND_OIDC_CLIENT_ID:-frontend}
+    expose:
+      - "80"
+    depends_on:
+      - agents
 
   frontend:
     image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}
@@ -388,12 +460,15 @@ services:
       - leads
       - mail
       - mailui
+      - agents
+      - agentsui
 
 volumes:
   keycloak_data:
   postgres_data:
   mail_postgres_data:
   jobs_postgres_data:
+  agents_postgres_data:
   mongo_data:
   etcd_data:
   minio_data:

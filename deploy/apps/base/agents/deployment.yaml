@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents
+  labels:
+    app.kubernetes.io/name: agents
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agents
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agents
+        app.kubernetes.io/part-of: funnelmanager
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8006"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: agents
+      nodeSelector:
+        role: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agents
+          # Tag is pinned only in overlays via the images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/agents
+          ports:
+            - name: http
+              containerPort: 8006
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: agents
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            # In-cluster token endpoint (split horizon) — agents performs the
+            # RFC 8693 agents->mcp exchange, and the public issuer host is
+            # unreachable under the namespace's default-deny egress.
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
+            - name: FM_OIDC_CLIENT_ID
+              value: agents
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-agents
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            # CNPG's generated `agents-db-app` secret has key `uri` (plain
+            # postgresql://); the app forces the asyncpg driver itself.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agents-db-app
+                  key: uri
+            # The runtime agent's ONLY capability surface — the in-cluster MCP
+            # streamable-HTTP mount. It acts exclusively through these tools.
+            - name: MCP_URL
+              value: http://mcp:8003/mcp
+            # Runtime-agent LLM (OpenAI) — key from the shared `openai` secret
+            # (same one leads uses); model is plain config.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai
+                  key: api-key
+            - name: AGENTS_LLM_MODEL
+              value: gpt-4o-mini
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: cors-origins

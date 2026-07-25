@@ -91,22 +91,33 @@ conventions (dir = compose service = container/DNS = image = `/api/{name}`):
   service account (`azp=jobs`, client-credentials) — never a human; the acting
   human rides as audit metadata. The producer list is **config-driven**
   (`JOBS_PRODUCERS`, `name=base_url` pairs): v1 producers are **`search` +
-  `agents`**, but until the `agents` service is deployed the wired config points
-  at **`search` only** (`search=http://search:8000`) — add `agents`/`mail` later
-  with no code change. Exposes MCP tools (`/api/jobs/mcp/v1/*`). **Now wired**
+  `agents`**, both now wired
+  (`search=http://search:8000,agents=http://agents:8006`) — add `mail`/others
+  later with no code change. Exposes MCP tools (`/api/jobs/mcp/v1/*`). Wired
   into `docker-compose.{dev,prod}.yml` (with a dedicated `jobs-db` container,
   the `mail-db` pattern) and k3s (`deploy/apps/base/jobs`,
   `deploy/apps/base/data/jobs-db`, netpol `jobs`/`jobs-db`, both overlays); the
-  `jobs→search` caller edge + `jobs→jobs-db` TCP pairing live in
+  `jobs→search`/`jobs→agents` caller edges + `jobs→jobs-db` TCP pairing live in
   `deploy/policy/data.json`.
 - **`agents`** (`:8006`, `/api/agents/*`) — a pydantic-ai backend that runs
-  runtime AI agents. Each agent is an **MCP client** acting under the human's
-  identity via exchange with `fm_origin=agent`; it acts **exclusively**
-  through MCP tools (no direct backend calls). Each run is itself a job.
+  runtime AI agents. **Browser-facing** (gateway/nginx-routed like search/mail;
+  gated by the `agents-access` realm role) and a **v1 job producer** (each run
+  is a job on `/internal/jobs/v1/*`, so `jobs` subscribes to it). Each agent is
+  an **MCP client** acting under the human's identity via exchange with
+  `fm_origin=agent`; it acts **exclusively** through MCP tools (no direct
+  backend calls). Backed by its own dedicated Postgres `agents-db`
+  (db `funnelmanager_agents`). **Now wired** into
+  `docker-compose.{dev,prod}.yml` (dedicated `agents-db` container) and k3s
+  (`deploy/apps/base/agents`, `deploy/apps/base/data/agents-db`, netpol
+  `agents`/`agents-db`, both overlays); its egress edges are `agents→mcp`
+  (exchange) and the `agents→agents-db` TCP pairing; the browser reaches it via
+  the gateway `/api/agents/` route + `azp_allow.agents` listing `frontend`.
 - **`agentsui`** (`/agents/`) — a standalone React/MUI app (mirrors `mailui`):
   own container behind nginx `/agents/`, shares the hub Keycloak session
   (localStorage `fm_oidc_*`); a `WEB_APPS` hub tile (same tile for everyone —
-  principle 1).
+  principle 1). Wired in `docker-compose.{dev,prod}.yml` and k3s
+  (`deploy/apps/base/agentsui`, netpol `agentsui`, both overlays); the gateway
+  routes `/agents/` to it.
 
 **Identity edges these add** (realm `svc-*` scopes + OPA `azp_allow` +
 `grants.py` `SVC_EXCHANGE_SCOPES`, kept in lockstep, provable with

@@ -16,6 +16,8 @@
         "/api/search/": "search",
         "/api/mail/": "mail",
         "/mail/": "mailui",
+        "/api/agents/": "agents",
+        "/agents/": "agentsui",
         "/": "frontend"
       },
       "callers": {
@@ -26,6 +28,7 @@
         "mail": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "frontend": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "mailui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "agentsui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "leads": [
           {"ns": "env", "sa": "search"},
           {"ns": "env", "sa": "mcp"},
@@ -35,8 +38,12 @@
             "path_prefixes": ["/api/leads/webhooks/"]
           }
         ],
-        "mcp": [],
-        "jobs": [{"ns": "env", "sa": "mcp"}]
+        "mcp": [{"ns": "env", "sa": "agents"}],
+        "jobs": [{"ns": "env", "sa": "mcp"}],
+        "agents": [
+          {"ns": "istio-ingress", "sa": "istio-ingress"},
+          {"ns": "env", "sa": "jobs", "path_prefixes": ["/internal/jobs"]}
+        ]
       },
       "azp_allow": {
         "search": ["frontend", "mcp", "jobs"],
@@ -44,7 +51,7 @@
         "leads": ["search", "mcp"],
         "mcp": ["agents"],
         "jobs": ["mcp"],
-        "agents": ["jobs"]
+        "agents": ["frontend", "jobs"]
       },
       "anonymous": [
         {
@@ -69,7 +76,8 @@
             "/health",
             "/api/search/health",
             "/api/leads/health",
-            "/api/mail/health"
+            "/api/mail/health",
+            "/api/agents/health"
           ],
           "reason": "probes and scrapes (cluster-internal; belt-and-suspenders)"
         },
@@ -86,6 +94,12 @@
           "reason": "static SPA shell must load pre-auth"
         },
         {
+          "service": "agentsui",
+          "methods": ["GET", "HEAD"],
+          "prefixes": ["/agents"],
+          "reason": "static SPA shell must load pre-auth"
+        },
+        {
           "service": "mcp",
           "methods": ["GET", "POST", "DELETE"],
           "prefixes": ["/mcp", "/health", "/healthz", "/readyz", "/metrics"],
@@ -99,7 +113,8 @@
         {"from": "leads", "to": "milvus"},
         {"from": "milvus", "to": "etcd"},
         {"from": "milvus", "to": "minio"},
-        {"from": "jobs", "to": "jobs-db"}
+        {"from": "jobs", "to": "jobs-db"},
+        {"from": "agents", "to": "agents-db"}
       ]
     },
     "roles": {

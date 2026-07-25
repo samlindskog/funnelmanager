@@ -10,11 +10,14 @@ resources:
   - mail.yaml
   - mcp.yaml
   - jobs.yaml
+  - agents.yaml
   - frontend.yaml
   - mailui.yaml
+  - agentsui.yaml
   - app-db.yaml
   - mail-db.yaml
   - jobs-db.yaml
+  - agents-db.yaml
   - mongo.yaml
   - milvus.yaml
   - etcd.yaml

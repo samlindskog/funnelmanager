@@ -333,8 +333,8 @@ services:
       retries: 10
 
   # Jobs service (:8005) — subscribes to each producer's
-  # /internal/jobs/v1/stream and proxies its control API. v1 producer = search
-  # only (agents not wired yet). Internal only: never routed through nginx;
+  # /internal/jobs/v1/stream and proxies its control API. v1 producers = search
+  # + agents. Internal only: never routed through nginx;
   # published on loopback in dev for host-local inspection (prod is loopback too).
   jobs:
     build:
@@ -356,10 +356,10 @@ services:
       # (mirrors deploy/policy/data.json). The jobs service account holds the
       # jobs-internal role (reaches producers' /internal/jobs/*).
       FM_ENFORCE_GRANTS: "true"
-      # Config-driven producer registry: v1 = search only (agents not wired
-      # yet). name=base_url; name is BOTH the Job.app value and the
-      # token-exchange audience (svc scope jobs->search).
-      JOBS_PRODUCERS: ${JOBS_PRODUCERS:-search=http://search:8000}
+      # Config-driven producer registry: v1 = search + agents. name=base_url;
+      # name is BOTH the Job.app value and the token-exchange audience (svc
+      # scopes jobs->search, jobs->agents).
+      JOBS_PRODUCERS: ${JOBS_PRODUCERS:-search=http://search:8000,agents=http://agents:8006}
     volumes:
       - ./jobs:/app
       - ./libs/fm_runtime:/libs/fm_runtime
@@ -375,6 +375,88 @@ services:
         condition: service_healthy
       search:
         condition: service_started
+      agents:
+        condition: service_started
+
+  # Dedicated Postgres for the agents store — the agents service is the only
+  # consumer (own db funnelmanager_agents; follows the mail-db pattern).
+  agents-db:
+    image: postgres:16-alpine
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-funnel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-funnel}
+      POSTGRES_DB: funnelmanager_agents
+    volumes:
+      - agents_postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-funnel} -d funnelmanager_agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Agents service (:8006) — runs pydantic-ai runtime agents that act
+  # EXCLUSIVELY through MCP tools (agents->mcp RFC 8693 exchange, fm_origin=agent).
+  # Browser-facing (nginx-routed at /api/agents like search/mail) AND a v1 job
+  # producer (jobs subscribes to its /internal/jobs/v1 stream).
+  agents:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile.dev
+    mem_limit: 768m
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@agents-db:5432/funnelmanager_agents
+      FM_SERVICE_NAME: agents
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: agents
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_AGENTS_SECRET:-dev-agents-secret}
+      # No mesh/OPA in compose - fm_runtime enforces the role grants itself
+      # (mirrors deploy/policy/data.json).
+      FM_ENFORCE_GRANTS: "true"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost}
+      # The runtime agent's ONLY capability surface (internal MCP mount).
+      MCP_URL: ${MCP_URL:-http://mcp:8003/mcp}
+      # Runtime-agent LLM (OpenAI) — key shared with leads (from .env), model
+      # is plain config.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENTS_LLM_MODEL: ${AGENTS_LLM_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./agents:/app
+      - ./libs/fm_runtime:/libs/fm_runtime
+    expose:
+      - "8006"
+    depends_on:
+      agents-db:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+
+  # Standalone agents UI (React + MUI, own app) — served same-origin at /agents/
+  # behind nginx so it shares the hub's session token.
+  agentsui:
+    build:
+      context: ./agentsui
+      dockerfile: Dockerfile.dev
+    mem_limit: 1g
+    environment:
+      VITE_API_PROXY_TARGET: http://nginx:80
+      VITE_HMR_CLIENT_PORT: ${VITE_HMR_CLIENT_PORT:-5173}
+      VITE_HMR_PROTOCOL: ${VITE_HMR_PROTOCOL:-}
+      VITE_ALLOWED_HOSTS: ${VITE_ALLOWED_HOSTS:-}
+    volumes:
+      - ./agentsui:/app
+      - agentsui_node_modules:/app/node_modules
+    expose:
+      - "5173"
+    depends_on:
+      - agents
 
   frontend:
     build:
@@ -413,14 +495,18 @@ services:
       - leads
       - mail
       - mailui
+      - agents
+      - agentsui
 
 volumes:
   postgres_data_dev:
   mail_postgres_data_dev:
   jobs_postgres_data_dev:
+  agents_postgres_data_dev:
   mongo_data_dev:
   etcd_data_dev:
   minio_data_dev:
   milvus_data_dev:
   frontend_node_modules:
   mailui_node_modules:
+  agentsui_node_modules:
