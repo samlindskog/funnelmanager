@@ -97,6 +97,9 @@ spec:
               value: http://search:8000
             - name: JOBS_BACKEND_URL
               value: http://jobs:8005
+            # mail tools call /api/mail/mcp/v1/* (mcp->mail exchange edge).
+            - name: MAIL_BACKEND_URL
+              value: http://mail:8004
             # Tokenless tool calls must fail outside dev-compose; every caller
             # supplies the acting principal's token.
             - name: MCP_SHARED_LOGIN_FALLBACK

@@ -4,7 +4,7 @@
 # tool calls — OPA still gates on the calling workload identity + the
 # agents->mcp exchange edge.
 #
-# Egress: leads, search, jobs (the backends its tools front) and Keycloak. DNS via allow-dns.
+# Egress: leads, search, jobs, mail (the backends its tools front) and Keycloak. DNS via allow-dns.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -51,6 +51,14 @@ spec:
       ports:
         - protocol: TCP
           port: 8005
+    # mail: MCP mail tools call /api/mail/mcp/v1/* (mcp->mail exchange edge).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mail
+      ports:
+        - protocol: TCP
+          port: 8004
     - to:
         - namespaceSelector:
             matchLabels:

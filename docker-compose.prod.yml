@@ -152,6 +152,10 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: leads
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_LEADS_SECRET}
+      # Principle-4 human-approval HMAC secret (VERIFY side; agents mints).
+      # MUST be the same value on agents/leads/mail or agent-initiated
+      # over-threshold actions fail closed. See libs/fm_runtime/confirmation.py.
+      FM_CONFIRM_APPROVAL_SECRET: ${FM_CONFIRM_APPROVAL_SECRET}
       # No mesh/OPA in compose - fm_runtime enforces the role grants itself
       # (mirrors deploy/policy/data.json).
       FM_ENFORCE_GRANTS: "true"
@@ -199,6 +203,10 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: mail
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MAIL_SECRET}
+      # Principle-4 human-approval HMAC secret (VERIFY side; agents mints).
+      # MUST be the same value on agents/leads/mail or agent-initiated
+      # over-threshold actions fail closed. See libs/fm_runtime/confirmation.py.
+      FM_CONFIRM_APPROVAL_SECRET: ${FM_CONFIRM_APPROVAL_SECRET}
       # No mesh/OPA in compose - fm_runtime enforces the role grants itself
       # (mirrors deploy/policy/data.json).
       FM_ENFORCE_GRANTS: "true"
@@ -287,6 +295,7 @@ services:
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
       SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://search:8000}
       JOBS_BACKEND_URL: ${JOBS_BACKEND_URL:-http://jobs:8005}
+      MAIL_BACKEND_URL: ${MAIL_BACKEND_URL:-http://mail:8004}
       FM_SERVICE_NAME: mcp
       FM_JWT_VERIFY: "true"
       FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
@@ -404,6 +413,11 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: agents
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_AGENTS_SECRET}
+      # Principle-4 human-approval HMAC secret (MINT side). agents signs the
+      # approval token a human grants out-of-band; leads/mail verify it. MUST
+      # be the same value on all three or agent over-threshold actions fail
+      # closed. See libs/fm_runtime/confirmation.py.
+      FM_CONFIRM_APPROVAL_SECRET: ${FM_CONFIRM_APPROVAL_SECRET}
       # No mesh/OPA in compose - fm_runtime enforces the role grants itself
       # (mirrors deploy/policy/data.json).
       FM_ENFORCE_GRANTS: "true"

@@ -126,6 +126,7 @@ Dev overlay halves app requests, keeps limits, replicas 1 everywhere.
 | `apollo` (prod/dev) | `api-key`, `webhook-secret` | leads |
 | `openai` (prod/dev) | `api-key` | leads, agents |
 | `google-oauth` (prod/dev) | `client-id`, `client-secret` | mail |
+| `fm-approval` (prod/dev) | `secret` | agents (mints), leads + mail (verify) — Principle-4 human-approval HMAC; one shared value per env |
 | `objectstore-backups` (prod/dev/identity) | `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY` | CNPG barmanObjectStore |
 | `objectstore-loki` (monitoring) | `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY` | Loki |
 | `keycloak-admin` (identity) | `username`, `password` | Keycloak bootstrap |

@@ -90,6 +90,15 @@ spec:
                 secretKeyRef:
                   name: fm-oidc-agents
                   key: client-secret
+            # Principle-4 human-approval HMAC secret (MINT side). agents signs
+            # the approval token a human grants out-of-band; leads/mail verify
+            # it. Shared value across agents/leads/mail — if unset, agent
+            # over-threshold actions fail closed. See fm_runtime/confirmation.py.
+            - name: FM_CONFIRM_APPROVAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-approval
+                  key: secret
             - name: FM_LOG_LEVEL
               value: INFO
             # CNPG's generated `agents-db-app` secret has key `uri` (plain

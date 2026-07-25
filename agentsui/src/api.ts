@@ -7,7 +7,13 @@
  */
 
 import { beginLogin, clearTokens, getAccessToken, hasSession, logout as oidcLogout } from './oidc'
-import type { CreateTaskRequest, TaskDetail, TaskListResponse } from './types'
+import type {
+  ApprovalDecision,
+  ApprovalDecisionResponse,
+  CreateTaskRequest,
+  TaskDetail,
+  TaskListResponse,
+} from './types'
 
 export function redirectToLogin(): void {
   void beginLogin('/agents/')
@@ -119,4 +125,25 @@ export async function createTask(body: CreateTaskRequest): Promise<TaskDetail> {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+/** Approve or reject a Principle-4 pending approval blocking a paused run.
+ *
+ * Only the initiating human (the run's owner, acting as a real person — never via
+ * an agent) may decide; the server enforces this and rejects everyone else. On
+ * `approve` it mints a human-authorized token server-side and resumes the run so
+ * it re-issues the SAME over-threshold action; on `reject` that action is skipped.
+ * The token is never exposed to this client. */
+export async function decideApproval(
+  taskId: string,
+  approvalId: string,
+  decision: ApprovalDecision,
+): Promise<ApprovalDecisionResponse> {
+  return request<ApprovalDecisionResponse>(
+    `/api/agents/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(approvalId)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    },
+  )
 }

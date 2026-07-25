@@ -1,4 +1,5 @@
-# mail: reached only from the ingress gateway; talks to its own Postgres
+# mail: reached from the ingress gateway, mcp (mail MCP tools), and search
+# (contacted-set read for exclude_contacted); talks to its own Postgres
 # (mail-db), Keycloak, and Google APIs on 443. DNS via allow-dns.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -19,6 +20,24 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 8004
+    # mcp tools call mail's /api/mail/mcp/v1/* (OPA gates on the mcp->mail
+    # exchange edge + the acting principal's mail-access grant).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - protocol: TCP
+          port: 8004
+    # search reads /api/mail/contacts/contacted for the exclude_contacted
+    # filter (OPA gates on the search->mail exchange edge + mail-access grant).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search
       ports:
         - protocol: TCP
           port: 8004

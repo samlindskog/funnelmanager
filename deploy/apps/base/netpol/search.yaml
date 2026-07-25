@@ -50,6 +50,15 @@ spec:
       ports:
         - protocol: TCP
           port: 8001
+    # mail: search reads the contacted set (GET /api/mail/contacts/contacted)
+    # for the exclude_contacted filter (search->mail exchange edge).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mail
+      ports:
+        - protocol: TCP
+          port: 8004
     # CNPG labels instance pods with cnpg.io/cluster, not app.kubernetes.io/name.
     - to:
         - podSelector:

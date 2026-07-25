@@ -118,13 +118,34 @@ conventions (dir = compose service = container/DNS = image = `/api/{name}`):
   principle 1). Wired in `docker-compose.{dev,prod}.yml` and k3s
   (`deploy/apps/base/agentsui`, netpol `agentsui`, both overlays); the gateway
   routes `/agents/` to it.
+- **`mail` (Phase 5 expansion)** — beyond the archive, `mail` becomes a **full
+  multi-domain mailbox client** (compose/send, inbox/sent/threads, search;
+  full-backup-on-connect behind the >2 GB Principle-4 gate) plus a **campaigns**
+  feature: campaigns draw recipients from one or more saved search result lists
+  (`campaign_sources`, continuable), send from the initiating user's own
+  connected mailboxes across domains (`balanced|sequential`, per-domain daily
+  cap), and record every send in `campaign_messages` — the basis for
+  within-campaign dedupe, cross-campaign suppression, and the contacted set at
+  `GET /api/mail/contacts/contacted` (read by `search`'s `exclude_contacted`
+  filter over the `search → mail` edge). Campaigns are cross-user visible
+  (principle 1). A **mail MCP surface** (`/api/mail/mcp/v1/*`, distinct from UI
+  routes, reached over the `mcp → mail` edge via `MAIL_BACKEND_URL`) exposes
+  campaign list/get/start/continue, the contacted-set read, and inbox
+  list/get-thread/send so runtime agents can run the full search→campaign flow.
+  A large campaign is itself a Principle-4 expensive action; an agent-launched
+  one hits the mint/verify approval gate above.
 
 **Identity edges these add** (realm `svc-*` scopes + OPA `azp_allow` +
 `grants.py` `SVC_EXCHANGE_SCOPES`, kept in lockstep, provable with
 `python -m fm_runtime.export`): `agents → mcp`; `mcp → {search, jobs, mail}`
 (MCP's tool fan-out — MCP **can start searches**, funneled search → leads, so
-"only leads talks to Apollo" still holds); `jobs → {search, agents}`;
-`search → mail` (the `exclude_contacted` contacted-set read). The `fm_origin`
+"only leads talks to Apollo" still holds; each upstream is a `BackendClient`
+reached via its env URL, e.g. `MAIL_BACKEND_URL=http://mail:8004` for the mail
+tool module's `/api/mail/mcp/v1/*` calls); `jobs → {search, agents}`;
+`search → mail` (the `exclude_contacted` contacted-set read). Each new edge is
+paired at every layer — realm `svc-*` scope, `azp_allow` + `callers` in
+`data.json`, `SVC_EXCHANGE_SCOPES` in `grants.py`, and a NetworkPolicy egress↔ingress
+pair (`mcp`/`search` → `mail:8004`). The `fm_origin`
 claim (default `user`, minted `agent` by the `agents` client, then carried
 across every exchange by a Keycloak script mapper that copies the subject
 token's `fm_origin` forward — feature `scripts`, `deploy/keycloak/providers/`)
@@ -136,8 +157,18 @@ inboxes, and campaigns are cross-user visible (writes stay attributed).
 *Principle 4*: expensive actions (mailbox backup > 2 GB default, large
 backfills/searches/campaigns) **estimate first and return
 `409 confirmation_required`** with a `confirm` token before running — a shared
-`fm_runtime` helper; a runtime agent escalates the confirmation to its human.
-*Versioning*: `/api/{service}/mcp/v1/*` and `/internal/{domain}/v1/*` are
+`fm_runtime` helper (`libs/fm_runtime/confirmation.py`). A human re-invokes with
+`confirm=true`; a runtime **agent can never self-confirm** — the origin-aware
+gate rejects `confirm=true` when `fm_origin=agent` on an over-threshold action,
+pausing the run and surfacing a *pending approval* to the initiating human (in
+`agentsui`). The human approves out-of-band, the `agents` service **mints** a
+signed **human-approval token** (HMAC over the shared
+**`FM_CONFIRM_APPROVAL_SECRET`**), and the guarding service (**`mail`**, **`leads`**)
+**verifies** that token before proceeding. The secret is provisioned identically
+on `agents` (mint) + `mail` + `leads` (verify) — compose defaults in dev, the
+`fm-approval` Secret (`secret` key) via `secretKeyRef` in k3s. **Fail-closed:** if
+it is unset or mismatched, agent-initiated over-threshold actions are permanently
+blocked. *Versioning*: `/api/{service}/mcp/v1/*` and `/internal/{domain}/v1/*` are
 additive-within-version; a breaking change is a new version, never a silent
 repurpose.
 

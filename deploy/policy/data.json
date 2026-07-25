@@ -25,7 +25,15 @@
           {"ns": "istio-ingress", "sa": "istio-ingress"},
           {"ns": "env", "sa": "jobs", "path_prefixes": ["/internal/jobs"]}
         ],
-        "mail": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "mail": [
+          {"ns": "istio-ingress", "sa": "istio-ingress"},
+          {"ns": "env", "sa": "mcp", "path_prefixes": ["/api/mail/mcp/"]},
+          {
+            "ns": "env",
+            "sa": "search",
+            "path_prefixes": ["/api/mail/contacts/contacted"]
+          }
+        ],
         "frontend": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "mailui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "agentsui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],

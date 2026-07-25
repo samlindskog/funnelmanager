@@ -144,6 +144,10 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: leads
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_LEADS_SECRET:-dev-leads-secret}
+      # Principle-4 human-approval HMAC secret. agents MINTS approval tokens,
+      # leads/mail VERIFY them for agent-initiated over-threshold actions. Same
+      # value on all three or agent actions fail closed. See libs/fm_runtime/confirmation.py.
+      FM_CONFIRM_APPROVAL_SECRET: ${FM_CONFIRM_APPROVAL_SECRET:-dev-approval-secret}
       # No mesh/OPA in compose - fm_runtime enforces the role grants itself
       # (mirrors deploy/policy/data.json).
       FM_ENFORCE_GRANTS: "true"
@@ -195,6 +199,10 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: mail
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_MAIL_SECRET:-dev-mail-secret}
+      # Principle-4 human-approval HMAC secret (VERIFY side; agents mints).
+      # Same value on agents/leads/mail or agent-initiated over-threshold
+      # mail actions fail closed. See libs/fm_runtime/confirmation.py.
+      FM_CONFIRM_APPROVAL_SECRET: ${FM_CONFIRM_APPROVAL_SECRET:-dev-approval-secret}
       # No mesh/OPA in compose - fm_runtime enforces the role grants itself
       # (mirrors deploy/policy/data.json).
       FM_ENFORCE_GRANTS: "true"
@@ -291,6 +299,7 @@ services:
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
       SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://search:8000}
       JOBS_BACKEND_URL: ${JOBS_BACKEND_URL:-http://jobs:8005}
+      MAIL_BACKEND_URL: ${MAIL_BACKEND_URL:-http://mail:8004}
       FM_SERVICE_NAME: mcp
       FM_JWT_VERIFY: "true"
       FM_OIDC_ISSUER: ${FM_OIDC_ISSUER:-http://localhost:8080/realms/funnelmanager}
@@ -415,6 +424,10 @@ services:
       FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
       FM_OIDC_CLIENT_ID: agents
       FM_OIDC_CLIENT_SECRET: ${FM_OIDC_AGENTS_SECRET:-dev-agents-secret}
+      # Principle-4 human-approval HMAC secret (MINT side). agents signs the
+      # approval token a human grants out-of-band; leads/mail verify it. Same
+      # value on all three or agent over-threshold actions fail closed.
+      FM_CONFIRM_APPROVAL_SECRET: ${FM_CONFIRM_APPROVAL_SECRET:-dev-approval-secret}
       # No mesh/OPA in compose - fm_runtime enforces the role grants itself
       # (mirrors deploy/policy/data.json).
       FM_ENFORCE_GRANTS: "true"

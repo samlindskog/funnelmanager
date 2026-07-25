@@ -204,6 +204,12 @@ YAML
       read -rsp "Milvus/minio secret key ($n): " MS; echo
       ensure "$n" milvus-minio generic milvus-minio \
         --from-literal=access-key="$MK" --from-literal=secret-key="$MS"
+      # Principle-4 human-approval HMAC secret. agents MINTS approval tokens,
+      # leads + mail VERIFY them; one shared value across all three per env or
+      # agent over-threshold actions fail closed. Generate a random one if empty.
+      read -rsp "Approval HMAC secret ($n, blank = generate): " AS; echo
+      [ -n "$AS" ] || AS="$(openssl rand -hex 32)"
+      ensure "$n" fm-approval generic fm-approval --from-literal=secret="$AS"
     done
     # GHCR pull secret (read-only token) for the app namespaces.
     read -rp  "GHCR username: " GU

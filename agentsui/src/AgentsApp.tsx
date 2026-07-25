@@ -1,8 +1,11 @@
+import BlockIcon from '@mui/icons-material/Block'
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutlined'
 import LogoutIcon from '@mui/icons-material/Logout'
 import PersonSearchIcon from '@mui/icons-material/PersonSearch'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import SendIcon from '@mui/icons-material/Send'
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined'
+import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import {
   Alert,
   AppBar,
@@ -30,9 +33,9 @@ import {
   Typography,
 } from '@mui/material'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, createTask, fetchTask, fetchTasks, logout } from './api'
+import { ApiError, createTask, decideApproval, fetchTask, fetchTasks, logout } from './api'
 import { ColorModeToggle } from './ColorModeToggle'
-import type { TaskDetail, TaskSummary, User } from './types'
+import type { ApprovalDecision, PendingApproval, TaskDetail, TaskSummary, User } from './types'
 
 const LIST_LIMIT = 100
 const LIST_REFRESH_MS = 4000
@@ -78,6 +81,19 @@ function progressPercent(run: TaskSummary): number | null {
   return Math.round(Math.max(0, Math.min(1, run.progress)) * 100)
 }
 
+/** Trim a resource estimate to a readable number (integers stay whole). */
+function fmtNum(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100)
+}
+
+/** "3.4 GB (threshold 2 GB)" — the over-threshold estimate that tripped the gate. */
+function formatEstimate(approval: PendingApproval): string {
+  const unit = approval.unit ? ` ${approval.unit}` : ''
+  const estimate = `${fmtNum(approval.estimate)}${unit}`
+  if (approval.threshold != null) return `${estimate} (threshold ${fmtNum(approval.threshold)}${unit})`
+  return estimate
+}
+
 function StatusChip({ status }: { status: string }) {
   return <Chip label={status} size="small" color={STATUS_COLOR[status] ?? 'default'} variant="outlined" />
 }
@@ -93,6 +109,8 @@ export function AgentsApp({ user }: { user: User }) {
   const [statusFilter, setStatusFilter] = useState('')
 
   const [openTask, setOpenTask] = useState<TaskDetail | null>(null)
+  // The approval id currently being approved/rejected (buttons show a spinner).
+  const [deciding, setDeciding] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ text: string; severity: 'success' | 'error' } | null>(null)
 
   // Latest filters, read by the interval poller without re-arming it.
@@ -173,11 +191,59 @@ export function AgentsApp({ user }: { user: User }) {
 
   const openDetail = async (summary: TaskSummary) => {
     // Show the summary immediately, then hydrate the full detail.
-    setOpenTask({ ...summary, params: {}, result: null, error: null, steps: 0, usage: null })
+    setOpenTask({
+      ...summary,
+      params: {},
+      result: null,
+      error: null,
+      steps: 0,
+      usage: null,
+      pending_approvals: [],
+    })
     try {
       setOpenTask(await fetchTask(summary.id))
     } catch (err) {
       setNotice({ text: errorMessage(err), severity: 'error' })
+    }
+  }
+
+  // Approve/reject a Principle-4 pending approval. Only the initiating human (the
+  // run owner) sees these controls; the server is the real gate and rejects
+  // anyone else. On success the run resumes (approve) or the action is skipped
+  // (reject); we re-hydrate the detail so the pending list reflects the outcome.
+  const handleDecision = async (runId: string, approval: PendingApproval, decision: ApprovalDecision) => {
+    setDeciding(approval.id)
+    try {
+      const outcome = await decideApproval(runId, approval.id, decision)
+      setNotice({
+        text:
+          decision === 'approve'
+            ? 'Approved — the run is resuming the action'
+            : 'Rejected — the action will be skipped',
+        severity: 'success',
+      })
+      setOpenTask((current) =>
+        current && current.id === runId ? { ...current, status: outcome.run_status } : current,
+      )
+      try {
+        const fresh = await fetchTask(runId)
+        setOpenTask((current) => (current && current.id === runId ? fresh : current))
+      } catch {
+        /* the notice already reflects the outcome; poll will reconcile */
+      }
+      void refreshTasks(true)
+    } catch (err) {
+      // Conflicts (already decided, no longer waiting, single-use ref spent) are
+      // reported verbatim; re-hydrate so the UI shows the true current state.
+      setNotice({ text: errorMessage(err), severity: 'error' })
+      try {
+        const fresh = await fetchTask(runId)
+        setOpenTask((current) => (current && current.id === runId ? fresh : current))
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      setDeciding(null)
     }
   }
 
@@ -343,12 +409,22 @@ export function AgentsApp({ user }: { user: User }) {
               <List dense disablePadding>
                 {tasks.map((run) => {
                   const percent = progressPercent(run)
+                  const paused = run.status === 'paused'
                   return (
                     <ListItemButton
                       key={run.id}
                       divider
                       onClick={() => void openDetail(run)}
-                      sx={{ alignItems: 'flex-start', py: 1.25 }}
+                      sx={{
+                        alignItems: 'flex-start',
+                        py: 1.25,
+                        ...(paused && {
+                          borderLeft: 3,
+                          borderLeftColor: 'warning.main',
+                          bgcolor: 'warning.main',
+                          '&, &:hover': { bgcolor: (t) => `${t.palette.warning.main}14` },
+                        }),
+                      }}
                     >
                       <ListItemText
                         primary={
@@ -367,6 +443,19 @@ export function AgentsApp({ user }: { user: User }) {
                             <Typography variant="caption" color="text.secondary" component="span">
                               {attribution(run)}
                             </Typography>
+                            {paused && (
+                              <Stack
+                                component="span"
+                                direction="row"
+                                spacing={0.5}
+                                sx={{ alignItems: 'center', color: 'warning.main' }}
+                              >
+                                <WarningAmberIcon sx={{ fontSize: 14 }} />
+                                <Typography variant="caption" component="span" sx={{ fontWeight: 600 }}>
+                                  Paused — may need your approval
+                                </Typography>
+                              </Stack>
+                            )}
                             {ACTIVE.has(run.status) && (
                               <LinearProgress
                                 variant={percent == null ? 'indeterminate' : 'determinate'}
@@ -402,6 +491,96 @@ export function AgentsApp({ user }: { user: User }) {
               </Typography>
             </DialogTitle>
             <DialogContent dividers>
+              {/* Principle-4 pending approvals — the run is blocked until the
+                  initiating human decides. Rendered first so a waiting run is
+                  impossible to miss. */}
+              {openTask.pending_approvals.length > 0 && (
+                <Stack spacing={1.5} sx={{ mb: 2.5 }}>
+                  {openTask.pending_approvals.map((approval) => {
+                    const isOwner = user.username === openTask.owner
+                    const busy = deciding === approval.id
+                    return (
+                      <Box
+                        key={approval.id}
+                        sx={{
+                          border: 2,
+                          borderColor: 'warning.main',
+                          borderRadius: 1.5,
+                          bgcolor: 'warning.main',
+                          p: 0,
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 1,
+                            px: 1.5,
+                            py: 1,
+                            color: 'warning.contrastText',
+                          }}
+                        >
+                          <WarningAmberIcon fontSize="small" />
+                          <Typography variant="subtitle2" sx={{ fontWeight: 700, flex: 1 }}>
+                            Approval required to continue
+                          </Typography>
+                        </Box>
+                        <Box sx={{ bgcolor: 'background.paper', p: 1.5, borderBottomLeftRadius: 6, borderBottomRightRadius: 6 }}>
+                          <Typography variant="body2" sx={{ mb: 1 }}>
+                            The agent wants to run an over-threshold action it cannot self-confirm.
+                            {approval.message ? ` ${approval.message}` : ''}
+                          </Typography>
+                          <Stack spacing={0.5} sx={{ mb: 1.5 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              Action: <strong>{approval.action || '—'}</strong>
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              Estimate: <strong>{formatEstimate(approval)}</strong>
+                            </Typography>
+                            {approval.tool_name && (
+                              <Typography variant="caption" color="text.secondary">
+                                Tool: <strong>{approval.tool_name}</strong>
+                              </Typography>
+                            )}
+                          </Stack>
+                          {isOwner ? (
+                            <Stack direction="row" spacing={1}>
+                              <Button
+                                variant="contained"
+                                color="success"
+                                size="small"
+                                startIcon={
+                                  busy ? <CircularProgress size={14} color="inherit" /> : <CheckCircleOutlineIcon />
+                                }
+                                disabled={busy}
+                                onClick={() => void handleDecision(openTask.id, approval, 'approve')}
+                              >
+                                Approve
+                              </Button>
+                              <Button
+                                variant="outlined"
+                                color="error"
+                                size="small"
+                                startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <BlockIcon />}
+                                disabled={busy}
+                                onClick={() => void handleDecision(openTask.id, approval, 'reject')}
+                              >
+                                Reject
+                              </Button>
+                            </Stack>
+                          ) : (
+                            <Typography variant="caption" color="text.secondary">
+                              Only <strong>{openTask.owner}</strong>, who started this run, can approve or reject
+                              this action.
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                    )
+                  })}
+                </Stack>
+              )}
+
               {ACTIVE.has(openTask.status) && (
                 <LinearProgress
                   variant={progressPercent(openTask) == null ? 'indeterminate' : 'determinate'}
