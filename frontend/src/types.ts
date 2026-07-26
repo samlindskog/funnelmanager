@@ -102,6 +102,18 @@ export interface SearchHistorySummary {
   per_page: number
   total_results: number
   created_at: string
+  /** Owning principal (preferred_username). History is cross-user visible. */
+  username: string
+  /** "user" or "agent" — agent-initiated searches keep the human as owner. */
+  origin: string
+  /** Acting client (azp) that ran the search. */
+  actor: string
+}
+
+/** A distinct search-history owner and its search count (for the owner filter). */
+export interface HistoryOwner {
+  username: string
+  search_count: number
 }
 
 export interface SearchHistoryDetail extends SearchHistorySummary {

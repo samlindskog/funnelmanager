@@ -3,6 +3,7 @@ import type {
   ApolloRecord,
   AppLink,
   EntityType,
+  HistoryOwner,
   SearchHistoryDetail,
   SearchHistorySummary,
   SearchResponse,
@@ -330,8 +331,19 @@ export async function runSearch(
   throw new ApiError(502, 'Incomplete stream', 'Search stream ended without a complete event')
 }
 
-export async function listSearches(): Promise<SearchHistorySummary[]> {
-  return request<SearchHistorySummary[]>('/api/search/searches')
+/** Distinct search-history owners with counts (populates the owner filter). */
+export async function listHistoryOwners(): Promise<HistoryOwner[]> {
+  return request<HistoryOwner[]>('/api/search/users')
+}
+
+/** Search history, cross-user visible. Pass ``username`` to scope to one owner;
+ * omit for all users. */
+export async function listSearches(username?: string): Promise<SearchHistorySummary[]> {
+  const path =
+    username != null && username !== ''
+      ? `/api/search/searches?username=${encodeURIComponent(username)}`
+      : '/api/search/searches'
+  return request<SearchHistorySummary[]>(path)
 }
 
 export async function getSearch(id: number): Promise<SearchHistoryDetail> {

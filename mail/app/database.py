@@ -52,6 +52,30 @@ async def _create_database_if_missing() -> None:
         await admin_engine.dispose()
 
 
+# Columns added to the pre-existing ``mail_accounts`` table after its initial
+# release (Phase 5A). ``create_all`` only creates missing *tables*, never ALTERs
+# an existing one, and there is no migration framework here — so an upgraded
+# deployment keeps the old table shape and any SELECT of these columns 500s.
+# Postgres ``ADD COLUMN IF NOT EXISTS`` is idempotent, so healing on every boot
+# is safe and needs no manual DB surgery. Types/defaults mirror app.models.
+_ACCOUNT_COLUMN_HEALS = (
+    "ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS "
+    "backfill_authorized BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS "
+    "backup_estimate_bytes BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS "
+    "messages_total INTEGER NOT NULL DEFAULT 0",
+)
+
+
+async def _heal_schema(conn) -> None:
+    """Additively bring a pre-existing schema up to the current model. Scoped
+    strictly to the known-drifted ``mail_accounts`` columns; this is not a
+    general schema sync."""
+    for ddl in _ACCOUNT_COLUMN_HEALS:
+        await conn.execute(text(ddl))
+
+
 async def init_db() -> None:
     # Import models so metadata is registered before create_all.
     from app import models  # noqa: F401
@@ -59,9 +83,11 @@ async def init_db() -> None:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await _heal_schema(conn)
     except Exception:
         # Most likely the database itself is missing (first boot of this
         # service on an existing Postgres volume) — create it and retry once.
         await _create_database_if_missing()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await _heal_schema(conn)

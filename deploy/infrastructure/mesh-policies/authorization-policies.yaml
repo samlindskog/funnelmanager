@@ -94,7 +94,16 @@ spec:
               - "/login"
               - "/callback"
               - "/search"
+              # Bare SPA entry paths (no trailing slash): a top-level browser
+              # navigation to /mail or /agents (e.g. the mail OAuth callback's
+              # 303 back to "/mail?error=..." or a user typing the path) is
+              # token-less and must load pre-auth. The "/mail/*" glob requires
+              # the trailing slash, so the exact bare path needs its own entry
+              # (mirrors "/search"). OPA already allows these via the "/mail"
+              # and "/agents" prefixes; this keeps the mesh leg in lockstep.
+              - "/mail"
               - "/mail/*"
+              - "/agents"
               - "/agents/*"
 ---
 apiVersion: security.istio.io/v1
@@ -137,5 +146,14 @@ spec:
               - "/login"
               - "/callback"
               - "/search"
+              # Bare SPA entry paths (no trailing slash): a top-level browser
+              # navigation to /mail or /agents (e.g. the mail OAuth callback's
+              # 303 back to "/mail?error=..." or a user typing the path) is
+              # token-less and must load pre-auth. The "/mail/*" glob requires
+              # the trailing slash, so the exact bare path needs its own entry
+              # (mirrors "/search"). OPA already allows these via the "/mail"
+              # and "/agents" prefixes; this keeps the mesh leg in lockstep.
+              - "/mail"
               - "/mail/*"
+              - "/agents"
               - "/agents/*"

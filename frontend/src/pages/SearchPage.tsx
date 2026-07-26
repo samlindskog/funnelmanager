@@ -33,6 +33,7 @@ import {
   fetchSearchPage,
   getApolloCredits,
   getSearch,
+  listHistoryOwners,
   listSearches,
   runSearch,
   runSimilaritySearch,
@@ -45,7 +46,16 @@ import { SearchSidebar } from '../components/SearchSidebar'
 import { isEditableTarget, type ListFocus } from '../keyboard'
 import { listFocusPaneSx } from '../paneSurface'
 import { useProgress } from '../progress'
-import type { ApolloRecord, EntityType, SearchHistoryDetail, SearchHistorySummary } from '../types'
+import type {
+  ApolloRecord,
+  EntityType,
+  HistoryOwner,
+  SearchHistoryDetail,
+  SearchHistorySummary,
+} from '../types'
+
+/** Owner-filter sentinel: browse every user's search history at once. */
+const ALL_OWNERS = ''
 
 type CompanyFilterMode = 'id' | 'name'
 type MainView = 'search' | 'results'
@@ -71,6 +81,19 @@ export function SearchPage() {
   const [companyDisplayName, setCompanyDisplayName] = useState('')
   const [companyDomainForPeople, setCompanyDomainForPeople] = useState('')
   const [history, setHistory] = useState<SearchHistorySummary[]>([])
+  const [owners, setOwners] = useState<HistoryOwner[]>([])
+  // Which owner's history to browse; defaults to the current user (prior
+  // behaviour), ALL_OWNERS shows every user's history (Principle 1).
+  const [selectedOwner, setSelectedOwner] = useState<string>(user?.username ?? ALL_OWNERS)
+  // Latest-value ref so refreshHistory (stable, so stream callbacks always
+  // fetch the *current* selection, not the one bound at search-start) and the
+  // monotonic guard below can read the live owner. Set during render.
+  const selectedOwnerRef = useRef(selectedOwner)
+  selectedOwnerRef.current = selectedOwner
+  // Monotonic token: a slower earlier fetch (e.g. alice) must not overwrite a
+  // newer one (bob) that already resolved. Bump before each await, discard
+  // stale results.
+  const historyRequestSeqRef = useRef(0)
   const [activeSearch, setActiveSearch] = useState<SearchHistoryDetail | null>(null)
   const [mainView, setMainView] = useState<MainView>('search')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -94,9 +117,24 @@ export function SearchPage() {
     activeSearchRef.current = activeSearch
   }, [activeSearch])
 
+  // Stable across owner changes and reads the live selection from the ref, so
+  // the stream callbacks (onFirstPage/onComplete) that captured it at
+  // search-start still fetch the *currently* selected owner. The seq guard
+  // drops out-of-order responses from rapid owner switches.
   const refreshHistory = useCallback(async () => {
-    const items = await listSearches()
+    const seq = ++historyRequestSeqRef.current
+    const items = await listSearches(selectedOwnerRef.current || undefined)
+    // A newer refresh started while we awaited — its result wins.
+    if (seq !== historyRequestSeqRef.current) return
     setHistory(items)
+  }, [])
+
+  const refreshOwners = useCallback(async () => {
+    try {
+      setOwners(await listHistoryOwners())
+    } catch {
+      // Owner filter is a convenience; leave the last-known list on failure.
+    }
   }, [])
 
   const refreshApolloCredits = useCallback(async () => {
@@ -118,11 +156,21 @@ export function SearchPage() {
     }
   }, [])
 
+  // Loads on mount and whenever the selected owner changes. Don't flip
+  // loadingHistory on owner switches: that swaps the whole sidebar (including
+  // the owner dropdown) for a spinner mid-interaction. The initial full-sidebar
+  // spinner comes from the initial loadingHistory=true; subsequent switches
+  // keep the list mounted and swap in place when the new owner's history
+  // arrives (out-of-order responses are dropped by refreshHistory's seq guard).
   useEffect(() => {
     refreshHistory()
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load history'))
       .finally(() => setLoadingHistory(false))
-  }, [refreshHistory])
+  }, [selectedOwner, refreshHistory])
+
+  useEffect(() => {
+    void refreshOwners()
+  }, [refreshOwners])
 
   useEffect(() => {
     void refreshApolloCredits()
@@ -279,6 +327,9 @@ export function SearchPage() {
                 per_page: h.per_page,
                 total_results: h.total_results,
                 created_at: h.created_at,
+                username: h.username,
+                origin: h.origin,
+                actor: h.actor,
               },
               ...prev,
             ]
@@ -295,6 +346,7 @@ export function SearchPage() {
           setSearching(false)
           run.reportIngest({ complete: true })
           void refreshHistory()
+          void refreshOwners()
         },
       })
       showResults(response.history)
@@ -382,10 +434,11 @@ export function SearchPage() {
         setMainView('search')
       }
       await refreshHistory()
+      void refreshOwners()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete search')
     }
-  }, [refreshHistory, selectedId])
+  }, [refreshHistory, refreshOwners, selectedId])
 
   const closeSidebar = useCallback(() => setSidebarOpen(false), [])
 
@@ -535,6 +588,10 @@ export function SearchPage() {
       onClose={closeSidebar}
       listFocusRef={listFocusRef}
       onActivate={activateHistory}
+      owners={owners}
+      selectedOwner={selectedOwner}
+      onSelectOwner={setSelectedOwner}
+      currentUsername={user?.username ?? ''}
     />
   )
 
@@ -694,6 +751,9 @@ export function SearchPage() {
               </Box>
             </Popover>
             <ColorModeToggle />
+            <Button component="a" href="/" color="inherit" size="small">
+              Hub
+            </Button>
             <Button startIcon={<LogoutIcon />} onClick={logout} color="inherit">
               Log out
             </Button>

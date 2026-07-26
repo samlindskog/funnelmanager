@@ -12,20 +12,35 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  FormControl,
   FormControlLabel,
   IconButton,
+  InputLabel,
   List,
   ListItem,
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  MenuItem,
+  Select,
   Typography,
 } from '@mui/material'
-import { useCallback, useEffect, useRef, useState, memo, type MutableRefObject } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  memo,
+  type MutableRefObject,
+} from 'react'
 import { isEditableTarget } from '../keyboard'
 import type { ListFocus } from '../keyboard'
 import { toggleOrRangeSelect } from '../rangeSelect'
-import type { SearchHistorySummary } from '../types'
+import type { HistoryOwner, SearchHistorySummary } from '../types'
+
+/** Owner-filter sentinel matching SearchPage: browse every user's history. */
+const ALL_OWNERS = ''
 
 /** Session-scoped: skip history delete confirmation after the user opts out. */
 let skipHistoryDeleteConfirm = false
@@ -38,6 +53,13 @@ interface SearchSidebarProps {
   onClose?: () => void
   listFocusRef: MutableRefObject<ListFocus>
   onActivate?: () => void
+  /** Distinct history owners (with counts) for the owner filter. */
+  owners: HistoryOwner[]
+  /** Selected owner username, or ALL_OWNERS ('') for every user. */
+  selectedOwner: string
+  onSelectOwner: (owner: string) => void
+  /** Current session user — only their own rows are deletable (server owner-gate). */
+  currentUsername: string
 }
 
 function formatWhen(iso: string) {
@@ -62,10 +84,22 @@ function deleteConfirmMessage(items: SearchHistorySummary[], ids: number[]) {
   return `Delete ${ids.length} searches from history? This cannot be undone.`
 }
 
+/** Owner/origin annotation for a row's secondary text. Shows the owner name
+ * when the row isn't the current user's, and "(via agent)" for agent-run
+ * searches — so rows read "alice" or "alice (via agent)". */
+function ownerAnnotation(item: SearchHistorySummary, currentUsername: string): string | null {
+  const isAgent = item.origin === 'agent'
+  const isOwn = item.username === currentUsername
+  if (isOwn && !isAgent) return null
+  return `${item.username}${isAgent ? ' (via agent)' : ''}`
+}
+
 const HistoryRow = memo(function HistoryRow({
   item,
   selected,
   checked,
+  canDelete,
+  currentUsername,
   onSelect,
   onToggleChecked,
   onShiftSelect,
@@ -73,10 +107,22 @@ const HistoryRow = memo(function HistoryRow({
   item: SearchHistorySummary
   selected: boolean
   checked: boolean
+  /** False for rows owned by another user — the server would 404 a delete. */
+  canDelete: boolean
+  currentUsername: string
   onSelect: (id: number) => void
   onToggleChecked: (id: number, shiftKey: boolean) => void
   onShiftSelect: (id: number) => void
 }) {
+  const owner = ownerAnnotation(item, currentUsername)
+  const secondary = [
+    owner,
+    item.entity_type,
+    item.total_results.toLocaleString(),
+    formatWhen(item.created_at),
+  ]
+    .filter(Boolean)
+    .join(' · ')
   return (
     <ListItem disablePadding>
       <Checkbox
@@ -84,14 +130,20 @@ const HistoryRow = memo(function HistoryRow({
         edge="start"
         size="small"
         checked={checked}
+        disabled={!canDelete}
         tabIndex={-1}
         disableRipple
         slotProps={{
-          input: { 'aria-label': `Select search “${item.query}”` },
+          input: {
+            'aria-label': canDelete
+              ? `Select search “${item.query}”`
+              : `Cannot delete “${item.query}” — owned by ${item.username}`,
+          },
         }}
         onClick={(event) => {
           event.preventDefault()
           event.stopPropagation()
+          if (!canDelete) return
           onToggleChecked(item.id, event.shiftKey)
         }}
         sx={{ ml: 1, mr: 0 }}
@@ -114,7 +166,7 @@ const HistoryRow = memo(function HistoryRow({
         </ListItemIcon>
         <ListItemText
           primary={item.query}
-          secondary={`${item.entity_type} · ${item.total_results.toLocaleString()} · ${formatWhen(item.created_at)}`}
+          secondary={secondary}
           slotProps={{
             primary: { noWrap: true, sx: { fontWeight: 600 } },
             secondary: { noWrap: true },
@@ -133,6 +185,10 @@ export const SearchSidebar = memo(function SearchSidebar({
   onClose,
   listFocusRef,
   onActivate,
+  owners,
+  selectedOwner,
+  onSelectOwner,
+  currentUsername,
 }: SearchSidebarProps) {
   const [actionsOpen, setActionsOpen] = useState(false)
   const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set())
@@ -144,6 +200,24 @@ export const SearchSidebar = memo(function SearchSidebar({
   const pendingDeleteIdsRef = useRef<number[] | null>(null)
   pendingDeleteIdsRef.current = pendingDeleteIds
   actionsOpenRef.current = actionsOpen
+
+  // Only the current user's own rows are deletable (the server owner-gates
+  // DELETE and 404s otherwise), so gate the delete affordances to them.
+  const ownedIdSet = useMemo(
+    () => new Set(items.filter((item) => item.username === currentUsername).map((item) => item.id)),
+    [items, currentUsername],
+  )
+  const ownedCount = ownedIdSet.size
+
+  // Owner filter options: backend owners (with counts) plus the current user
+  // and the active selection, so the Select value is always in range.
+  const ownerOptions = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const owner of owners) counts.set(owner.username, owner.search_count)
+    if (currentUsername && !counts.has(currentUsername)) counts.set(currentUsername, 0)
+    if (selectedOwner && !counts.has(selectedOwner)) counts.set(selectedOwner, 0)
+    return [...counts.entries()].map(([username, count]) => ({ username, count }))
+  }, [owners, currentUsername, selectedOwner])
 
   useEffect(() => {
     const validIds = new Set(items.map((item) => item.id))
@@ -180,10 +254,13 @@ export const SearchSidebar = memo(function SearchSidebar({
           shiftKey,
         )
         checkAnchorRef.current = nextAnchor
-        return next
+        // A shift-range can span non-owned rows between two owned endpoints;
+        // keep only deletable ids checked so the count and checkbox state match
+        // what can actually be deleted (delete is already owned-gated).
+        return new Set([...next].filter((checkedId) => ownedIdSet.has(checkedId)))
       })
     },
-    [items],
+    [items, ownedIdSet],
   )
 
   const shiftSelect = useCallback(
@@ -202,7 +279,9 @@ export const SearchSidebar = memo(function SearchSidebar({
     [onActivate, onSelect],
   )
 
-  function requestDelete(ids: number[]) {
+  function requestDelete(requested: number[]) {
+    // Drop rows the current user doesn't own — the server would 404 them.
+    const ids = requested.filter((id) => ownedIdSet.has(id))
     if (!ids.length) return
     if (skipHistoryDeleteConfirm) {
       onDelete(ids)
@@ -253,6 +332,7 @@ export const SearchSidebar = memo(function SearchSidebar({
       if (key === 's') {
         if (!actionsOpen || selectedId === null) return
         event.preventDefault()
+        if (!ownedIdSet.has(selectedId)) return
         toggleChecked(selectedId)
         return
       }
@@ -299,6 +379,7 @@ export const SearchSidebar = memo(function SearchSidebar({
     items,
     listFocusRef,
     onSelect,
+    ownedIdSet,
     pendingDeleteIds,
     selectedId,
   ])
@@ -306,8 +387,9 @@ export const SearchSidebar = memo(function SearchSidebar({
   const checkedCount = checkedIds.size
 
   function toggleSelectAll() {
+    // Select-all only applies to rows the current user can actually delete.
     if (checkedCount > 0) setCheckedIds(new Set())
-    else setCheckedIds(new Set(items.map((item) => item.id)))
+    else setCheckedIds(new Set(ownedIdSet))
   }
 
   return (
@@ -351,6 +433,26 @@ export const SearchSidebar = memo(function SearchSidebar({
         )}
       </Box>
 
+      <Box sx={{ px: 2, pb: 1.5, flexShrink: 0 }}>
+        <FormControl size="small" fullWidth>
+          <InputLabel id="history-owner-label">Owner</InputLabel>
+          <Select
+            labelId="history-owner-label"
+            label="Owner"
+            value={selectedOwner}
+            onChange={(event) => onSelectOwner(event.target.value)}
+          >
+            <MenuItem value={ALL_OWNERS}>All users</MenuItem>
+            {ownerOptions.map((owner) => (
+              <MenuItem key={owner.username} value={owner.username}>
+                {owner.username === currentUsername ? `${owner.username} (you)` : owner.username}
+                {` · ${owner.count.toLocaleString()}`}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      </Box>
+
       {actionsOpen && items.length > 0 && (
         <Box
           sx={{
@@ -371,7 +473,12 @@ export const SearchSidebar = memo(function SearchSidebar({
                 : 'transparent',
           }}
         >
-          <Button size="small" onClick={toggleSelectAll} sx={{ textTransform: 'none', minWidth: 0 }}>
+          <Button
+            size="small"
+            onClick={toggleSelectAll}
+            disabled={checkedCount === 0 && ownedCount === 0}
+            sx={{ textTransform: 'none', minWidth: 0 }}
+          >
             {checkedCount > 0 ? 'Deselect all' : 'Select all'}
           </Button>
           {checkedCount > 0 && (
@@ -399,6 +506,8 @@ export const SearchSidebar = memo(function SearchSidebar({
             item={item}
             selected={selectedId === item.id}
             checked={checkedIds.has(item.id)}
+            canDelete={ownedIdSet.has(item.id)}
+            currentUsername={currentUsername}
             onSelect={handleRowSelect}
             onToggleChecked={toggleChecked}
             onShiftSelect={shiftSelect}
