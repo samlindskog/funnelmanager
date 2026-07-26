@@ -34,3 +34,6 @@ agentsui/dist/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Throwaway multi-agent workflow runners (operational, not tracked)
+.claude/workflows/
