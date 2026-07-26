@@ -65,3 +65,13 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    # OpenAI lives on the public internet (the pydantic-ai agent's LLM). Same
+    # pattern as leads/mail: 0.0.0.0/0:443 also matches in-cluster 443 targets,
+    # which is acceptable — everything sensitive in-cluster is further gated by
+    # its own ingress policy + mesh authz.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
