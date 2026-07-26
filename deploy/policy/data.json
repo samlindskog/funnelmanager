@@ -23,6 +23,7 @@
       "callers": {
         "search": [
           {"ns": "istio-ingress", "sa": "istio-ingress"},
+          {"ns": "env", "sa": "mcp", "path_prefixes": ["/api/search/mcp/"]},
           {"ns": "env", "sa": "jobs", "path_prefixes": ["/internal/jobs"]}
         ],
         "mail": [
