@@ -33,10 +33,12 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
-    # Backchannel token endpoint: search/mcp exchange tokens (RFC 8693)
+    # Backchannel token endpoint: search/mcp/agents/jobs exchange or mint tokens
     # against keycloak.identity directly (split-horizon FM_OIDC_TOKEN_URL) —
     # the public issuer URL is not reachable from the app namespaces'
-    # default-deny egress.
+    # default-deny egress. search/mcp do RFC 8693 exchange; agents does the
+    # agents->mcp exchange; jobs uses client_credentials for its service-account
+    # identity plus jobs->producer exchange.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -45,7 +47,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [search, mcp]
+                values: [search, mcp, agents, jobs]
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: dev
@@ -53,7 +55,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [search, mcp]
+                values: [search, mcp, agents, jobs]
       ports:
         - port: 8080
           protocol: TCP
