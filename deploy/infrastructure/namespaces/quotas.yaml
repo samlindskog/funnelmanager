@@ -1,6 +1,12 @@
 # Per-env ceilings. Prod's request quota is the worker1 budget share for the
 # app namespace (the observability stack lives in `monitoring`, outside it);
 # dev is deliberately small — it may lose scheduling races, never prod.
+#
+# requests.memory is the real reservation and stays within cluster-allocatable
+# (~12.7Gi); limits.memory is a deliberately-oversubscribed burstable ceiling.
+# Raised 14→18Gi when agents/jobs/agentsui + agents-db joined the namespace —
+# their memory LIMITS (not requests) had exhausted the old 14Gi ceiling and
+# blocked the agents-db primary + rolling-update surge pods from admission.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -10,7 +16,7 @@ spec:
   hard:
     requests.cpu: "4"
     requests.memory: 6Gi
-    limits.memory: 14Gi
+    limits.memory: 18Gi
     pods: "60"
 ---
 apiVersion: v1
