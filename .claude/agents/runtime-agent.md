@@ -21,6 +21,13 @@ your delta.
   this service. Internal calls **exchange, never forward** via `TokenBroker`
   (RFC 8693, cached per subject+audience), gated by `svc-<target>` client scopes.
   KC 26.2 records the exchanger in `azp` (no nested `act` chains) — don't assume `act`.
+  **Clarify:** `fm_runtime` does **not** send `fm_origin` to the token endpoint —
+  propagation is **Keycloak-mapper-native** (the `fm-origin-passthrough` script mapper in
+  `deploy/keycloak/providers/` carries the inbound `subject_token`'s origin across each
+  exchange hop; the `agents` client mints `agent`). The library only folds origin into the
+  broker **cache key** (`resolve_origin`). Don't document/implement fm_runtime as
+  "propagating the claim"; it mirrors what the KC mapper stamps — a realm/scope concern owned
+  by `platform-agent`.
 - **Grants** (`grants.py`) are `{service, methods, path_prefix}` keyed by realm
   role. `FM_ENFORCE_GRANTS=true` applies them in-process in compose (fail-closed,
   no OPA). **The built-in default must mirror `deploy/policy/data.json` — change
@@ -31,11 +38,34 @@ your delta.
 - Dev compose verifies JWTs locally (`FM_JWT_VERIFY=true` + JWKS); issuer pinned to
   the browser URL while token/JWKS dial the `keycloak` container. Keep that split and
   `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=false`, or `iss` validation breaks.
+- **Decide and align the detached-job story:** CLAUDE.md says detached jobs "downgrade to
+  client-credentials once the subject token expires," but `InternalClient.detached`
+  freezes the subject token and on expiry the exchange simply **fails** —
+  client-credentials is only reached when there is no principal at all. Either implement
+  the documented expiry→client-credentials fallback (recommended, so long detached jobs
+  survive) or correct the prose. This is a `fm_runtime`-owned decision.
+- KC 26.2 emits **no `act` chain** — keep the `act` parser as future-proofing but describe
+  the real model as `azp` + `fm_origin` (drop "sub + `act` chain" phrasing in
+  `__init__.py`/whoami). And **wire the `@anonymous` export into `export --check`** — today
+  `verify_policy` proves grants/exchange/realm but **not** the anonymous list, so
+  annotations and `data.json`'s anonymous set can silently drift.
+- As the sanctioned home for cross-cutting concerns, **absorb the plumbing that currently
+  leaks into services** (P10): a `TokenBroker`-owned subject-expiry/downgrade decision (so
+  `leads_client.py` stops deciding it), a shared **never-raise + heartbeat streaming
+  wrapper** (P8, currently re-implemented in ≥3 services), and helpers that expose the P4
+  gate/`ExchangeError` **shapes** so MCP/agents stop hard-coding them. Keep the estimate
+  service-local; own only the mechanism.
 
 ## Verify
-No test suite. Because you affect everyone, verify against at least two backends
-(e.g. `search` + `mail`): principal acceptance, a token exchange, a grant
-allow/deny, and re-run `python -m fm_runtime.export` if annotations/grants changed.
+Verify against ≥2 backends (principal acceptance, a token exchange, a grant allow/deny)
+and re-run `python -m fm_runtime.export --check … --realm` after any
+annotation/grant/scope change. **You own the base of the pyramid (P11):** add unit tests
+here for the grants matrix (each `-access`→its prefix; `admin`=service:\*;
+`internal-service`=leads-only; `jobs-internal` scoped to `/internal/jobs`), the
+`@anonymous` allowlist, `TokenBroker` cache keying, segment-boundary grant matching, and
+the P4 confirmation/HMAC logic — **so services don't re-test authz** (that would violate
+P10). Add an integration test using a **real Keycloak** (Testcontainers, realm imported)
+asserting audience rejection and scope-gated exchange (never mocked JWTs).
 
 ## When done
 Clean `git diff`. **Always** hand off to `security-reviewer` (this library is the
