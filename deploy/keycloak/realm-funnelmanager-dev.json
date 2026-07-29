@@ -383,7 +383,8 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "attributes": {
-        "standard.token.exchange.enabled": "true"
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
       },
       "optionalClientScopes": [
         "svc-leads",
@@ -405,7 +406,8 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "attributes": {
-        "standard.token.exchange.enabled": "true"
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
       },
       "defaultClientScopes": [
         "basic",
@@ -441,7 +443,8 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "attributes": {
-        "standard.token.exchange.enabled": "true"
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
       },
       "optionalClientScopes": [
         "svc-leads",
@@ -465,7 +468,8 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "attributes": {
-        "standard.token.exchange.enabled": "true"
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
       },
       "optionalClientScopes": [
         "svc-search",
@@ -487,7 +491,8 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "attributes": {
-        "standard.token.exchange.enabled": "true"
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
       },
       "protocolMappers": [
         {

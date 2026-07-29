@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 GRANT_TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
 GRANT_CLIENT_CREDENTIALS = "client_credentials"
 TOKEN_TYPE_ACCESS = "urn:ietf:params:oauth:token-type:access_token"
+TOKEN_TYPE_REFRESH = "urn:ietf:params:oauth:token-type:refresh_token"
 
 _CACHE_MAX_ENTRIES = 2048
 _EXPIRY_SLACK_SECONDS = 30.0
@@ -140,11 +141,22 @@ class TokenBroker:
                 + audience
                 + origin_suffix
             )
+            # Request a REFRESH token, not an access token. Keycloak v2 standard
+            # token exchange never creates a user session for an access-token
+            # exchange, so the *issued* token comes out session-less (no `sid`)
+            # and CANNOT itself be the subject of a further exchange — which broke
+            # any chain deeper than two hops (e.g. agents->mcp->search->leads).
+            # Requesting a refresh token makes Keycloak attach a client session to
+            # the existing user session (client attribute
+            # `standard.token.exchange.enableRefreshRequestedTokenType=SAME_SESSION`,
+            # set on every exchanging client), so `sid` is carried onto the issued
+            # token and it stays re-exchangeable. The response still carries the
+            # access token we use; the refresh token only anchors the session.
             form = {
                 "grant_type": GRANT_TOKEN_EXCHANGE,
                 "subject_token": subject_token,
                 "subject_token_type": TOKEN_TYPE_ACCESS,
-                "requested_token_type": TOKEN_TYPE_ACCESS,
+                "requested_token_type": TOKEN_TYPE_REFRESH,
                 "audience": audience,
                 "scope": scope,
             }
