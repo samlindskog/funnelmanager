@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
+    # Max concurrent OpenAI embed calls. The slow embed stage now runs lock-free
+    # (only the short Milvus upsert serializes on the priority gate), so this can
+    # be raised without starving interactive similarity queries. Env-tunable.
+    embed_concurrency: int = 8
+    # Max page-sized embedding batches running at once during a live search.
+    embed_batch_concurrency: int = 4
     milvus_uri: str = "http://milvus:19530"
     milvus_collection: str = "leads_people"
 

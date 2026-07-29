@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from app.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 # Apollo People/Org search max page size is 100; walk enough pages for 100k entries.
@@ -533,9 +535,6 @@ def _pagination_total_pages(
 PageFetchFn = Callable[[dict[str, Any]], Awaitable[tuple[list[str], dict[str, Any], int]]]
 EmbedBatchFn = Callable[[list[str]], Awaitable[list[str]]]
 
-# How many page-sized embedding batches may run at once while ingest continues.
-_EMBED_BATCH_CONCURRENCY = 4
-
 
 async def run_paged_search_stream(
     *,
@@ -667,7 +666,11 @@ async def run_paged_search_with_embedding(
             await queue.put(None)
 
     async def _embed_consumer() -> None:
-        sem = asyncio.Semaphore(_EMBED_BATCH_CONCURRENCY)
+        # How many page-sized embedding batches may run at once while ingest
+        # continues (env-tunable). Only the short Milvus upsert inside each batch
+        # serializes on the priority gate; the OpenAI embed overlaps freely.
+        concurrency = max(1, int(get_settings().embed_batch_concurrency))
+        sem = asyncio.Semaphore(concurrency)
         tasks: set[asyncio.Task[None]] = set()
 
         async def _one(batch: list[str]) -> None:

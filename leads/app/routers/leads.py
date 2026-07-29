@@ -37,7 +37,12 @@ from app.embeddings import (
     embed_texts,
     endpoint_source_precedence,
 )
-from app.milvus_client import index_lead_docs, search_similar
+from app.milvus_client import (
+    NICE_BACKFILL,
+    NICE_SEARCH_EMBED,
+    index_lead_docs,
+    search_similar,
+)
 from app.schemas import (
     ApolloEndpointResponseOut,
     ApolloEnrichedFlags,
@@ -140,11 +145,13 @@ async def _embed_mongo_ids_batch(
     *,
     source_precedence: int,
     force: bool = False,
+    nice: int = NICE_SEARCH_EMBED,
 ) -> list[str]:
     """Embed leads (respecting precedence) and record source. Returns indexed mongo ids.
 
     ``force`` re-embeds even docs that already carry a vector (backfill); see
-    ``index_lead_docs``.
+    ``index_lead_docs``. ``nice`` sets the Milvus-gate priority of the upsert
+    (live search passes ``NICE_SEARCH_EMBED``; backfill passes ``NICE_BACKFILL``).
     """
     if not mongo_ids:
         return []
@@ -158,18 +165,26 @@ async def _embed_mongo_ids_batch(
     if not object_ids:
         return []
     docs = [doc async for doc in db.leads.find({"_id": {"$in": object_ids}})]
-    indexed = await index_lead_docs(docs, source_precedence=source_precedence, force=force)
+    indexed = await index_lead_docs(
+        docs, source_precedence=source_precedence, force=force, nice=nice
+    )
     if indexed:
         await _mark_embedded(indexed)
     return [mongo_id for mongo_id, _ in indexed]
 
 
 async def _background_embed_mongo_ids(mongo_ids: list[str], source_precedence: int) -> None:
-    """Embed leads in the background (no stream progress)."""
+    """Embed leads in the background (no stream progress).
+
+    Bulk, non-interactive work — runs at ``NICE_BACKFILL`` so it yields the Milvus
+    gate to live-search embeds and interactive similarity queries.
+    """
     if not mongo_ids:
         return
     try:
-        await _embed_mongo_ids_batch(mongo_ids, source_precedence=source_precedence)
+        await _embed_mongo_ids_batch(
+            mongo_ids, source_precedence=source_precedence, nice=NICE_BACKFILL
+        )
     except Exception:
         logger.exception("Background embedding failed for %s lead(s)", len(mongo_ids))
 
@@ -632,7 +647,9 @@ async def _run_people_search_stream_job(
         embedding_stream_id=embedding_stream_id,
         base_params=params,
         fetch_page=lambda page_params: _fetch_people_search_page(settings, page_params),
-        embed_batch=lambda ids: _embed_mongo_ids_batch(ids, source_precedence=EMBED_SOURCE_SEARCH),
+        embed_batch=lambda ids: _embed_mongo_ids_batch(
+            ids, source_precedence=EMBED_SOURCE_SEARCH, nice=NICE_SEARCH_EMBED
+        ),
     )
 
 
@@ -647,7 +664,9 @@ async def _run_organizations_search_stream_job(
         embedding_stream_id=embedding_stream_id,
         base_params=params,
         fetch_page=lambda page_params: _fetch_organizations_search_page(settings, page_params),
-        embed_batch=lambda ids: _embed_mongo_ids_batch(ids, source_precedence=EMBED_SOURCE_SEARCH),
+        embed_batch=lambda ids: _embed_mongo_ids_batch(
+            ids, source_precedence=EMBED_SOURCE_SEARCH, nice=NICE_SEARCH_EMBED
+        ),
     )
 
 
@@ -891,7 +910,7 @@ async def _run_enrich_stream_job(
                     embedding_stream_id,
                     batch,
                     embed_batch=lambda ids: _embed_mongo_ids_batch(
-                        ids, source_precedence=EMBED_SOURCE_COMPLETE_INFO
+                        ids, source_precedence=EMBED_SOURCE_COMPLETE_INFO, nice=NICE_SEARCH_EMBED
                     ),
                 )
 
@@ -1253,7 +1272,7 @@ async def _run_match_stream_job(
                     embedding_stream_id,
                     batch,
                     embed_batch=lambda ids: _embed_mongo_ids_batch(
-                        ids, source_precedence=EMBED_SOURCE_MATCH
+                        ids, source_precedence=EMBED_SOURCE_MATCH, nice=NICE_SEARCH_EMBED
                     ),
                 )
 
@@ -1518,7 +1537,7 @@ async def _run_embedding_backfill(
                     embedding_stream_id,
                     batch,
                     embed_batch=lambda ids: _embed_mongo_ids_batch(
-                        ids, source_precedence=0, force=force
+                        ids, source_precedence=0, force=force, nice=NICE_BACKFILL
                     ),
                 )
                 batch = []
@@ -1527,7 +1546,7 @@ async def _run_embedding_backfill(
                 embedding_stream_id,
                 batch,
                 embed_batch=lambda ids: _embed_mongo_ids_batch(
-                    ids, source_precedence=0, force=force
+                    ids, source_precedence=0, force=force, nice=NICE_BACKFILL
                 ),
             )
     except Exception:

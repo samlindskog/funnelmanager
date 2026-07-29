@@ -7,6 +7,8 @@ event loop used by FastAPI request handlers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import heapq
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -29,18 +31,85 @@ _ALIAS = "default"
 _MONGO_ID_MAX = 64
 _APOLLO_ID_MAX = 128
 
-# Serialize Milvus SDK use (client is not reliably concurrent-safe).
-_milvus_lock: asyncio.Lock | None = None
-_milvus_lock_loop: asyncio.AbstractEventLoop | None = None
+# UNIX-nice priority tiers for the Milvus gate: lower runs first. The pymilvus
+# SDK is not reliably concurrent-safe, so every op still serializes through one
+# gate — but waiters wake lowest-nice-first (FIFO within a nice), so an
+# interactive similarity query jumps ahead of a wall of queued embedding writes
+# instead of blocking behind them (FIFO would 90s-starve it → caller 502).
+NICE_INTERACTIVE = 0  # search_similar (user query) — preempts the embed backlog
+NICE_SEARCH_EMBED = 10  # embedding writes from a live search
+NICE_BACKFILL = 20  # bulk / backfill embedding — yields to everything
 
 
-def _milvus_async_lock() -> asyncio.Lock:
-    global _milvus_lock, _milvus_lock_loop
+class MilvusGate:
+    """Serializes Milvus SDK access, waking waiters lowest-``nice``-first.
+
+    Same mutual exclusion as an ``asyncio.Lock`` (never two Milvus ops at once),
+    but ordered: within a nice tier waiters are FIFO; across tiers a lower nice
+    always wins the next slot. Preemption is at op boundaries only — a running op
+    is never interrupted. A waiter cancelled while queued removes itself cleanly
+    (or, if it was already handed the slot, passes it on) so the gate never wedges.
+    """
+
+    def __init__(self) -> None:
+        self._held = False
+        # Min-heap of (nice, seq, future); seq breaks ties FIFO within a nice.
+        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._seq = 0
+
+    async def acquire(self, nice: int) -> None:
+        if not self._held and not self._waiters:
+            self._held = True
+            return
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (nice, self._seq, fut))
+        self._seq += 1
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                # We were already handed the slot before the cancel landed; pass
+                # it on so it is not lost (which would wedge the gate).
+                self._wake_next()
+            else:
+                self._waiters = [w for w in self._waiters if w[2] is not fut]
+                heapq.heapify(self._waiters)
+            raise
+        self._held = True
+
+    def release(self) -> None:
+        self._wake_next()
+
+    def _wake_next(self) -> None:
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():
+                fut.set_result(None)  # hand off; ``_held`` stays True
+                return
+        self._held = False
+
+    @contextlib.asynccontextmanager
+    async def __call__(self, nice: int = NICE_INTERACTIVE):
+        await self.acquire(nice)
+        try:
+            yield
+        finally:
+            self.release()
+
+
+# One gate per event loop (lazy-init, mirroring the prior lock pattern) so it is
+# bound to the running loop and never shared across loops in tests.
+_milvus_gate: MilvusGate | None = None
+_milvus_gate_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _gate() -> MilvusGate:
+    global _milvus_gate, _milvus_gate_loop
     loop = asyncio.get_running_loop()
-    if _milvus_lock is None or _milvus_lock_loop is not loop:
-        _milvus_lock = asyncio.Lock()
-        _milvus_lock_loop = loop
-    return _milvus_lock
+    if _milvus_gate is None or _milvus_gate_loop is not loop:
+        _milvus_gate = MilvusGate()
+        _milvus_gate_loop = loop
+    return _milvus_gate
 
 
 def _parse_uri(uri: str) -> tuple[str, int]:
@@ -112,7 +181,7 @@ def ensure_collection(settings: Settings | None = None) -> Collection:
 
 
 async def ensure_collection_async(settings: Settings | None = None) -> Collection:
-    async with _milvus_async_lock():
+    async with _gate()(NICE_INTERACTIVE):
         return await asyncio.to_thread(ensure_collection, settings)
 
 
@@ -135,12 +204,18 @@ def _upsert_lead_vectors_sync(
 async def upsert_lead_vectors(
     rows: list[tuple[str, str, list[float]]],
     *,
+    nice: int = NICE_SEARCH_EMBED,
     settings: Settings | None = None,
 ) -> None:
-    """Upsert (mongo_id, apollo_id, embedding) rows into Milvus (thread offload)."""
+    """Upsert (mongo_id, apollo_id, embedding) rows into Milvus (thread offload).
+
+    ``nice`` sets the gate priority of this write: live-search embeds pass
+    ``NICE_SEARCH_EMBED`` and backfills ``NICE_BACKFILL`` so an interactive
+    ``search_similar`` (``NICE_INTERACTIVE``) always wins the next gate slot.
+    """
     if not rows:
         return
-    async with _milvus_async_lock():
+    async with _gate()(nice):
         await asyncio.to_thread(_upsert_lead_vectors_sync, rows, settings=settings)
 
 
@@ -182,7 +257,8 @@ async def search_similar(
     settings: Settings | None = None,
 ) -> list[tuple[str, float]]:
     """Return [(mongo_id, score), ...] ordered by similarity (COSINE)."""
-    async with _milvus_async_lock():
+    # Interactive user query: jumps ahead of any queued embedding writes.
+    async with _gate()(NICE_INTERACTIVE):
         return await asyncio.to_thread(
             _search_similar_sync,
             query_vector,
@@ -196,6 +272,7 @@ async def index_lead_docs(
     *,
     source_precedence: int,
     force: bool = False,
+    nice: int = NICE_SEARCH_EMBED,
     settings: Settings | None = None,
 ) -> list[tuple[str, int]]:
     """Embed and upsert person/organization Mongo docs, respecting embedding precedence.
@@ -208,6 +285,10 @@ async def index_lead_docs(
     ``force`` bypasses that never-downgrade skip so a backfill can re-embed docs
     that already carry a vector (e.g. after an embedding-model/text change); the
     stored precedence still reflects the doc's own best data tier, never lowered.
+
+    ``nice`` is the Milvus-gate priority of the resulting upsert (default
+    ``NICE_SEARCH_EMBED``; backfills pass ``NICE_BACKFILL``). Only the short Milvus
+    upsert serializes on the gate — the slower OpenAI embed runs lock-free.
 
     Soft-fails; returns ``[(mongo_id, stored_precedence), ...]`` for docs indexed.
     """
@@ -249,7 +330,7 @@ async def index_lead_docs(
             (mongo_id, apollo_id, vector)
             for (mongo_id, apollo_id, _, _), vector in zip(prepared, vectors, strict=True)
         ]
-        await upsert_lead_vectors(rows, settings=cfg)
+        await upsert_lead_vectors(rows, nice=nice, settings=cfg)
         return [(mongo_id, precedence) for (mongo_id, _, _, precedence) in prepared]
     except Exception:
         logger.exception("Failed to index %s lead(s) in Milvus", len(prepared))

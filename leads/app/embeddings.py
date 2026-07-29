@@ -67,17 +67,19 @@ def lead_embedding_precedence(doc: dict[str, Any]) -> int:
             best = max(best, precedence)
     return best
 
-# Cap concurrent embedding HTTP calls across background page tasks.
-_EMBED_CONCURRENCY = 4
+# Cap concurrent embedding HTTP calls across background page tasks. One semaphore
+# per event loop (lazy-init); its size is taken from ``Settings.embed_concurrency``
+# the first time it is created on a loop.
 _embed_semaphore: asyncio.Semaphore | None = None
 _embed_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _embed_sem() -> asyncio.Semaphore:
+def _embed_sem(settings: Settings | None = None) -> asyncio.Semaphore:
     global _embed_semaphore, _embed_semaphore_loop
     loop = asyncio.get_running_loop()
     if _embed_semaphore is None or _embed_semaphore_loop is not loop:
-        _embed_semaphore = asyncio.Semaphore(_EMBED_CONCURRENCY)
+        cfg = settings or get_settings()
+        _embed_semaphore = asyncio.Semaphore(max(1, int(cfg.embed_concurrency)))
         _embed_semaphore_loop = loop
     return _embed_semaphore
 
@@ -250,25 +252,38 @@ async def embed_texts(
     *,
     settings: Settings | None = None,
 ) -> list[list[float]]:
-    """Embed texts with AsyncOpenAI (non-blocking). Returns one vector per input."""
+    """Embed texts with AsyncOpenAI (non-blocking). Returns one vector per input.
+
+    OpenAI is the slow, lock-free stage: the API-max chunks are embedded
+    concurrently (bounded by ``Settings.embed_concurrency``) so calls overlap
+    instead of running strictly serially. Output order matches ``texts``.
+    """
     if not texts:
         return []
     cfg = settings or get_settings()
     if not cfg.openai_configured:
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
-    async with _embed_sem():
-        vectors: list[list[float]] = []
-        chunk_size = 64
-        async with AsyncOpenAI(api_key=cfg.openai_api_key) as client:
-            for start in range(0, len(texts), chunk_size):
-                chunk = texts[start : start + chunk_size]
+    chunk_size = 64
+    chunks = [texts[start : start + chunk_size] for start in range(0, len(texts), chunk_size)]
+    sem = _embed_sem(cfg)
+
+    async with AsyncOpenAI(api_key=cfg.openai_api_key) as client:
+
+        async def _embed_chunk(chunk: list[str]) -> list[list[float]]:
+            async with sem:
                 response = await client.embeddings.create(
                     model=cfg.openai_embedding_model,
                     input=chunk,
                     dimensions=cfg.openai_embedding_dimensions,
                 )
-                by_index = {item.index: item.embedding for item in response.data}
-                for offset in range(len(chunk)):
-                    vectors.append(list(by_index[offset]))
-        return vectors
+            by_index = {item.index: item.embedding for item in response.data}
+            return [list(by_index[offset]) for offset in range(len(chunk))]
+
+        # gather preserves input order, so vectors line up with ``texts``.
+        chunk_vectors = await asyncio.gather(*(_embed_chunk(chunk) for chunk in chunks))
+
+    vectors: list[list[float]] = []
+    for chunk_result in chunk_vectors:
+        vectors.extend(chunk_result)
+    return vectors
