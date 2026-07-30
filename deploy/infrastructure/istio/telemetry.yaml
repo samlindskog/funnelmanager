@@ -1,0 +1,55 @@
+# Mesh-wide telemetry. Living in the mesh root namespace (istio-system) with no
+# selector, this Telemetry applies to every workload in the mesh.
+#
+# tracing: each Envoy emits one span per hop to the `tempo` opentelemetry
+# extensionProvider (helm.yaml meshConfig). Spans are already correlated by the
+# W3C `traceparent` fm_runtime propagates across every RFC 8693 exchange hop.
+# 100% sampling is fine at current traffic; dial down later if volume grows.
+#
+# accessLogging: keeps the built-in `envoy` file logger (/dev/stdout, the
+# meshConfig format with query-strip) but attaches a CEL filter that SUPPRESSES
+# access logs for the Apollo webhook path. That path carries a long-lived secret
+# IN THE PATH itself (not the query), so query-stripping cannot help — the whole
+# log line must be dropped. Mesh-wide is deliberate: the ingress gateway routes
+# /api/leads/webhooks/ to leads with NO path rewrite, so BOTH the gateway Envoy
+# and the leads sidecar see the secret-bearing path; one mesh-wide filter covers
+# both without enumerating workload labels.
+# CEL semantics (the filter is "log when TRUE"):
+#   - raw TCP conn (leads<->mongo/milvus, *<->*-db): no HTTP request, so
+#     has(request.url_path) is false -> inner && is false -> !false = TRUE -> log.
+#     The has() guard is REQUIRED: Istio applies accessLogging filters to TCP
+#     chains too (AccessLogBuilder.setTCPAccessLog), and Envoy's CEL filter
+#     fails closed on an evaluation error (a bare request.url_path on a TCP conn
+#     would error -> drop -> silently kill EVERY TCP access log mesh-wide).
+#   - normal HTTP: has()=true, prefix false -> !(true && false) = TRUE -> log.
+#   - webhook HTTP: has()=true, prefix true -> !(true && true) = FALSE -> dropped.
+# (Chosen over an EnvoyFilter: an EnvoyFilter MERGE on the HCM `access_log`
+# repeated field APPENDS a second logger — the original unfiltered logger would
+# still emit the secret. The Telemetry filter is the supported suppressor.)
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-default
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  accessLogging:
+    - providers:
+        - name: envoy
+      filter:
+        expression: '!(has(request.url_path) && request.url_path.startsWith("/api/leads/webhooks/apollo/"))'
+  tracing:
+    - providers:
+        - name: tempo
+      randomSamplingPercentage: 100
+      # SECURITY: overwrite Envoy's built-in `http.url` span tag with a literal
+      # so the full path+query never lands in Tempo. That URL would otherwise
+      # leak the Apollo webhook path-secret (/api/leads/webhooks/apollo/{secret})
+      # and the mail OAuth `state`/`code` query params at 100% sampling.
+      # customTags are applied after built-in tags (setTag overwrite semantics),
+      # so the literal replaces the URL. Route/method/status tags are untouched.
+      customTags:
+        http.url:
+          literal:
+            value: redacted

@@ -2,6 +2,10 @@
 # - egress to istiod (xDS 15012, monitoring 15014) in istio-system
 # - egress to the OPA ext_authz Service (:9191) in opa-system — the sidecar
 #   calls the node-local OPA over its Service, it is not in-pod
+# - egress to Tempo (:4317, monitoring) — the sidecar exports OTLP trace spans
+#   from THIS pod's netns, so the tracing target must be opened here or the
+#   spans are dropped by default-deny egress (destination-side tempo-ingress
+#   alone is insufficient)
 # - ingress from istio-system (istiod health/debug reach-in)
 # Note: mesh mTLS between workloads travels on the app port itself (the
 # sidecar intercepts transparently), so no extra data ports are needed here.
@@ -38,3 +42,13 @@ spec:
       ports:
         - protocol: TCP
           port: 9191
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - protocol: TCP
+          port: 4317

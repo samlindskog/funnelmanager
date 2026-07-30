@@ -90,10 +90,36 @@ spec:
         datasources:
           - name: Prometheus
             type: prometheus
+            uid: prometheus
             access: proxy
             url: http://prometheus-server.monitoring.svc
             isDefault: true
           - name: Loki
             type: loki
+            uid: loki
             access: proxy
             url: http://loki.monitoring.svc:3100
+            jsonData:
+              # Extract the 32-hex trace id from the W3C `traceparent`
+              # (00-<traceid>-<spanid>-<flags>) the JSON logs carry
+              # (fm_runtime logging.py) and link the log line to Tempo.
+              derivedFields:
+                - name: TraceID
+                  matcherRegex: '"traceparent":\s*"00-([0-9a-f]{32})'
+                  url: '$${__value.raw}'
+                  datasourceUid: tempo
+          - name: Tempo
+            type: tempo
+            uid: tempo
+            access: proxy
+            url: http://tempo.monitoring.svc:3100
+            jsonData:
+              # trace -> its logs (Loki). tracesToMetrics + nodeGraph are
+              # omitted: both need Tempo's metrics-generator/service-graph
+              # (not wired here) and would render empty panels.
+              tracesToLogsV2:
+                datasourceUid: loki
+                spanStartTimeShift: '-1h'
+                spanEndTimeShift: '1h'
+                filterByTraceID: true
+                filterBySpanID: false

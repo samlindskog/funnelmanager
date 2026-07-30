@@ -6,4 +6,5 @@ resources:
   - fluent-bit.yaml
   - prometheus.yaml
   - grafana.yaml
+  - tempo.yaml
   - networkpolicies.yaml

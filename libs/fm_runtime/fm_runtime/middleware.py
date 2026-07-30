@@ -187,6 +187,14 @@ class PrincipalMiddleware:
             self._observe(scope, status_holder["status"], time.perf_counter() - started, ctx)
 
     def _observe(self, scope: dict, status: int, elapsed: float, ctx) -> None:
+        # Log the matched route TEMPLATE (path_format), never the raw request path:
+        # secret-in-path routes (e.g. the Apollo webhook /api/leads/webhooks/apollo/{secret})
+        # would otherwise leak the secret into structured logs / Loki. For a matched route
+        # `route` is the literal template with placeholders; it falls back to the raw path
+        # only for UNMATCHED routes (no route object), an acceptable residual since
+        # secret-bearing paths are registered/matched routes. Real per-request paths remain
+        # available via the (query-stripped) Envoy access logs. Query strings are excluded
+        # from ASGI scope["path"] entirely, so they never reach here.
         route = getattr(scope.get("route"), "path_format", None) or scope.get("path", "")
         method = scope.get("method", "GET")
         HTTP_REQUESTS.labels(self.service, method, route, str(status or 0)).inc()
@@ -194,12 +202,12 @@ class PrincipalMiddleware:
         logger.info(
             "%s %s %s",
             method,
-            scope.get("path", ""),
+            route,
             status or 0,
             extra={
                 "http": {
                     "method": method,
-                    "path": scope.get("path", ""),
+                    "path": route,
                     "route": route,
                     "status": status or 0,
                     "duration_ms": round(elapsed * 1000, 2),

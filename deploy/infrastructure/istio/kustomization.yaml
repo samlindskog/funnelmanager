@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
   - helm.yaml
   - gateway-deployment.yaml
+  - telemetry.yaml

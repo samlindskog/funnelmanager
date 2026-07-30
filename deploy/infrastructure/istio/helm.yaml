@@ -66,6 +66,18 @@ spec:
           limits: { cpu: 100m, memory: 64Mi }
     meshConfig:
       accessLogFile: /dev/stdout
+      # SECURITY: reproduce Istio's DEFAULT text access-log format verbatim but
+      # render the request path with %REQ_WITHOUT_QUERY% instead of %REQ%, so the
+      # query string never reaches the access logs (Loki). This strips the mail
+      # OAuth `state`/`code` query params. Istio auto-declares the
+      # envoy.formatter.req_without_query extension whenever the format string
+      # contains %REQ_WITHOUT_QUERY (verified against istio 1.24.3
+      # accessLogTextFormatters + FileAccessLogFromMeshConfig); Istio also
+      # appends the trailing newline. Only the path field differs from default —
+      # every other field is byte-for-byte the 1.24 default (keeps debug value).
+      # The webhook path-secret is killed separately (telemetry.yaml filter).
+      accessLogFormat: |
+        [%START_TIME%] "%REQ(:METHOD)% %REQ_WITHOUT_QUERY(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% %CONNECTION_TERMINATION_DETAILS% "%UPSTREAM_TRANSPORT_FAILURE_REASON%" %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%" "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%" %UPSTREAM_CLUSTER_RAW% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%
       defaultConfig:
         holdApplicationUntilProxyStarts: true
       # Every request is authorized by OPA via Envoy ext_authz. The Service
@@ -76,3 +88,9 @@ spec:
           envoyExtAuthzGrpc:
             service: opa.opa-system.svc.cluster.local
             port: 9191
+        # OTLP/gRPC tracing export from every Envoy to Tempo (monitoring ns).
+        # Wired to workloads by the mesh-wide Telemetry CR (telemetry.yaml).
+        - name: tempo
+          opentelemetry:
+            service: tempo.monitoring.svc.cluster.local
+            port: 4317
