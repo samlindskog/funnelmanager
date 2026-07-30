@@ -94,6 +94,41 @@ spec:
         - name: alloy
           namespace: monitoring
           port: 12347
+    # Header-routed canary (Phase 4): the hub/search SPA served from the
+    # `frontend-canary` workload for requests whose `x-fm-canary` header equals
+    # the SECRET token below. This rule and the `/` catch-all below both match a
+    # 1-char path ("/"), so the Gateway API precedence tie-break decides between
+    # them: after (1) path length and (2) method (both tie), (3) is the number
+    # of HEADER matches — this rule has one, the catch-all has zero, so this
+    # rule ALWAYS wins for correctly-headed requests REGARDLESS of list order
+    # (it is placed first only for readability). Everyone without the exact
+    # token falls through to stable frontend. Only the SPA-serving `/` route is
+    # duplicated; /api/* and the other SPA routes are untouched, so a canary
+    # SPA's /api/* calls hit the already-traced STABLE backends (the point of a
+    # frontend-only canary).
+    #
+    # SECRET-VALUE GATE (security): the value is a random capability token, NOT
+    # a guessable `1` — an unaware/induced user cannot land on the canary and
+    # thus cannot be served unreviewed feature-branch JS same-origin (see the
+    # frontend-canary deployment.yaml browser-session trust-boundary note).
+    # Same class as the Apollo webhook secret-in-path already in this repo:
+    # committed in-manifest, rotatable by editing this value (and re-deploying).
+    # To reach the canary, send the header:
+    #   curl -H 'x-fm-canary: 8640c2f1285bf39d0323bbe540e51694' https://x9bc433.win/
+    # (or set it via a browser request-header extension). See PLACEHOLDERS.md.
+    # NOTE: verify at GATE-4 that this Istio build honours the header-count
+    # tie-break (Gateway API standard; Istio implements it) and that the token
+    # actually resolves to a canary pod while a wrong/absent token stays stable.
+    - matches:
+        - path: { type: PathPrefix, value: / }
+          headers:
+            - name: x-fm-canary
+              type: Exact
+              value: "8640c2f1285bf39d0323bbe540e51694"
+      backendRefs:
+        - name: frontend-canary
+          namespace: prod
+          port: 8080
     # Hub/search SPA — catch-all last (its nginx does try_files fallback).
     - matches:
         - path: { type: PathPrefix, value: / }

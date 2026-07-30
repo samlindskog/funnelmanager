@@ -1,0 +1,119 @@
+# Build a TELEMETRY-ENABLED canary image of an SPA from an arbitrary feature
+# branch, push it as `<service>:canary-<shortsha>`, then pin+activate it in the
+# prod canary Deployment on main. Flux reconciles the commit and the canary
+# goes live for requests carrying the secret `x-fm-canary` token (see
+# deploy/infrastructure/gateway/httproutes.yaml). Mirrors build-images.yml's
+# auth/login/buildx + sed-commit pin pattern; scoped to the SPA services, which
+# accept `ARG VITE_TELEMETRY` (backends would ignore it).
+#
+# Reference pattern: only `frontend` has canary manifests today
+# (deploy/apps/base/frontend-canary/*). To canary mailui/agentsui later, add
+# their `<svc>-canary` base + overlay images entry, then this workflow drives
+# them unchanged.
+name: build-canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: SPA service to build as a canary.
+        required: true
+        default: frontend
+        type: choice
+        # frontend ONLY for now: mailui/agentsui need `ARG VITE_TELEMETRY` in
+        # their Dockerfile AND `<svc>-canary` manifests (base + overlay images
+        # entry) before they can be canaried — otherwise this would silently
+        # build a non-telemetry image. Add them here once both exist.
+        options:
+          - frontend
+      ref:
+        description: Git branch or SHA to build the canary image from.
+        required: true
+        default: main
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      shortsha: ${{ steps.rev.outputs.shortsha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: rev
+        run: echo "shortsha=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          # SPA images keep their own self-contained build context.
+          context: ./${{ inputs.service }}
+          file: ${{ inputs.service }}/Dockerfile
+          push: true
+          # VITE_TELEMETRY=1 bakes the Faro RUM bootstrap into the bundle;
+          # APP_VERSION stamps the exact canary tag so RUM version == image tag.
+          build-args: |
+            VITE_TELEMETRY=1
+            APP_VERSION=canary-${{ steps.rev.outputs.shortsha }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ inputs.service }}:canary-${{ steps.rev.outputs.shortsha }}
+          cache-from: type=gha,scope=${{ inputs.service }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.service }}-canary
+
+  pin:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Pin onto main (what Flux watches), regardless of which ref was built.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Pin canary tag + activate (replicas 0 -> 1)
+        run: |
+          set -euo pipefail
+          TAG="canary-${{ needs.build.outputs.shortsha }}"
+          SVC="${{ inputs.service }}"
+          overlay="deploy/apps/overlays/prod/kustomization.yaml"
+          dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
+          if [ ! -f "$dep" ]; then
+            echo "No canary manifests for '$SVC' (expected $dep)." >&2
+            echo "Only 'frontend' has canary manifests today — see build-canary.yml header." >&2
+            exit 1
+          fi
+          # Rewrite ONLY the canary image entry (newTag currently canary-*);
+          # the stable prod pin job seds only newTag: sha-*, so they never
+          # collide. (Single canary entry today; scope by service when more
+          # canaries are added.)
+          sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*)canary-.*/\1$TAG/" "$overlay"
+          # Activate: the committed default is replicas: 0 (idle so the PINME
+          # placeholder is never pulled). Scale to 1 to make the canary live.
+          sed -i -E "s/(^[[:space:]]*replicas:[[:space:]]*)[0-9]+/\11/" "$dep"
+          git diff --stat
+      - name: Commit the pin + activation
+        run: |
+          set -euo pipefail
+          git config user.name  "funnelmanager-ci[bot]"
+          git config user.email "ci@users.noreply.github.com"
+          git add \
+            "deploy/apps/overlays/prod/kustomization.yaml" \
+            "deploy/apps/base/${{ inputs.service }}-canary/deployment.yaml"
+          if git diff --cached --quiet; then
+            echo "Nothing to pin (same tag already live)."; exit 0
+          fi
+          git commit -m "ci(canary): pin ${{ inputs.service }} to canary-${{ needs.build.outputs.shortsha }} [skip ci]"
+          git push origin main

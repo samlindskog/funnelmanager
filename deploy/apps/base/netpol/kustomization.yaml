@@ -12,6 +12,7 @@ resources:
   - jobs.yaml
   - agents.yaml
   - frontend.yaml
+  - frontend-canary.yaml
   - mailui.yaml
   - agentsui.yaml
   - app-db.yaml

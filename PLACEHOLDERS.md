@@ -77,6 +77,19 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
       so, dump `funnelmanager` from the old prod `db` container and restore
       into the CNPG `app-db` (schema is unchanged in this repo).
 
+## Canary access
+
+- [x] **Frontend canary header token** — the header-routed canary
+      (`deploy/infrastructure/gateway/httproutes.yaml`, app-prod) is gated by a
+      secret `x-fm-canary` value: `8640c2f1285bf39d0323bbe540e51694`. Send
+      `x-fm-canary: <token>` to reach the canary; anyone else stays on stable
+      frontend. It is a capability/obscurity token (same class as the Apollo
+      webhook secret-in-path), committed in-manifest and **rotatable** by
+      editing the `value:` in that HTTPRoute and re-deploying. Only ever build
+      the canary from a TRUSTED branch — the canary serves feature-branch JS
+      same-origin and can read the prod Keycloak session of anyone who reaches
+      it (see the frontend-canary deployment trust-boundary note).
+
 ## Deferred hardening
 
 - [ ] **Base-image digest pinning** — resolve version tags to `@sha256:`.

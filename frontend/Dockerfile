@@ -14,6 +14,12 @@ COPY . .
 ARG APP_VERSION
 ENV APP_VERSION=${APP_VERSION}
 
+# Telemetry (Faro) is gated at build by `import.meta.env.VITE_TELEMETRY === '1'`
+# (see main.tsx). Canary images build with `--build-arg VITE_TELEMETRY=1` to
+# include Faro; a normal prod build leaves it unset → empty → telemetry excluded.
+ARG VITE_TELEMETRY
+ENV VITE_TELEMETRY=${VITE_TELEMETRY}
+
 RUN npm run build
 
 # Serve with nginx and reverse-proxy /api to the backend

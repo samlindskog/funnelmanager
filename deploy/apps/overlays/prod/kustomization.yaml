@@ -9,6 +9,7 @@ resources:
   - ../../base/jobs
   - ../../base/agents
   - ../../base/frontend
+  - ../../base/frontend-canary
   - ../../base/mailui
   - ../../base/agentsui
   # Data stack (CNPG clusters, mongo, milvus, etcd, minio) — authored under
@@ -40,6 +41,16 @@ images:
     newTag: sha-76088fef2d05081aa7f12cf6b2ffc66b599e52b7
   - name: ghcr.io/samlindskog/funnelmanager/backup
     newTag: sha-76088fef2d05081aa7f12cf6b2ffc66b599e52b7
+  # Header-routed frontend canary (Phase 4). Its base uses the canary-logical
+  # name `.../frontend-canary`; this entry remaps it to the real `frontend`
+  # repo with an INDEPENDENT `canary-<sha>` tag. Kept separate from the stable
+  # `frontend` entry above (matched by exact name) so the stable sha-pin never
+  # clobbers the canary tag. The `canary-PINME` placeholder is rewritten by
+  # .github/workflows/build-canary.yml (which seds only `newTag: canary-*`);
+  # the stable prod pin job seds only `newTag: sha-*`, so the two never collide.
+  - name: ghcr.io/samlindskog/funnelmanager/frontend-canary
+    newName: ghcr.io/samlindskog/funnelmanager/frontend
+    newTag: canary-PINME
 
 generatorOptions:
   disableNameSuffixHash: true
@@ -114,3 +125,14 @@ patches:
         path: /imagePullSecrets
         value:
           - name: ghcr-pull
+  # The canary is a throwaway variant — drop it to the LOWER `fm-dev`
+  # PriorityClass (10000 < fm-prod 100000) so it is first-to-evict under the
+  # tight fm-quota and never competes with real prod pods. This overrides the
+  # blanket fm-prod patch above for frontend-canary only.
+  - target:
+      kind: Deployment
+      name: frontend-canary
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/priorityClassName
+        value: fm-dev

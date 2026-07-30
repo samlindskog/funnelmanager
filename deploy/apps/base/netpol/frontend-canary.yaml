@@ -1,0 +1,26 @@
+# frontend-canary: same posture as stable frontend — a static SPA the gateway
+# fetches assets from; the pod initiates nothing (DNS via allow-dns, mesh
+# control-plane via allow-istio-control). NetworkPolicies select by POD LABEL
+# (not ServiceAccount), so the canary needs its own policy even though it
+# shares the `frontend` SA. Mirrors frontend.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-canary
+  labels:
+    app.kubernetes.io/name: frontend-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: frontend-canary
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 80

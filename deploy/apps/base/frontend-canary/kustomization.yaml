@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No serviceaccount.yaml: the canary reuses the stable `frontend` SA (defined
+# in base/frontend) so its SPIFFE identity — and thus OPA's verdict — is
+# identical to stable frontend. See deployment.yaml IDENTITY note.
+resources:
+  - deployment.yaml
+  - service.yaml

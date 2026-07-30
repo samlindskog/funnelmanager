@@ -12,11 +12,15 @@ k3s, `--disable traefik`, flannel CNI, k3s NetworkPolicy controller.
 | `cp` | control plane (SQLite datastore) | `node-role.kubernetes.io/control-plane=true` | `node-role.kubernetes.io/control-plane=:NoSchedule` |
 | `edge` | DMZ: ingress gateway + Keycloak only | `role=edge` | `role=edge:NoSchedule` |
 | `worker1` | apps, CNPG Postgres, observability | `role=worker` | none |
+| `worker2` | apps headroom (canary/second-pod capacity) | `role=worker` | none |
 
 Never assume single-worker scheduling: schedule to `role=worker` via
-nodeSelector/affinity on the *label*, not the node name. istiod runs on `cp`
-(toleration + nodeSelector); OPA is a DaemonSet on every node (tolerates
-both taints). Only `edge` gets public 80/443.
+nodeSelector/affinity on the *label*, not the node name. Both workers share
+`role=worker`; when a workload wants a *specific* worker (e.g. the frontend
+canary prefers the `worker2` headroom) single it out with a **soft**
+`kubernetes.io/hostname` nodeAffinity preference, never a hard requirement.
+istiod runs on `cp` (toleration + nodeSelector); OPA is a DaemonSet on every
+node (tolerates both taints). Only `edge` gets public 80/443.
 
 ## Namespaces
 
@@ -50,6 +54,10 @@ overlay, not in base).
 - Common labels on everything: `app.kubernetes.io/name: <name>`,
   `app.kubernetes.io/part-of: funnelmanager`. Selectors use
   `app.kubernetes.io/name` only.
+- `version` is an OPTIONAL label distinguishing a canary variant from stable
+  (e.g. `version: canary` on `frontend-canary`), useful for Tempo/Grafana
+  split-by-version. It goes on the Deployment/pod template only — never in
+  Service or NetworkPolicy selectors (they key on `app.kubernetes.io/name`).
 - Container ports keep the compose numbers: search 8000, leads 8001,
   mcp 8003, mail 8004, jobs 8005, agents 8006, static nginx 8080 (non-root
   nginx), Keycloak 8080.

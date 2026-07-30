@@ -1,0 +1,136 @@
+# Header-routed canary of the `frontend` SPA (Phase 4 of the observability
+# program). This is a SEPARATE workload beside stable `frontend` — the stable
+# Deployment/Service/labels are never touched, so there is no routing gap.
+#
+# Routing: the app-prod HTTPRoute sends requests whose `x-fm-canary` header
+# matches a SECRET token here; everyone else keeps hitting stable `frontend`.
+# Same `prod` namespace, same Keycloak session, same OPA policy.
+#
+# BROWSER-SESSION TRUST BOUNDARY (security): the canary is served SAME-ORIGIN at
+# x9bc433.win, so its (potentially unreviewed, feature-branch) JS runs in the
+# same origin as the hub and can read the prod Keycloak session — the
+# `fm_oidc_*` localStorage keys — of ANY user whose browser reaches it. That is
+# exactly why the HTTPRoute gates the canary behind a secret `x-fm-canary`
+# token (not a guessable value): an unaware or induced user cannot be routed
+# here. ONLY build the canary from TRUSTED branches, and rotate the token
+# (httproutes.yaml) if it leaks.
+#
+# IDENTITY (why no OPA/data.json change is needed): this pod reuses the STABLE
+# `frontend` ServiceAccount, so its SPIFFE id is
+# `spiffe://cluster.local/ns/prod/sa/frontend` — identical to stable frontend.
+# The canary sidecar's ext_authz therefore resolves `service := dst.sa =
+# frontend`, matching the existing `callers["frontend"]` + `anonymous` "/"
+# entries verbatim. The edge gateway resolves the logical service by PATH ("/"
+# -> frontend), not by backend Service name, so it is unaffected too. Reusing
+# the SA is safe: the frontend SA is a pure ingress target (static nginx, no
+# egress, not a source in any caller/azp allowlist), so sharing its identity
+# grants the canary nothing beyond serving the SPA shell. (Deliberate, narrow
+# exception to the one-SA-per-workload convention — flagged for security review.)
+#
+# IMAGE: the base uses a canary-logical name that the prod overlay's `images:`
+# transformer remaps to `ghcr.io/samlindskog/funnelmanager/frontend` with the
+# `canary-<sha>` tag (see overlays/prod/kustomization.yaml). The distinct name
+# keeps the stable `frontend` sha-pin from clobbering the canary tag.
+#
+# ACTIVATION (chicken-egg): the committed default is `replicas: 0` so the
+# placeholder `canary-PINME` tag is never pulled and `apps-prod` stays Ready
+# while idle. The `build-canary.yml` workflow pins a real `canary-<sha>` tag AND
+# scales this to 1 in the same commit — that is how the canary goes live. To
+# retire it, set `replicas: 0` again (a one-line GitOps commit).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-canary
+  labels:
+    app.kubernetes.io/name: frontend-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default (see ACTIVATION above). build-canary.yml scales to 1.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frontend-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+    spec:
+      # Reuse the stable frontend identity (see IDENTITY note above).
+      serviceAccountName: frontend
+      # Must land on a worker (never edge/cp); PREFER worker2 — the new
+      # headroom node — but stay soft so a full/absent worker2 can't make the
+      # canary unschedulable (it falls back to worker1). Both workers share
+      # `role=worker`, so worker2 is singled out by its hostname label.
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # See stable frontend: stock nginx starts as root, so no runAsNonRoot.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          # Canary-logical name; remapped to the real repo + `canary-<sha>` tag
+          # by the prod overlay images transformer. Never `:latest`.
+          image: ghcr.io/samlindskog/funnelmanager/frontend-canary
+          ports:
+            - name: http
+              containerPort: 80
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FRONTEND_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FRONTEND_OIDC_CLIENT_ID
+              value: frontend
+            - name: DOMAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: domain
+            - name: WEB_APPS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: web-apps
+                  optional: true
+            - name: ADMIN_APPS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: admin-apps
+                  optional: true

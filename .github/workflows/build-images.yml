@@ -94,8 +94,11 @@ jobs:
           set -euo pipefail
           SHA="sha-${{ needs.vars.outputs.sha }}"
           f="deploy/apps/overlays/prod/kustomization.yaml"
-          # Replace every `newTag: <anything>` under the images: block.
-          sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*).*/\1$SHA/" "$f"
+          # Replace every STABLE `newTag: sha-<...>` under the images: block.
+          # Scoped to the `sha-` prefix so the header-routed canary entry
+          # (`newTag: canary-<...>`, pinned by build-canary.yml) is left
+          # untouched — the two pin jobs must never clobber each other.
+          sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*)sha-.*/\1$SHA/" "$f"
           git diff --stat
       - name: Rebuild fm-origin provider JAR + ConfigMap from src/
         # Keep the committed Keycloak script-provider artifacts CI-reproduced

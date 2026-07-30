@@ -53,3 +53,10 @@ spec:
         http.url:
           literal:
             value: redacted
+# DEFERRED — canary trace-sampling. Baseline is 100% above, so the frontend
+# canary is already fully traced; nothing to add now. Once the baseline is
+# lowered for volume, add a namespaced Telemetry in `prod` selecting
+# `app.kubernetes.io/name: frontend-canary` at `randomSamplingPercentage: 100`
+# to keep the canary at 100%. Note Istio samples PER WORKLOAD, not per header —
+# end-to-end capture relies on the canary SPA's Faro build propagating a
+# sampled `traceparent` from the browser.
