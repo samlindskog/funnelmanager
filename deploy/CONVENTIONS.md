@@ -97,7 +97,10 @@ istiod values (64Mi/256Mi). The summed budget lives in
 | fluent-bit (per node) | 25m / 64Mi | 100m / 128Mi |
 | kube-state-metrics | 25m / 64Mi | 100m / 128Mi |
 
-Dev overlay halves app requests, keeps limits, replicas 1 everywhere.
+Dev workloads halve app requests, keep limits, replicas 1 everywhere. (The
+GitOps dev-preview overlay that applied this was removed pending an Istio
+canary for dev pods; the `dev` namespace, quotas, `fm-dev` PriorityClass, and
+mesh/gateway policies remain for that future work.)
 
 ## Identity & app env
 

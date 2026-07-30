@@ -97,7 +97,6 @@ flux_status() {
   echo "== Flux (GitOps reconcile) =="
   $SSH "$FLUX get kustomization apps-prod 2>&1" \
     || echo "$BAD flux unreachable"
-  echo "(apps-dev ships SUSPENDED by design — ignore its suspended flag)"
 }
 
 logs_scan() {

@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: kustomize build all deploy dirs
         run: |
-          for dir in deploy/infrastructure/*/ deploy/apps/overlays/prod deploy/apps/overlays/dev; do
+          for dir in deploy/infrastructure/*/ deploy/apps/overlays/prod; do
             [ -f "$dir/kustomization.yaml" ] || continue
             kubectl kustomize --load-restrictor=LoadRestrictionsNone "$dir" > /dev/null
             echo "OK $dir"

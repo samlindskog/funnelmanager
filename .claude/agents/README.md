@@ -93,8 +93,8 @@ Dispatch pattern, run by the main thread or a `Workflow` script:
 
 A ready-to-run `Workflow` sketch for this lives at the bottom of this file.
 
-Existing skills already cover the ends of the lifecycle: `deploy-dev` (ship to the
-dev cluster) and `deploy-funnelmanager` (prod GitOps). Reviewers can also invoke
+Existing skills already cover prod deployment: `deploy-funnelmanager` (prod
+GitOps). Reviewers can also invoke
 the repo's own `/code-review` and `/security-review` skills as a second opinion.
 
 ### Workflow sketch

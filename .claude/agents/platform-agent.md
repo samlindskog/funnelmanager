@@ -64,7 +64,8 @@ your delta.
 - Compose: `docker compose -f docker-compose.<env>.yml config -q` (parse check).
 - Manifests: re-check against `deploy/CONVENTIONS.md`; if policy changed, confirm it
   matches the `fm_runtime` export.
-- Ship to dev via the `deploy-dev` skill; prod via the `deploy-funnelmanager` skill.
+- Ship to prod via the `deploy-funnelmanager` skill. (There is no dev-deploy path:
+  the GitOps dev-preview mechanism was removed pending an Istio canary for dev pods.)
 - After any policy/realm/scope change, the **first** verification is
   `fm_runtime.export --check … --realm` (make it CI-blocking, not just local). Keep the
   Roadmap target-state in view (Flagger canary + OTel/Tempo collector + agent-driven E2E

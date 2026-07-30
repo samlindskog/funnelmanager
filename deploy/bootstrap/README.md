@@ -101,14 +101,12 @@ reconciling. Expected order (enforced by `dependsOn` + `wait`):
    `grafana.` must point at the edge node.)
 9. `infra-observability` (**gate:** prometheus/loki/grafana Ready; Grafana
    login via Keycloak at `https://grafana.x9bc433.win`)
-10. `apps-prod` (**gate:** all six Deployments Ready). `apps-dev` is
-    **suspended** by default (single-worker budget) — `flux resume
-    kustomization apps-dev` + the `deploy-dev` workflow to run it.
+10. `apps-prod` (**gate:** all nine Deployments Ready).
 
 **First image pin:** the overlays ship `sha-PINME`, which no registry serves,
 so `apps-prod` cannot go Ready until real images are pinned. Run the
 `release-prod` workflow once (Actions → Run workflow, ref `main`) — it builds
-the six images and commits a `sha-<sha>` pin to `main` that Flux rolls out.
+the ten images and commits a `sha-<sha>` pin to `main` that Flux rolls out.
 Do this right after `flux bootstrap`; the gate simply stays pending until the
 pin lands.
 

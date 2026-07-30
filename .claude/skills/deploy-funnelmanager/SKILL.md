@@ -1,20 +1,27 @@
 ---
 name: deploy-funnelmanager
-description: Deploy funnelmanager to production — commit and push, tag a release, watch CI build/pin images, Flux rollout to the k3s cluster on the Linode VPSs, verify, rollback, dev preview, Cloudflare purge. Use when asked to deploy, release, ship, push to prod, roll back, or propagate changes to the VPSs.
+description: Deploy funnelmanager to production — commit and push, tag a release, watch CI build/pin images, Flux rollout to the k3s cluster on the Linode VPSs, verify, rollback, Cloudflare purge. Use when asked to deploy, release, ship, push to prod, roll back, or propagate changes to the VPSs.
 ---
 
 # Deploy funnelmanager
+
+The **release/rollback engine** for funnelmanager production. Its one job is to
+*act* on prod (tag → watch CI → reconcile → wait rollout → rollback → purge); all
+*health/verification* is delegated to the **prod-health** skill (`check.sh`), so
+`release`'s post-rollout verify, `status`, and `smoke` all shell out to it rather
+than re-implementing curl/flux checks. Use **prod-health** to look, this to act,
+and **ship-branch** for the full review→ship→verify arc.
 
 All paths are relative to the repo root. The driver is
 `.claude/skills/deploy-funnelmanager/deploy.sh`.
 
 **The model is GitOps — a deploy is a git commit, never an ssh push.**
-`release-prod` (GitHub Actions) builds the six images to
-`ghcr.io/samlindskog/funnelmanager/<svc>`, then commits a `sha-<sha>` pin into
-`deploy/apps/overlays/prod/kustomization.yaml` on `main` (`[skip ci]`). Flux on
-the k3s control plane (**usfr4**; usfr2 runs `k3s-agent` — the old compose-prod
-there is retired) reconciles `main` and rolls out the `prod` namespace behind
-Cloudflare at https://x9bc433.win.
+`release-prod` (GitHub Actions) builds the images (ten: the nine deployed
+services plus `backup`) to `ghcr.io/samlindskog/funnelmanager/<svc>`, then commits
+a `sha-<sha>` pin into `deploy/apps/overlays/prod/kustomization.yaml` on `main`
+(`[skip ci]`). Flux on the k3s control plane (**usfr4**; usfr2 runs `k3s-agent` —
+the old compose-prod there is retired) reconciles `main` and rolls out the `prod`
+namespace behind Cloudflare at https://x9bc433.win.
 
 ## Prerequisites
 
@@ -33,16 +40,19 @@ git add -A && git commit -m "..." && git push
 ```
 
 `release` refuses to run off-main, with a dirty tree, or when local `main`
-diverges from origin. Other entry points:
+diverges from origin. After the rollout wait it runs the prod-health `drift` +
+`smoke` verifier. Other entry points:
 
 ```bash
-.claude/skills/deploy-funnelmanager/deploy.sh status          # read-only overview
-.claude/skills/deploy-funnelmanager/deploy.sh smoke           # public checks only, no ssh
+.claude/skills/deploy-funnelmanager/deploy.sh status          # local git + prod-health drift/flux/ci
+.claude/skills/deploy-funnelmanager/deploy.sh smoke           # prod-health public checks, no ssh
 .claude/skills/deploy-funnelmanager/deploy.sh watch           # attach to an in-flight release
 .claude/skills/deploy-funnelmanager/deploy.sh rollback v1.1.0 # re-release an older ref
-.claude/skills/deploy-funnelmanager/deploy.sh dev my-branch   # dev overlay preview
 .claude/skills/deploy-funnelmanager/deploy.sh purge https://x9bc433.win/favicon.svg
 ```
+
+`status`, `smoke`, and the release verify call `.claude/skills/prod-health/check.sh`
+under the hood — there is no duplicate health logic here.
 
 Rollback alternative: revert the pin commit on `main` — Flux re-reconciles
 either way.
@@ -55,9 +65,10 @@ gh run watch <run-id> --exit-status --interval 15  # ~2.5 min
 git pull origin main                               # fetch CI's pin commit
 ssh usfr4 'sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux reconcile source git flux-system -n flux-system'
 ssh usfr4 'sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux reconcile kustomization apps-prod'
-ssh usfr4 'for d in frontend mailui search mail leads; do sudo -n kubectl -n prod rollout status deploy/$d --timeout=300s; done'
-curl -sS https://x9bc433.win/                      # 200, <title>Sign in</title>
-curl -sS https://x9bc433.win/api/search/whoami     # 403 = healthy (OPA deny)
+# wait every prod Deployment (frontend mailui agentsui search leads mail mcp jobs agents):
+ssh usfr4 'for d in frontend mailui agentsui search leads mail mcp jobs agents; do sudo -n kubectl -n prod rollout status deploy/$d --timeout=300s; done'
+.claude/skills/prod-health/check.sh drift          # running sha == pinned sha on every deploy
+.claude/skills/prod-health/check.sh smoke          # 200 hub + whoami 403 (OPA deny) = healthy
 ```
 
 ## Gotchas (all hit for real)
@@ -83,12 +94,6 @@ curl -sS https://x9bc433.win/api/search/whoami     # 403 = healthy (OPA deny)
 - **Plain pushes to `main` never deploy.** Only `v*` tags or a manual
   `workflow_dispatch` trigger `release-prod`. CI (`ci.yml`) still runs
   checks on every push.
-- **apps-dev ships suspended** to save worker capacity. After `deploy.sh dev`,
-  run `flux resume kustomization apps-dev` on usfr4 to actually serve it;
-  `flux suspend` to reclaim.
-- **usfr3 still hosts the legacy compose dev stack** (`~/funnelmanager`,
-  dev.x9bc433.win) — unrelated to the k3s deploy path; don't touch it during
-  a prod release.
 
 ## Troubleshooting
 

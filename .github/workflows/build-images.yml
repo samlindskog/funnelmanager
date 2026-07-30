@@ -11,14 +11,6 @@ on:
         description: Git ref to build the images from.
         required: true
         type: string
-      overlay:
-        description: Overlay to pin (prod|dev).
-        required: true
-        type: string
-      moving_tag:
-        description: Moving convenience tag to also push (prod|dev).
-        required: true
-        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -74,7 +66,7 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:sha-${{ needs.vars.outputs.sha }}
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ inputs.moving_tag }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:prod
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
@@ -89,11 +81,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Pin ${{ inputs.overlay }} overlay to sha-${{ needs.vars.outputs.sha }}
+      - name: Pin prod overlay to sha-${{ needs.vars.outputs.sha }}
         run: |
           set -euo pipefail
           SHA="sha-${{ needs.vars.outputs.sha }}"
-          f="deploy/apps/overlays/${{ inputs.overlay }}/kustomization.yaml"
+          f="deploy/apps/overlays/prod/kustomization.yaml"
           # Replace every `newTag: <anything>` under the images: block.
           sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*).*/\1$SHA/" "$f"
           git diff --stat
@@ -108,11 +100,11 @@ jobs:
           git config user.name  "funnelmanager-ci[bot]"
           git config user.email "ci@users.noreply.github.com"
           git add \
-            "deploy/apps/overlays/${{ inputs.overlay }}/kustomization.yaml" \
+            "deploy/apps/overlays/prod/kustomization.yaml" \
             deploy/keycloak/providers/fm-origin-provider.jar \
             deploy/infrastructure/identity/providers-configmap.yaml
           if git diff --cached --quiet; then
             echo "Nothing to pin or regenerate."; exit 0
           fi
-          git commit -m "ci(${{ inputs.overlay }}): pin images to sha-${{ needs.vars.outputs.sha }} [skip ci]"
+          git commit -m "ci(prod): pin images to sha-${{ needs.vars.outputs.sha }} [skip ci]"
           git push origin main

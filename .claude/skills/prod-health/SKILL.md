@@ -78,8 +78,6 @@ smoke → pods → drift → flux → ci → logs.
   failure`) is normal: an expired subject token mid-detached-job triggers the
   documented downgrade to client-credentials and logs one. A *surge* from a
   single `clientId` is the real signal.
-- **`apps-dev` shows SUSPENDED** in `flux get kustomizations` — by design (saves
-  worker capacity). Only `apps-prod` matters here.
 - **Transient `503` on `search:8000/internal/jobs/v1/stream`** in `jobs` logs
   right after a rollout — the jobs subscriber retries with backoff until search
   is Ready again. Only sustained 503s past a rollout window are a problem.
@@ -101,9 +99,14 @@ smoke → pods → drift → flux → ci → logs.
 - If usfr4 is unreachable, `pods`/`drift`/`flux`/`logs` degrade with a message;
   `smoke` still gives an external verdict.
 
-## Relationship to deploy-funnelmanager
+## Relationship to deploy-funnelmanager and ship-branch
 
-`deploy-funnelmanager status`/`smoke` overlap loosely, but this skill goes deeper
-on health (per-deploy readiness, three-way drift, deploy lag, log scans, KC
-exchange errors) and is guaranteed read-only. Use `deploy-funnelmanager` to
-*act* (release/rollback/reconcile/purge); use `prod-health` to *look*.
+This skill is the **single source of health/verification** for prod. It does not
+overlap with `deploy-funnelmanager` anymore — that skill's `smoke`, `status`
+cluster/CI view, and its post-release verify all **call this driver**
+(`check.sh smoke`/`drift`/`flux`/`ci`), so a release and a manual health check
+render the identical verdict. `ship-branch` step 5 runs `check.sh` (all) as the
+canonical post-ship confirmation.
+
+Use `deploy-funnelmanager` to *act* (release/rollback/reconcile/purge); use
+`prod-health` to *look*; use `ship-branch` for the whole review→ship→verify arc.

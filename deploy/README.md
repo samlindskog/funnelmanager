@@ -60,11 +60,6 @@ and revertable.
 - **`.github/workflows/release-prod.yml`** — prod release. Triggered only by a
   `v*` tag push or the **Run workflow** button (ref input); pins the **prod**
   overlay. Gate it behind the `production` environment's required reviewer.
-- **`.github/workflows/deploy-dev.yml`** — dev preview in the same cluster.
-  **Run workflow** with a ref; pins the **dev** overlay (served at
-  `https://dev.x9bc433.win`, funnelmanager-dev realm, same Istio/OPA path as
-  prod). `apps-dev` ships suspended for capacity — `flux resume kustomization
-  apps-dev` to bring it up, `flux suspend` to reclaim the worker.
 
 Rollback: dispatch `release-prod` with an older ref, or revert the pin commit
 on `main` (Flux re-reconciles either way).

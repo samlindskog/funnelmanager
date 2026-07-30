@@ -25,7 +25,7 @@ Everything is declarative under `deploy/`, reconciled by **Flux**
 host on a 4GB node, `flux bootstrap` binds this same repo) in a dependency
 graph with health gates: namespaces → cert-manager/Gateway-API
 CRDs/CNPG → Istio → OPA → mesh policies → identity → gateway →
-observability → apps. `apps-dev` exists but ships suspended (budget).
+observability → apps.
 
 Identity: **Keycloak** (realms `funnelmanager`, `funnelmanager-dev`),
 humans via auth-code+PKCE, services/agents as confidential clients,

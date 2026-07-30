@@ -12,7 +12,7 @@ transcript=$(printf '%s' "$input" | python3 -c 'import sys,json; print(json.load
 [ -n "$transcript" ] && [ -f "$transcript" ] || exit 0
 
 # Only fire for sessions that actually touched the deploy path.
-grep -q -m1 -E 'release-prod|deploy-dev|flux reconcile|rollout status|deploy-funnelmanager' "$transcript" || exit 0
+grep -q -m1 -E 'release-prod|flux reconcile|rollout status|deploy-funnelmanager' "$transcript" || exit 0
 
 skill_dir="$(cd "$(dirname "$0")" && pwd)"
 log="$skill_dir/improve.log"

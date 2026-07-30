@@ -59,6 +59,9 @@ Pick the version from `git tag --sort=-v:refname | head -1` — **patch** for a 
 Flux reconcile on usfr4, waits the rollout, and smokes.
 
 ### 5. Verify (dogfood prod-health)
+`deploy.sh release` already ran the prod-health `drift` + `smoke` verifier at the
+end of the rollout wait; this step is the **full** verdict (adds pods, deploy
+lag, log scans, KC exchange errors):
 ```bash
 .claude/skills/prod-health/check.sh          # or: "check prod health"
 ```

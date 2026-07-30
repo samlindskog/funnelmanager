@@ -71,8 +71,8 @@ Two CI guardrails enforce this:
 - **`keycloak-provider` job** (`.github/workflows/ci.yml`, every PR/push) runs
   `build.sh` and fails if the committed JAR or ConfigMap differ from a fresh
   build — so the committed artifacts can never drift from `src/`.
-- **On release** (`build-images.yml` `pin` job, invoked by `release-prod.yml`
-  and `deploy-dev.yml`) CI regenerates and commits both artifacts alongside the
+- **On release** (`build-images.yml` `pin` job, invoked by `release-prod.yml`)
+  CI regenerates and commits both artifacts alongside the
   `sha-…` image pin, exactly like the image pins. Because the build is
   deterministic, this is a no-op unless `src/` changed.
 

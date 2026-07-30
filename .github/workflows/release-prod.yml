@@ -28,8 +28,6 @@ jobs:
     uses: ./.github/workflows/build-images.yml
     with:
       ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
-      overlay: prod
-      moving_tag: prod
     permissions:
       contents: write
       packages: write

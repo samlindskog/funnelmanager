@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
 # funnelmanager deploy driver — GitOps release to the k3s cluster.
 #
-# A prod deploy is: tag v* on main -> release-prod workflow builds the six
-# images to GHCR and commits a sha-pin to main -> Flux (on usfr4) reconciles
-# the pin -> prod namespace rolls out. This script wraps that loop plus the
-# verification that the 2026-07-23 v1.2.0 release actually used.
+# A prod deploy is: tag v* on main -> release-prod workflow builds the images to
+# GHCR and commits a sha-pin to main -> Flux (on usfr4) reconciles the pin ->
+# prod namespace rolls out. This script wraps that release loop. All health /
+# verification (smoke, drift, flux, ci) lives in the prod-health skill; release
+# verification and `status` delegate to it rather than re-implementing curl/flux
+# checks — prod-health is the single source of truth for "is prod healthy".
 #
 # Usage: .claude/skills/deploy-funnelmanager/deploy.sh <cmd> [args]
-#   status              local git state, recent CI runs, cluster state (read-only)
+#   status              local git state + prod-health drift/flux/ci (read-only)
 #   release vX.Y.Z      full prod release: preflight, tag, watch CI, reconcile, verify
 #   rollback <ref>      re-release an older tag/sha via workflow_dispatch
-#   dev [ref]           deploy a ref to the dev overlay (default: main)
 #   watch               watch the latest release-prod run, then reconcile + verify
 #   reconcile           force Flux to pick up the latest pin (skips the ~1m poll)
-#   rollout             wait for prod deployments to finish rolling; print pinned image
-#   smoke               public-URL checks (no ssh needed)
+#   rollout             wait for prod deployments to finish rolling
+#   smoke               public-URL checks (delegates to prod-health smoke)
 #   purge <url...>      purge Cloudflare edge cache for specific asset URLs
 
 set -euo pipefail
 
 CP=usfr4                              # k3s control plane; flux/kubectl live here
-URL=https://x9bc433.win
-SERVICES="frontend mailui search mail leads"
+# Every prod Deployment we wait on during a release (matches prod-health's
+# authoritative workload list: backends + frontends, all 1-replica Deployments).
+SERVICES="frontend mailui agentsui search leads mail mcp jobs agents"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $CP"
 # Plain `flux`/`kubectl` on the box fail with "dial tcp [::1]:8080: connection
 # refused" — root's kubeconfig must be passed explicitly.
@@ -30,6 +32,12 @@ K="sudo -n kubectl"
 
 cd "$(git rev-parse --show-toplevel)"
 die() { echo "error: $*" >&2; exit 1; }
+
+# prod-health is the verifier. Release verification and `status` shell out to it
+# instead of duplicating smoke/drift/flux/ci logic. `|| true` so a ⚠️/❌ health
+# line never aborts an in-progress release (the human reads the printed verdict).
+HEALTH=.claude/skills/prod-health/check.sh
+health() { [ -f "$HEALTH" ] || die "prod-health skill missing at $HEALTH"; bash "$HEALTH" "$@" || true; }
 
 preflight() {
   [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || die "not on main"
@@ -48,17 +56,16 @@ reconcile() {
 
 rollout() {
   echo "--- waiting for prod rollout ---"
-  $SSH "for d in $SERVICES; do $K -n prod rollout status deploy/\$d --timeout=300s 2>&1 | tail -1; done
-        echo -n 'frontend image: '; $K -n prod get deploy frontend -o jsonpath='{.spec.template.spec.containers[0].image}'; echo"
+  $SSH "for d in $SERVICES; do $K -n prod rollout status deploy/\$d --timeout=300s 2>&1 | tail -1; done"
 }
 
-smoke() {
-  echo "--- public smoke ($URL) ---"
-  curl -sS -m 10 -o /dev/null -w "GET /            -> %{http_code} (want 200)\n" "$URL/"
-  curl -sS -m 10 "$URL/" | grep -o "<title>[^<]*</title>" || echo "(no <title>)"
-  # Unauthenticated whoami is denied by OPA with 403 (not 401) — that's healthy.
-  curl -sS -m 10 -o /dev/null -w "whoami unauth   -> %{http_code} (want 403)\n" "$URL/api/search/whoami"
-  curl -sS -m 10 -o /dev/null -w "mailui whoami   -> %{http_code} (want 403)\n" "$URL/api/mail/whoami"
+# Post-rollout verification — delegated to prod-health (running-sha-vs-pin drift
+# + public smoke). This is the same verifier ship-branch runs in its step 5, so
+# a release and a manual health check give the same verdict.
+verify() {
+  echo "--- verifying release (via prod-health) ---"
+  health drift
+  health smoke
 }
 
 watch_run() {
@@ -73,7 +80,7 @@ watch_run() {
   git log -1 --oneline
   reconcile
   rollout
-  smoke
+  verify
 }
 
 cmd=${1:-status}
@@ -83,11 +90,10 @@ case "$cmd" in
     git fetch -q origin main
     git status -sb | head -2
     git log origin/main --oneline -3
-    echo "--- recent release-prod runs ---"
-    gh run list --workflow=release-prod --limit 3
-    echo "--- flux ($CP) ---"
-    $SSH "$FLUX get kustomizations 2>&1 | head -15; $K -n prod get deploy" \
-      || echo "(cluster unreachable — public smoke still available: deploy.sh smoke)"
+    echo "--- prod cluster + CI (via prod-health) ---"
+    health drift
+    health flux
+    health ci
     ;;
   release)
     tag=${2:-}; [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "usage: deploy.sh release vX.Y.Z"
@@ -103,16 +109,10 @@ case "$cmd" in
     gh workflow run release-prod -f ref="$ref"
     watch_run
     ;;
-  dev)
-    ref=${2:-main}
-    gh workflow run deploy-dev -f ref="$ref"
-    echo "dispatched deploy-dev for $ref. Note: apps-dev ships suspended —"
-    echo "  $SSH \"$FLUX resume kustomization apps-dev\"   # to actually serve it"
-    ;;
   watch)     watch_run ;;
   reconcile) reconcile; rollout ;;
   rollout)   rollout ;;
-  smoke)     smoke ;;
+  smoke)     health smoke ;;
   purge)
     shift; [ $# -gt 0 ] || die "usage: deploy.sh purge <full-url> [...]"
     files=$(printf '"%s",' "$@"); files="[${files%,}]"
@@ -124,5 +124,5 @@ case "$cmd" in
             'https://api.cloudflare.com/client/v4/zones/8303098fbf6f966ac44b6f2945e9d732/purge_cache' \
             --data '{\"files\":$files}' | python3 -m json.tool"
     ;;
-  *) sed -n '2,19p' "$0"; exit 1 ;;
+  *) sed -n '11,19p' "$0"; exit 1 ;;
 esac
