@@ -1,0 +1,137 @@
+# Grafana Alloy: the browser-facing RUM collector. Runs its native
+# `faro.receiver` (GA) which ingests Grafana Faro Web SDK payloads from the SPAs
+# and fans out — browser TRACES -> Tempo (OTLP/gRPC :4317, in this namespace),
+# browser LOGS/errors/events/web-vitals -> Loki (push :3100, in this namespace).
+#
+# The receiver serves POST/OPTIONS on the HARDCODED path `/collect` (Alloy
+# source: faro/receiver/server.go registers `/collect` on its listen port;
+# readiness on `/-/ready`). Browsers POST same-origin to
+# https://x9bc433.win/telemetry/collect; the gateway HTTPRoute matches
+# `/telemetry/collect` (more specific than the `/` catch-all) and URLRewrites
+# (ReplacePrefixMatch) it to `/collect` before forwarding to this Service's
+# `faro` port, so the receiver's hardcoded handler is hit unchanged. OPA admits
+# it anonymously on the PRE-rewrite path (Envoy ext_authz runs before the
+# router's prefix_rewrite), exactly as the SPA static paths
+# (data.json `routes["/telemetry/collect"]=alloy` + an `anonymous` POST/OPTIONS
+# entry).
+#
+# Like tempo/loki/grafana, Alloy runs in `monitoring` WITHOUT an Istio sidecar,
+# so the gateway Envoy reaches it over plaintext (no mTLS peer) — the same path
+# grafana already uses. NetworkPolicies (networkpolicies.yaml) admit only
+# istio-ingress -> alloy:12347 and alloy -> tempo:4317 / loki:3100.
+#
+# Abuse bounds on this UNAUTHENTICATED public ingest live in the receiver
+# itself: a GLOBAL token-bucket rate limiter (5 req/s, burst 10 -> HTTP 429;
+# global, not per-source — an accepted residual) and a 512KiB request payload
+# cap (-> HTTP 413). See the config below.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: alloy
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: alloy
+      version: "1.11.0"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: monitoring
+  values:
+    # Single central collector (one ingest endpoint), not a per-node DaemonSet.
+    controller:
+      type: deployment
+      replicas: 1
+      nodeSelector:
+        role: worker
+
+    # We use only faro.receiver + otelcol/loki exporters — no kubernetes
+    # discovery, no podlogs CRD. Drop the unused ClusterRole and CRDs.
+    crds:
+      create: false
+    rbac:
+      create: false
+
+    service:
+      enabled: true
+      type: ClusterIP
+
+    alloy:
+      # faro.receiver, otelcol.exporter.otlp and loki.write are all GA.
+      stabilityLevel: generally-available
+
+      # Expose the faro.receiver HTTP port on the container AND the Service.
+      # (The chart's own http-metrics port 12345 stays for Prometheus scrape.)
+      extraPorts:
+        - name: faro
+          port: 12347
+          targetPort: 12347
+          protocol: TCP
+
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+
+      configMap:
+        create: true
+        content: |-
+          logging {
+            level  = "info"
+            format = "logfmt"
+          }
+
+          // Browser RUM ingest from the Grafana Faro Web SDK (all three SPAs).
+          faro.receiver "browser" {
+            server {
+              // 0.0.0.0 so the ingress-gateway Envoy (another pod) can reach it;
+              // NetworkPolicy restricts who may actually connect.
+              listen_address = "0.0.0.0"
+              listen_port    = 12347
+
+              // Abuse bounds for a public unauthenticated endpoint.
+              // Oversized bodies -> HTTP 413.
+              max_allowed_payload_size = "512KiB"
+
+              // Global token bucket -> HTTP 429 beyond the rate. Stays global
+              // (no per-source limiting) — an accepted residual for this
+              // single-tenant deployment.
+              rate_limiting {
+                enabled    = true
+                rate       = 5
+                burst_size = 10
+              }
+            }
+
+            output {
+              logs   = [loki.write.faro.receiver]
+              traces = [otelcol.exporter.otlp.tempo.input]
+            }
+          }
+
+          // Browser logs/events/exceptions/web-vitals -> Loki push (same ns).
+          loki.write "faro" {
+            endpoint {
+              url = "http://loki.monitoring.svc:3100/loki/api/v1/push"
+            }
+            external_labels = {
+              job = "faro",
+            }
+          }
+
+          // Browser traces -> Tempo OTLP/gRPC (same ns, no sidecar -> plaintext).
+          otelcol.exporter.otlp "tempo" {
+            client {
+              endpoint = "tempo.monitoring.svc:4317"
+              tls {
+                insecure = true
+              }
+            }
+          }

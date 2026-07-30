@@ -283,6 +283,35 @@ test_gateway_grafana_host_passes if {
 	authz.allow with input as gateway_input("grafana.x9bc433.win", "GET", "/login", {})
 }
 
+# Browser RUM ingest (Grafana Faro -> Alloy faro.receiver): the SPAs POST
+# tokenless to /telemetry/collect (gateway URLRewrites it to /collect for the
+# receiver; OPA evaluates the PRE-rewrite path). Anonymous for POST/OPTIONS only.
+test_gateway_telemetry_collect_post_anonymous if {
+	authz.allow with input as gateway_input("x9bc433.win", "POST", "/telemetry/collect", {})
+}
+
+test_gateway_telemetry_collect_options_anonymous if {
+	# CORS preflight (same-origin won't preflight, but the receiver registers it).
+	authz.allow with input as gateway_input("x9bc433.win", "OPTIONS", "/telemetry/collect", {})
+}
+
+test_gateway_telemetry_collect_get_denied if {
+	# Only POST/OPTIONS are anonymous; a GET has no anonymous entry and no token.
+	not authz.allow with input as gateway_input("x9bc433.win", "GET", "/telemetry/collect", {})
+}
+
+test_gateway_telemetry_collect_resolves_alloy if {
+	authz.gateway_service == "alloy" with input as gateway_input("x9bc433.win", "POST", "/telemetry/collect", {})
+}
+
+test_gateway_telemetry_collect_no_widening if {
+	# Guard against prefix widening: the anonymous entry is exactly
+	# /telemetry/collect. A sibling suffix (no segment boundary) and the bare
+	# parent segment must NOT inherit the anonymous allow.
+	not authz.allow with input as gateway_input("x9bc433.win", "POST", "/telemetry/collectXYZ", {})
+	not authz.allow with input as gateway_input("x9bc433.win", "POST", "/telemetry", {})
+}
+
 test_bootstrap_default_deny if {
 	r := envoy.result with input as {"attributes": {"source": {"principal": ""}, "destination": {"principal": ""}}}
 	r.allowed == false

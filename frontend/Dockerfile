@@ -7,6 +7,13 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+
+# Build-time app version (git sha) for Faro telemetry `app.version`; vite.config
+# reads process.env.APP_VERSION via the `__APP_VERSION__` define. CI passes
+# `--build-arg APP_VERSION=sha-<gitsha>`.
+ARG APP_VERSION
+ENV APP_VERSION=${APP_VERSION}
+
 RUN npm run build
 
 # Serve with nginx and reverse-proxy /api to the backend

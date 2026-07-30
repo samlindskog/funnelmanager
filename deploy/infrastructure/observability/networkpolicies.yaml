@@ -157,7 +157,8 @@ spec:
         - protocol: TCP
           port: 3100
 ---
-# Loki ingress: log pushes from Fluent Bit, queries from Grafana.
+# Loki ingress: log pushes from Fluent Bit + Alloy (browser RUM), queries from
+# Grafana.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -174,8 +175,12 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: fluent-bit
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - fluent-bit
+                  - alloy
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: grafana
@@ -202,6 +207,8 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # OTLP/gRPC spans from the mesh sidecars (prod + gateway + control-plane)
+    # and from Alloy in this namespace (browser traces via faro.receiver).
     - from:
         - namespaceSelector:
             matchExpressions:
@@ -211,6 +218,9 @@ spec:
                   - prod
                   - istio-ingress
                   - istio-system
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alloy
       ports:
         - protocol: TCP
           port: 4317
@@ -312,3 +322,61 @@ spec:
       ports:
         - protocol: TCP
           port: 3000
+---
+# Alloy ingress: browser RUM (Grafana Faro) arrives via the ingress gateway on
+# the faro.receiver port only. `/collect` is routed here by the app HTTPRoute;
+# the receiver's own rate limiter + payload cap bound this public endpoint. The
+# Alloy UI/metrics port (12345) is intentionally NOT admitted here — Prometheus
+# scrape ingress (allow-prometheus-scrape-ingress) covers metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alloy-ingress-gateway
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 12347
+---
+# Alloy egress: fan browser telemetry out to Tempo (OTLP/gRPC :4317) and Loki
+# (push :3100), both in this namespace. DNS is covered by allow-dns-egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alloy-egress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - protocol: TCP
+          port: 4317
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - protocol: TCP
+          port: 3100

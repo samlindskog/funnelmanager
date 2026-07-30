@@ -18,6 +18,7 @@
         "/mail/": "mailui",
         "/api/agents/": "agents",
         "/agents/": "agentsui",
+        "/telemetry/collect": "alloy",
         "/": "frontend"
       },
       "callers": {
@@ -113,6 +114,12 @@
           "methods": ["GET", "POST", "DELETE"],
           "prefixes": ["/mcp", "/health", "/healthz", "/readyz", "/metrics"],
           "reason": "principal token rides inside MCP tool calls; workload allowlist still gates"
+        },
+        {
+          "service": "alloy",
+          "methods": ["POST", "OPTIONS"],
+          "prefixes": ["/telemetry/collect"],
+          "reason": "browser RUM ingest (Grafana Faro -> Alloy faro.receiver, monitoring ns). Browser POSTs /telemetry/collect; the gateway URLRewrites it to /collect for the receiver, but OPA evaluates the PRE-rewrite path (ext_authz runs before the router's prefix_rewrite), so the key is /telemetry/collect. No principal; bounded by faro.receiver rate_limiting + payload cap. NOT an fm_runtime service, so no @anonymous annotation source exists — infra ingress endpoint, review as the grafana-host wholesale allow is reviewed"
         }
       ],
       "pairings": [

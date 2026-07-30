@@ -64,6 +64,14 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
+          # Baked into the SPA bundles (frontend/mailui/agentsui declare
+          # `ARG APP_VERSION`) so Faro RUM stamps the exact deployed image tag.
+          # Passed to every matrix image; the 7 backend Dockerfiles don't
+          # declare the ARG and just emit a harmless "unconsumed" warning. Uses
+          # the SAME sha that becomes the image tag below, so RUM version ==
+          # deployed image tag.
+          build-args: |
+            APP_VERSION=sha-${{ needs.vars.outputs.sha }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:sha-${{ needs.vars.outputs.sha }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:prod

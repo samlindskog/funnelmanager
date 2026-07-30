@@ -72,6 +72,28 @@ spec:
         - name: agentsui
           namespace: prod
           port: 8080
+    # Browser RUM ingest (Grafana Faro -> Alloy faro.receiver, monitoring ns).
+    # The SPAs POST to `/telemetry/collect` (more specific than the `/` catch-all
+    # so it wins), but the receiver only serves POST/OPTIONS at `/collect`, so a
+    # URLRewrite rewrites `/telemetry/collect` -> `/collect` before it reaches
+    # Alloy. Made anonymous by OPA (data.json routes["/telemetry/collect"]=alloy
+    # + anonymous entry) on the PRE-rewrite path: Envoy's ext_authz filter runs
+    # before the router applies prefix_rewrite, so OPA sees `/telemetry/collect`
+    # (same as the SPA static paths — the anonymous check is on the request path
+    # as the browser sends it). Alloy has no sidecar (monitoring ns) — the
+    # gateway reaches it over plaintext, same as grafana.
+    - matches:
+        - path: { type: PathPrefix, value: /telemetry/collect }
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /collect
+      backendRefs:
+        - name: alloy
+          namespace: monitoring
+          port: 12347
     # Hub/search SPA — catch-all last (its nginx does try_files fallback).
     - matches:
         - path: { type: PathPrefix, value: / }

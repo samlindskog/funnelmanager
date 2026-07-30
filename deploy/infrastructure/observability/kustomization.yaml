@@ -7,4 +7,5 @@ resources:
   - prometheus.yaml
   - grafana.yaml
   - tempo.yaml
+  - alloy.yaml
   - networkpolicies.yaml

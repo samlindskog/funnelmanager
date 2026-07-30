@@ -1,5 +1,12 @@
+import { createRequire } from 'node:module'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// Build-time app version for telemetry (Faro `app.version`). Prefer the
+// CI/Docker build arg (APP_VERSION), fall back to package.json, then a constant.
+const requireJson = createRequire(import.meta.url)
+const pkgVersion = (requireJson('./package.json') as { version?: string }).version
+const appVersion = process.env.APP_VERSION ?? pkgVersion ?? '0.0.0'
 
 const hmrClientPort = Number(process.env.VITE_HMR_CLIENT_PORT || 5173)
 // When served through a TLS-terminating reverse proxy (e.g. Cloudflare in front
@@ -14,6 +21,9 @@ const allowedHosts = (process.env.VITE_ALLOWED_HOSTS || '')
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
   // The mail app lives under /mail/ behind the main nginx — same origin as the
   // hub, so the fm_token session in localStorage is shared.
   base: '/mail/',
