@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
+    # Retry budget for the OpenAI embed client. Raised above the SDK default (2)
+    # so sustained 429s under concurrent embedding back off and recover (the SDK
+    # honors Retry-After) rather than exhausting and dropping embeddings.
+    openai_max_retries: int = 6
     # Max concurrent OpenAI embed calls. The slow embed stage now runs lock-free
     # (only the short Milvus upsert serializes on the priority gate), so this can
     # be raised without starving interactive similarity queries. Env-tunable.

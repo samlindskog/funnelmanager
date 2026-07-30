@@ -5,8 +5,14 @@ Mongo needed) to prove:
   1. an interactive query (``nice=0``) preempts queued backfills even when it
      arrives last, and FIFO holds within a nice tier;
   2. a waiter cancelled while queued does not wedge the gate;
-  3. the slow (embed) stage overlaps while only the short (upsert) stage
-     serializes — i.e. concurrent embeds are not gated behind each other.
+  3. a waiter cancelled just after being handed the slot passes it on;
+  4. the slow (embed) stage overlaps while only the short (upsert) stage
+     serializes — i.e. concurrent embeds are not gated behind each other;
+  5. bounded-skip fairness: a sustained stream of nice=0 acquisitions cannot
+     starve a queued nice=10 writer — it runs within MAX_SKIPS hand-offs
+     (this case would hang/fail against the pre-fix FIFO-priority gate);
+  6. failure-safe embed fan-out: a chunk raising mid-``embed_texts`` leaves no
+     task running against the closed OpenAI client and surfaces the error once.
 
 Run from the ``leads`` dir:  python scripts/check_milvus_gate.py
 """
@@ -145,11 +151,154 @@ async def test_concurrent_embed_overlap() -> None:
     print("PASS: concurrent embeds overlap; only upsert serializes")
 
 
+async def test_bounded_skip_prevents_starvation() -> None:
+    """A sustained flood of nice=0 readers must not starve a queued nice=10 writer.
+
+    Reproduces the bug-hunter finding (20 concurrent nice=0 workers starved a
+    pending nice=10 writer forever). Against the pre-fix gate the writer never
+    runs and ``wait_for`` below times out; with bounded-skip it runs within
+    ``max_skips`` hand-offs.
+    """
+    max_skips = 8
+    gate = MilvusGate(max_skips=max_skips)
+    order: list[str] = []
+    writer_done = asyncio.Event()
+
+    async def writer() -> None:
+        async with gate(NICE_SEARCH_EMBED):
+            order.append("WRITER")
+        writer_done.set()
+
+    async def reader_loop(i: int) -> None:
+        spins = 0
+        while not writer_done.is_set():
+            async with gate(NICE_INTERACTIVE):
+                order.append(f"r{i}")
+            spins += 1
+            await asyncio.sleep(0)  # yield so peers re-queue (sustained stream)
+            if spins > 5000:  # safety valve against a hang if the fix regresses
+                break
+
+    # Hold the gate so the writer and readers must queue behind a running op.
+    async def holder() -> None:
+        async with gate(NICE_SEARCH_EMBED):
+            await asyncio.sleep(0.01)
+
+    h = asyncio.create_task(holder())
+    await asyncio.sleep(0.002)
+    w = asyncio.create_task(writer())
+    await asyncio.sleep(0.001)  # writer queues first (lowest seq)
+    readers = [asyncio.create_task(reader_loop(i)) for i in range(20)]
+
+    try:
+        await asyncio.wait_for(w, timeout=2.0)
+    except asyncio.TimeoutError:  # pragma: no cover - only if the fix regresses
+        writer_done.set()
+        for task in readers:
+            task.cancel()
+        raise AssertionError("writer was starved (bounded-skip regressed)")
+    finally:
+        await asyncio.gather(h, *readers, return_exceptions=True)
+
+    interactive_before = order.index("WRITER")
+    assert interactive_before <= max_skips + 1, (
+        f"writer ran after {interactive_before} interactive ops, "
+        f"exceeding bound {max_skips + 1}"
+    )
+    print(
+        "PASS: bounded-skip serves the writer after "
+        f"{interactive_before} interactive ops (bound {max_skips + 1}), "
+        "despite a sustained nice=0 flood"
+    )
+
+
+async def test_embed_fan_out_failure_is_clean() -> None:
+    """A chunk raising mid-fan-out must not orphan tasks against a closed client.
+
+    Mocks ``AsyncOpenAI`` so one chunk raises while siblings are slow; asserts
+    every chunk task settled before the client context exited, the error
+    surfaced exactly once, and the client was closed after all tasks finished.
+    """
+    import app.embeddings as embeddings
+
+    events: list[str] = []
+    client_closed = asyncio.Event()
+
+    class _FakeItem:
+        def __init__(self, index: int, embedding: list[float]) -> None:
+            self.index = index
+            self.embedding = embedding
+
+    class _FakeResp:
+        def __init__(self, data: list[_FakeItem]) -> None:
+            self.data = data
+
+    class _FakeEmbeddings:
+        def __init__(self, client: "_FakeClient") -> None:
+            self._client = client
+
+        async def create(self, *, model, input, dimensions):  # noqa: A002
+            # First chunk fails fast; the rest are slow so they are still in
+            # flight when the failure would otherwise tear the client down.
+            if input and input[0] == "boom":
+                events.append("chunk-error")
+                raise RuntimeError("simulated embed failure")
+            await asyncio.sleep(0.05)
+            assert not self._client.closed, "sibling ran against a CLOSED client"
+            events.append("chunk-ok")
+            return _FakeResp([_FakeItem(i, [float(len(t))]) for i, t in enumerate(input)])
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.closed = False
+            self.embeddings = _FakeEmbeddings(self)
+
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *exc) -> bool:
+            self.closed = True
+            client_closed.set()
+            return False
+
+    class _Cfg:
+        openai_configured = True
+        openai_api_key = "x"
+        openai_embedding_model = "m"
+        openai_embedding_dimensions = 1
+        openai_max_retries = 6
+        embed_concurrency = 8
+
+    original = embeddings.AsyncOpenAI
+    embeddings.AsyncOpenAI = _FakeClient  # type: ignore[assignment]
+    try:
+        # 3 chunks of 64 (>64 forces multiple): chunk 0 fails, chunks 1-2 are slow.
+        texts = ["boom"] + [f"t{i}" for i in range(64 * 3 - 1)]
+        raised = False
+        try:
+            await embeddings.embed_texts(texts, settings=_Cfg())  # type: ignore[arg-type]
+        except RuntimeError as exc:
+            raised = True
+            assert "simulated embed failure" in str(exc)
+    finally:
+        embeddings.AsyncOpenAI = original  # type: ignore[assignment]
+
+    assert raised, "embed_texts should re-raise the chunk error"
+    assert client_closed.is_set(), "client was never closed"
+    # Both surviving chunks must have completed (proving they were awaited before
+    # the client closed), and the error was observed once.
+    assert events.count("chunk-error") == 1, events
+    assert events.count("chunk-ok") == 2, events
+    print("PASS: failed embed fan-out closes cleanly (no task outlives the client)")
+
+
 async def main() -> None:
     await test_priority_preemption_and_fifo()
     await test_cancel_while_queued_does_not_wedge()
     await test_holder_cancel_after_handoff_does_not_lose_slot()
     await test_concurrent_embed_overlap()
+    await test_bounded_skip_prevents_starvation()
+    await test_embed_fan_out_failure_is_clean()
     print("\nALL PASS")
 
 

@@ -268,7 +268,13 @@ async def embed_texts(
     chunks = [texts[start : start + chunk_size] for start in range(0, len(texts), chunk_size)]
     sem = _embed_sem(cfg)
 
-    async with AsyncOpenAI(api_key=cfg.openai_api_key) as client:
+    # A higher retry budget lets sustained 429s (likely once embed_concurrency is
+    # raised) back off (the SDK does exponential backoff + honors Retry-After) and
+    # recover instead of exhausting → RateLimitError → docs silently left unembedded.
+    async with AsyncOpenAI(
+        api_key=cfg.openai_api_key,
+        max_retries=max(0, int(cfg.openai_max_retries)),
+    ) as client:
 
         async def _embed_chunk(chunk: list[str]) -> list[list[float]]:
             async with sem:
@@ -280,10 +286,21 @@ async def embed_texts(
             by_index = {item.index: item.embedding for item in response.data}
             return [list(by_index[offset]) for offset in range(len(chunk))]
 
-        # gather preserves input order, so vectors line up with ``texts``.
-        chunk_vectors = await asyncio.gather(*(_embed_chunk(chunk) for chunk in chunks))
+        # return_exceptions=True so a failing chunk never tears the client down
+        # while sibling chunks are still in flight — that would run them against a
+        # closed client and orphan tasks ("Task exception never retrieved"). Every
+        # chunk settles inside the client context; the first error surfaces after.
+        results = await asyncio.gather(
+            *(_embed_chunk(chunk) for chunk in chunks),
+            return_exceptions=True,
+        )
 
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+    # gather preserves input order, so vectors line up with ``texts``.
     vectors: list[list[float]] = []
-    for chunk_result in chunk_vectors:
+    for chunk_result in results:
         vectors.extend(chunk_result)
     return vectors

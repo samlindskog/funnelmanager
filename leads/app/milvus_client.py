@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import heapq
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -40,53 +40,96 @@ NICE_INTERACTIVE = 0  # search_similar (user query) — preempts the embed backl
 NICE_SEARCH_EMBED = 10  # embedding writes from a live search
 NICE_BACKFILL = 20  # bulk / backfill embedding — yields to everything
 
+# Bounded-skip fairness: a queued waiter may be passed over at most this many
+# hand-offs before it is force-selected regardless of nice. Without this a
+# sustained stream of NICE_INTERACTIVE acquisitions starves queued embed writers
+# forever; with it, "reads usually win" still holds but a write is guaranteed to
+# run within a bounded number of interactive ops.
+_GATE_MAX_SKIPS = 8
+
+
+@dataclass
+class _GateWaiter:
+    nice: int
+    seq: int
+    future: asyncio.Future[None]
+    skips: int = 0
+
 
 class MilvusGate:
     """Serializes Milvus SDK access, waking waiters lowest-``nice``-first.
 
     Same mutual exclusion as an ``asyncio.Lock`` (never two Milvus ops at once),
     but ordered: within a nice tier waiters are FIFO; across tiers a lower nice
-    always wins the next slot. Preemption is at op boundaries only — a running op
-    is never interrupted. A waiter cancelled while queued removes itself cleanly
-    (or, if it was already handed the slot, passes it on) so the gate never wedges.
+    normally wins the next slot. Fairness is bounded — a waiter passed over
+    ``max_skips`` times is force-selected regardless of nice, so a flood of
+    interactive reads cannot starve embed writers indefinitely. Preemption is at
+    op boundaries only — a running op is never interrupted. A waiter cancelled
+    while queued removes itself cleanly (or, if it was already handed the slot,
+    passes it on) so the gate never wedges.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_skips: int = _GATE_MAX_SKIPS) -> None:
         self._held = False
-        # Min-heap of (nice, seq, future); seq breaks ties FIFO within a nice.
-        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._waiters: list[_GateWaiter] = []
         self._seq = 0
+        self._max_skips = max(1, int(max_skips))
 
     async def acquire(self, nice: int) -> None:
         if not self._held and not self._waiters:
             self._held = True
             return
-        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        heapq.heappush(self._waiters, (nice, self._seq, fut))
+        waiter = _GateWaiter(
+            nice=nice,
+            seq=self._seq,
+            future=asyncio.get_running_loop().create_future(),
+        )
         self._seq += 1
+        self._waiters.append(waiter)
         try:
-            await fut
+            await waiter.future
         except asyncio.CancelledError:
-            if fut.done() and not fut.cancelled():
+            if waiter.future.done() and not waiter.future.cancelled():
                 # We were already handed the slot before the cancel landed; pass
                 # it on so it is not lost (which would wedge the gate).
                 self._wake_next()
             else:
-                self._waiters = [w for w in self._waiters if w[2] is not fut]
-                heapq.heapify(self._waiters)
+                self._remove_waiter(waiter)
             raise
         self._held = True
 
     def release(self) -> None:
         self._wake_next()
 
+    def _remove_waiter(self, waiter: _GateWaiter) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
     def _wake_next(self) -> None:
-        while self._waiters:
-            _, _, fut = heapq.heappop(self._waiters)
-            if not fut.done():
-                fut.set_result(None)  # hand off; ``_held`` stays True
-                return
-        self._held = False
+        # Drop any already-resolved waiters (e.g. cancelled while queued) so they
+        # are never handed the slot.
+        live = [w for w in self._waiters if not w.future.done()]
+        if len(live) != len(self._waiters):
+            self._waiters = live
+        if not live:
+            self._held = False
+            return
+        # Force-select the oldest waiter that has been skipped too many times;
+        # otherwise the highest priority (lowest nice, then oldest seq).
+        starved = [w for w in live if w.skips >= self._max_skips]
+        if starved:
+            chosen = min(starved, key=lambda w: w.seq)
+        else:
+            chosen = min(live, key=lambda w: (w.nice, w.seq))
+        # Every waiter passed over this round moves one hand-off closer to its
+        # skip ceiling, so no waiter can be deferred forever.
+        for w in live:
+            if w is not chosen:
+                w.skips += 1
+        self._remove_waiter(chosen)
+        chosen.future.set_result(None)  # hand off; ``_held`` stays True
 
     @contextlib.asynccontextmanager
     async def __call__(self, nice: int = NICE_INTERACTIVE):
