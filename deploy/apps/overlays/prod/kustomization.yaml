@@ -50,7 +50,7 @@ images:
   # the stable prod pin job seds only `newTag: sha-*`, so the two never collide.
   - name: ghcr.io/samlindskog/funnelmanager/frontend-canary
     newName: ghcr.io/samlindskog/funnelmanager/frontend
-    newTag: canary-PINME
+    newTag: canary-bed99787
 
 generatorOptions:
   disableNameSuffixHash: true
