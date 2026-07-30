@@ -790,6 +790,7 @@ const ResultsListPane = memo(function ResultsListPane({
         )}
         {results.length > 0 && (
           <Button
+            data-testid="search-actions-toggle"
             size="small"
             variant={actionsOpen ? 'outlined' : 'text'}
             disableRipple
@@ -831,6 +832,7 @@ const ResultsListPane = memo(function ResultsListPane({
             }}
           >
             <Button
+              data-testid="search-select-all"
               size="small"
               disableRipple
               onClick={toggleSelectAll}
@@ -840,6 +842,7 @@ const ResultsListPane = memo(function ResultsListPane({
             </Button>
             <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
               <Button
+                data-testid="search-export"
                 size="small"
                 variant="outlined"
                 disableRipple
@@ -858,6 +861,7 @@ const ResultsListPane = memo(function ResultsListPane({
               </Button>
               {selectedChannelCount > 0 && (
                 <Button
+                  data-testid="search-enrich"
                   size="small"
                   variant="contained"
                   disableRipple
@@ -1005,10 +1009,11 @@ const ResultsListPane = memo(function ResultsListPane({
           />
         </DialogContent>
         <DialogActions>
-          <Button onClick={cancelEnrich} sx={{ textTransform: 'none' }}>
+          <Button data-testid="search-enrich-cancel" onClick={cancelEnrich} sx={{ textTransform: 'none' }}>
             Cancel
           </Button>
           <Button
+            data-testid="search-enrich-confirm"
             variant="contained"
             onClick={confirmEnrich}
             autoFocus
@@ -1117,6 +1122,7 @@ export const SearchResultsView = memo(
         {onChangePage && search && (
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
             <Button
+              data-testid="search-page-prev"
               size="small"
               disableRipple
               startIcon={paging ? <CircularProgress size={14} color="inherit" /> : <NavigateBeforeIcon />}
@@ -1126,6 +1132,7 @@ export const SearchResultsView = memo(
               Prev
             </Button>
             <Button
+              data-testid="search-page-next"
               size="small"
               disableRipple
               endIcon={paging ? <CircularProgress size={14} color="inherit" /> : <NavigateNextIcon />}

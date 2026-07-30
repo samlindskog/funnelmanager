@@ -262,7 +262,7 @@ export function AgentsApp({ user }: { user: User }) {
             </Typography>
           </Box>
           <Divider orientation="vertical" flexItem sx={{ my: 1.5 }} />
-          <Button component="a" href="/" color="inherit" size="small">
+          <Button data-testid="agents-open-hub" component="a" href="/" color="inherit" size="small">
             Hub
           </Button>
           <Box sx={{ flex: 1 }} />
@@ -270,7 +270,13 @@ export function AgentsApp({ user }: { user: User }) {
             {user.username}
           </Typography>
           <ColorModeToggle />
-          <Button color="inherit" size="small" startIcon={<LogoutIcon />} onClick={() => void logout()}>
+          <Button
+            data-testid="agents-signout"
+            color="inherit"
+            size="small"
+            startIcon={<LogoutIcon />}
+            onClick={() => void logout()}
+          >
             Log out
           </Button>
         </Toolbar>
@@ -321,6 +327,7 @@ export function AgentsApp({ user }: { user: User }) {
               slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: 13 } } }}
             />
             <Button
+              data-testid="agents-start-task"
               variant="contained"
               startIcon={starting ? <CircularProgress size={16} /> : <SendIcon />}
               disabled={starting || goal.trim().length === 0}
@@ -380,15 +387,15 @@ export function AgentsApp({ user }: { user: User }) {
               onChange={(event) => setStatusFilter(event.target.value)}
               sx={{ width: 140 }}
             >
-              <MenuItem value="">All</MenuItem>
+              <MenuItem data-testid="agents-status-all" value="">All</MenuItem>
               {STATUS_OPTIONS.map((option) => (
-                <MenuItem key={option} value={option}>
+                <MenuItem data-testid={`agents-status-${option}`} key={option} value={option}>
                   {option}
                 </MenuItem>
               ))}
             </TextField>
             <Tooltip title="Refresh">
-              <IconButton size="small" onClick={() => void refreshTasks()}>
+              <IconButton data-testid="agents-refresh" size="small" onClick={() => void refreshTasks()}>
                 <RefreshIcon fontSize="small" />
               </IconButton>
             </Tooltip>
@@ -413,6 +420,7 @@ export function AgentsApp({ user }: { user: User }) {
                   return (
                     <ListItemButton
                       key={run.id}
+                      data-testid={`agents-open-run-${run.id}`}
                       divider
                       onClick={() => void openDetail(run)}
                       sx={{
@@ -546,6 +554,7 @@ export function AgentsApp({ user }: { user: User }) {
                           {isOwner ? (
                             <Stack direction="row" spacing={1}>
                               <Button
+                                data-testid="agents-task-approve"
                                 variant="contained"
                                 color="success"
                                 size="small"
@@ -558,6 +567,7 @@ export function AgentsApp({ user }: { user: User }) {
                                 Approve
                               </Button>
                               <Button
+                                data-testid="agents-task-reject"
                                 variant="outlined"
                                 color="error"
                                 size="small"
@@ -678,7 +688,7 @@ export function AgentsApp({ user }: { user: User }) {
               )}
             </DialogContent>
             <DialogActions>
-              <Button onClick={() => setOpenTask(null)}>Close</Button>
+              <Button data-testid="agents-task-close" onClick={() => setOpenTask(null)}>Close</Button>
             </DialogActions>
           </>
         )}

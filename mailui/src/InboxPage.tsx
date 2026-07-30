@@ -25,6 +25,7 @@ import {
   ListItemText,
   MenuItem,
   Pagination,
+  PaginationItem,
   Stack,
   Tab,
   Tabs,
@@ -325,6 +326,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
             Mailboxes
           </Typography>
           <Button
+            data-testid="mail-connect-account"
             size="small"
             variant="outlined"
             startIcon={connecting ? <CircularProgress size={14} /> : <AddIcon />}
@@ -338,6 +340,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
         <Box sx={{ flex: 1, overflowY: 'auto' }}>
           <List dense disablePadding>
             <ListItemButton
+              data-testid="mail-mailbox-all"
               selected={selectedId === ALL_MAILBOXES}
               onClick={() => {
                 setSelectedId(ALL_MAILBOXES)
@@ -369,6 +372,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
                 return (
                   <ListItemButton
                     key={account.id}
+                    data-testid={`mail-mailbox-${account.id}`}
                     selected={account.id === selectedId}
                     onClick={() => {
                       setSelectedId(account.id)
@@ -414,6 +418,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
                               }
                             >
                               <IconButton
+                                data-testid={`mail-account-backup-${account.id}`}
                                 size="small"
                                 onClick={(event) => {
                                   event.stopPropagation()
@@ -426,6 +431,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
                           )}
                           <Tooltip title="Sync now">
                             <IconButton
+                              data-testid={`mail-account-sync-${account.id}`}
                               size="small"
                               onClick={(event) => {
                                 event.stopPropagation()
@@ -437,6 +443,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
                           </Tooltip>
                           <Tooltip title="Remove mailbox">
                             <IconButton
+                              data-testid={`mail-account-delete-${account.id}`}
                               size="small"
                               onClick={(event) => {
                                 event.stopPropagation()
@@ -484,7 +491,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
             sx={{ minHeight: 40 }}
           >
             {LABELS.map((item) => (
-              <Tab key={item} value={item} label={item.toLowerCase()} sx={{ minHeight: 40 }} />
+              <Tab key={item} data-testid={`mail-label-${item.toLowerCase()}`} value={item} label={item.toLowerCase()} sx={{ minHeight: 40 }} />
             ))}
           </Tabs>
           <Box sx={{ flex: 1 }} />
@@ -511,11 +518,12 @@ export function InboxPage({ notify }: { notify: Notify }) {
             sx={{ width: 260, mb: 0.5 }}
           />
           <Tooltip title="Refresh list">
-            <IconButton size="small" onClick={() => void loadMessages()} sx={{ mb: 0.5 }}>
+            <IconButton data-testid="mail-refresh" size="small" onClick={() => void loadMessages()} sx={{ mb: 0.5 }}>
               <RefreshIcon fontSize="small" />
             </IconButton>
           </Tooltip>
           <Button
+            data-testid="mail-compose"
             size="small"
             variant="contained"
             startIcon={<EditIcon />}
@@ -546,6 +554,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
               {messages.items.map((message) => (
                 <ListItemButton
                   key={message.id}
+                  data-testid={`mail-message-${message.id}`}
                   divider
                   onClick={() => void handleOpenMessage(message)}
                   sx={{ alignItems: 'flex-start', py: 1 }}
@@ -603,7 +612,24 @@ export function InboxPage({ notify }: { notify: Notify }) {
             {messages ? `${messages.total} messages` : ''}
           </Typography>
           <Box sx={{ flex: 1 }} />
-          <Pagination size="small" count={pageCount} page={page} onChange={(_, value) => setPage(value)} />
+          <Pagination
+            size="small"
+            count={pageCount}
+            page={page}
+            onChange={(_, value) => setPage(value)}
+            renderItem={(item) => (
+              <PaginationItem
+                {...item}
+                data-testid={
+                  item.type === 'previous'
+                    ? 'mail-page-prev'
+                    : item.type === 'next'
+                      ? 'mail-page-next'
+                      : undefined
+                }
+              />
+            )}
+          />
         </Stack>
       </Box>
 
@@ -670,6 +696,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
                       {item.attachments.map((attachment) => (
                         <Chip
                           key={attachment.attachment_id}
+                          data-testid={`mail-attachment-download-${attachment.attachment_id}`}
                           icon={<AttachFileIcon />}
                           label={`${attachment.filename} (${formatSize(attachment.size)})`}
                           onClick={() =>
@@ -686,6 +713,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
             </DialogContent>
             <DialogActions>
               <Button
+                data-testid="mail-reply"
                 startIcon={<ReplyIcon />}
                 onClick={() => {
                   const latest = threadMessages ? threadMessages[threadMessages.length - 1] : read.message
@@ -695,7 +723,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
               >
                 Reply
               </Button>
-              <Button onClick={() => setRead(null)}>Close</Button>
+              <Button data-testid="mail-read-close" onClick={() => setRead(null)}>Close</Button>
             </DialogActions>
           </>
         )}
@@ -720,7 +748,7 @@ export function InboxPage({ notify }: { notify: Notify }) {
                   }
                 >
                   {(accounts ?? []).map((account) => (
-                    <MenuItem key={account.id} value={account.id}>
+                    <MenuItem key={account.id} data-testid={`mail-compose-from-${account.id}`} value={account.id}>
                       {account.email}
                     </MenuItem>
                   ))}
@@ -767,10 +795,11 @@ export function InboxPage({ notify }: { notify: Notify }) {
               </Stack>
             </DialogContent>
             <DialogActions>
-              <Button onClick={() => setCompose(null)} disabled={sending}>
+              <Button data-testid="mail-send-cancel" onClick={() => setCompose(null)} disabled={sending}>
                 Cancel
               </Button>
               <Button
+                data-testid="mail-send"
                 variant="contained"
                 onClick={() => void handleSend()}
                 disabled={sending || splitAddresses(compose.to).length === 0}

@@ -25,7 +25,11 @@ export function CallbackPage() {
       {error ? (
         <Stack spacing={2} sx={{ alignItems: 'center' }}>
           <Alert severity="error">{error}</Alert>
-          <Button variant="contained" onClick={() => window.location.replace('/login')}>
+          <Button
+            data-testid="hub-signin-retry"
+            variant="contained"
+            onClick={() => window.location.replace('/login')}
+          >
             Back to sign in
           </Button>
         </Stack>

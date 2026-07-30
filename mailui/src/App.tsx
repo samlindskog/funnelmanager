@@ -58,7 +58,7 @@ export default function App() {
           {error ? (
             <Stack spacing={2} sx={{ alignItems: 'center' }}>
               <Typography color="text.secondary">{error}</Typography>
-              <Button variant="contained" onClick={() => redirectToLogin()}>
+              <Button data-testid="mail-signin-retry" variant="contained" onClick={() => redirectToLogin()}>
                 Back to sign in
               </Button>
             </Stack>

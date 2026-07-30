@@ -43,6 +43,7 @@ import {
   startCampaign,
 } from './api'
 import { ConfirmationDialog } from './ConfirmationDialog'
+import { slug } from './slug'
 import type { Campaign, CampaignSourceIn, ConfirmationRequired, SavedSearch, User } from './types'
 
 type Notify = (text: string, severity: 'success' | 'error') => void
@@ -219,11 +220,11 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
               Campaigns
             </Typography>
             <Tooltip title="Refresh">
-              <IconButton size="small" onClick={() => void refreshList()}>
+              <IconButton data-testid="mail-campaign-refresh" size="small" onClick={() => void refreshList()}>
                 <RefreshIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
+            <Button data-testid="mail-campaign-new" size="small" variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
               New
             </Button>
           </Stack>
@@ -234,12 +235,12 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
             value={ownerFilter}
             onChange={(event) => setOwnerFilter(event.target.value)}
           >
-            <MenuItem value="">All users</MenuItem>
-            <MenuItem value={user.username}>Me ({user.username})</MenuItem>
+            <MenuItem data-testid="mail-campaign-owner-all" value="">All users</MenuItem>
+            <MenuItem data-testid="mail-campaign-owner-me" value={user.username}>Me ({user.username})</MenuItem>
             {owners
               .filter((owner) => owner !== user.username)
               .map((owner) => (
-                <MenuItem key={owner} value={owner}>
+                <MenuItem key={owner} data-testid={`mail-campaign-owner-${slug(owner)}`} value={owner}>
                   {owner}
                 </MenuItem>
               ))}
@@ -260,6 +261,7 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
               {campaigns.map((campaign) => (
                 <ListItemButton
                   key={campaign.id}
+                  data-testid={`mail-campaign-${campaign.id}`}
                   divider
                   selected={campaign.id === selectedId}
                   onClick={() => setSelectedId(campaign.id)}
@@ -411,6 +413,7 @@ function CampaignDetail({
       <Stack direction="row" spacing={1} sx={{ mt: 2, flexWrap: 'wrap' }} useFlexGap>
         {(campaign.status === 'draft' || campaign.status === 'completed') && (
           <Button
+            data-testid="mail-campaign-start"
             variant="contained"
             startIcon={<PlayArrowIcon />}
             disabled={busy || campaign.status === 'completed'}
@@ -420,20 +423,20 @@ function CampaignDetail({
           </Button>
         )}
         {campaign.status === 'running' && (
-          <Button variant="outlined" startIcon={<PauseIcon />} disabled={busy} onClick={onPause}>
+          <Button data-testid="mail-campaign-pause" variant="outlined" startIcon={<PauseIcon />} disabled={busy} onClick={onPause}>
             Pause
           </Button>
         )}
         {campaign.status === 'paused' && (
-          <Button variant="contained" startIcon={<PlayArrowIcon />} disabled={busy} onClick={onResume}>
+          <Button data-testid="mail-campaign-resume" variant="contained" startIcon={<PlayArrowIcon />} disabled={busy} onClick={onResume}>
             Resume
           </Button>
         )}
-        <Button variant="outlined" startIcon={<PlaylistAddIcon />} disabled={busy || terminal} onClick={onContinue}>
+        <Button data-testid="mail-campaign-continue" variant="outlined" startIcon={<PlaylistAddIcon />} disabled={busy || terminal} onClick={onContinue}>
           Continue (add search)
         </Button>
         {!terminal && (
-          <Button color="error" startIcon={<CancelIcon />} disabled={busy} onClick={onCancel}>
+          <Button data-testid="mail-campaign-cancel" color="error" startIcon={<CancelIcon />} disabled={busy} onClick={onCancel}>
             Cancel
           </Button>
         )}
@@ -542,7 +545,7 @@ function SavedSearchPicker({
   return (
     <List dense sx={{ maxHeight: 260, overflowY: 'auto', border: 1, borderColor: 'divider', borderRadius: 1 }}>
       {searches.map((search) => (
-        <ListItemButton key={search.id} onClick={() => onToggle(search.id)} dense>
+        <ListItemButton key={search.id} data-testid={`mail-search-pick-${search.id}`} onClick={() => onToggle(search.id)} dense>
           <Checkbox edge="start" checked={selected.has(search.id)} tabIndex={-1} disableRipple size="small" />
           <ListItemText
             primary={search.query || `Search #${search.id}`}
@@ -666,7 +669,7 @@ function CreateCampaignDialog({
               onChange={(e) => setStrategy(e.target.value)}
             >
               {STRATEGIES.map((option) => (
-                <MenuItem key={option.value} value={option.value}>
+                <MenuItem key={option.value} data-testid={`mail-campaign-strategy-${option.value}`} value={option.value}>
                   {option.label}
                 </MenuItem>
               ))}
@@ -699,10 +702,11 @@ function CreateCampaignDialog({
         </Stack>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={submitting}>
+        <Button data-testid="mail-campaign-create-cancel" onClick={onClose} disabled={submitting}>
           Cancel
         </Button>
         <Button
+          data-testid="mail-campaign-create"
           variant="contained"
           onClick={() => void submit()}
           disabled={submitting || selected.size === 0 || subject.trim() === ''}
@@ -791,10 +795,11 @@ function ContinueCampaignDialog({
         <SavedSearchPicker searches={searches} loading={loading} selected={selected} onToggle={toggleOne} />
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={submitting}>
+        <Button data-testid="mail-campaign-continue-cancel" onClick={onClose} disabled={submitting}>
           Cancel
         </Button>
         <Button
+          data-testid="mail-campaign-add-source"
           variant="contained"
           onClick={() => void submit()}
           disabled={submitting || selected.size === 0}

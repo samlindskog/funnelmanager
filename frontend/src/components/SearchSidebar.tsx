@@ -42,6 +42,17 @@ import type { HistoryOwner, SearchHistorySummary } from '../types'
 /** Owner-filter sentinel matching SearchPage: browse every user's history. */
 const ALL_OWNERS = ''
 
+/** Kebab-case a username into a stable testid qualifier (e.g. owner "alice" →
+ * `search-owner-alice`). Usernames are admin-controlled and effectively
+ * punctuation-free, so slug collisions are not a concern here; there is no
+ * stable owner id to prefer (HistoryOwner carries only username + count). */
+function slug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
 /** Session-scoped: skip history delete confirmation after the user opts out. */
 let skipHistoryDeleteConfirm = false
 
@@ -418,6 +429,7 @@ export const SearchSidebar = memo(function SearchSidebar({
         </Typography>
         {items.length > 0 && (
           <Button
+            data-testid="search-history-actions-toggle"
             size="small"
             variant={actionsOpen ? 'outlined' : 'text'}
             onClick={() => (actionsOpen ? closeActions() : setActionsOpen(true))}
@@ -427,7 +439,7 @@ export const SearchSidebar = memo(function SearchSidebar({
           </Button>
         )}
         {onClose && (
-          <IconButton aria-label="Hide search history" size="small" onClick={onClose}>
+          <IconButton data-testid="search-history-close" aria-label="Hide search history" size="small" onClick={onClose}>
             <CloseIcon fontSize="small" />
           </IconButton>
         )}
@@ -442,9 +454,9 @@ export const SearchSidebar = memo(function SearchSidebar({
             value={selectedOwner}
             onChange={(event) => onSelectOwner(event.target.value)}
           >
-            <MenuItem value={ALL_OWNERS}>All users</MenuItem>
+            <MenuItem data-testid="search-owner-all" value={ALL_OWNERS}>All users</MenuItem>
             {ownerOptions.map((owner) => (
-              <MenuItem key={owner.username} value={owner.username}>
+              <MenuItem data-testid={`search-owner-${slug(owner.username)}`} key={owner.username} value={owner.username}>
                 {owner.username === currentUsername ? `${owner.username} (you)` : owner.username}
                 {` · ${owner.count.toLocaleString()}`}
               </MenuItem>
@@ -474,6 +486,7 @@ export const SearchSidebar = memo(function SearchSidebar({
           }}
         >
           <Button
+            data-testid="search-history-select-all"
             size="small"
             onClick={toggleSelectAll}
             disabled={checkedCount === 0 && ownedCount === 0}
@@ -487,6 +500,7 @@ export const SearchSidebar = memo(function SearchSidebar({
                 {checkedCount} selected
               </Typography>
               <IconButton
+                data-testid="search-history-delete"
                 aria-label="Delete selected searches"
                 size="small"
                 color="error"
@@ -545,10 +559,11 @@ export const SearchSidebar = memo(function SearchSidebar({
           />
         </DialogContent>
         <DialogActions>
-          <Button onClick={cancelPendingDelete} sx={{ textTransform: 'none' }}>
+          <Button data-testid="search-history-delete-cancel" onClick={cancelPendingDelete} sx={{ textTransform: 'none' }}>
             Cancel
           </Button>
           <Button
+            data-testid="search-history-delete-confirm"
             color="error"
             variant="contained"
             onClick={confirmPendingDelete}

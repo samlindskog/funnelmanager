@@ -57,8 +57,9 @@ export function MailApp({ user }: { user: User }) {
           </Box>
           <Divider orientation="vertical" flexItem sx={{ my: 1.5 }} />
           <Tabs value={view} onChange={(_, value: View) => setView(value)} sx={{ minHeight: 48 }}>
-            <Tab value="inbox" icon={<MailIcon fontSize="small" />} iconPosition="start" label="Inbox" sx={{ minHeight: 48 }} />
+            <Tab data-testid="mail-tab-inbox" value="inbox" icon={<MailIcon fontSize="small" />} iconPosition="start" label="Inbox" sx={{ minHeight: 48 }} />
             <Tab
+              data-testid="mail-tab-campaigns"
               value="campaigns"
               icon={<CampaignIcon fontSize="small" />}
               iconPosition="start"
@@ -67,14 +68,14 @@ export function MailApp({ user }: { user: User }) {
             />
           </Tabs>
           <Box sx={{ flex: 1 }} />
-          <Button component="a" href="/" color="inherit" size="small">
+          <Button data-testid="mail-open-hub" component="a" href="/" color="inherit" size="small">
             Hub
           </Button>
           <Typography variant="body2" color="text.secondary">
             {user.username}
           </Typography>
           <ColorModeToggle />
-          <Button color="inherit" size="small" startIcon={<LogoutIcon />} onClick={() => void logout()}>
+          <Button data-testid="mail-signout" color="inherit" size="small" startIcon={<LogoutIcon />} onClick={() => void logout()}>
             Log out
           </Button>
         </Toolbar>

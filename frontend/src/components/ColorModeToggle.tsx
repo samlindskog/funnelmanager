@@ -14,6 +14,7 @@ export function ColorModeToggle() {
   return (
     <Tooltip title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}>
       <IconButton
+        data-testid="color-mode-toggle"
         color="inherit"
         size="small"
         aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}

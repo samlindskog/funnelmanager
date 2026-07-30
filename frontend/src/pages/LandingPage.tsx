@@ -64,7 +64,13 @@ export function LandingPage() {
         <Stack spacing={2.5}>
           <Typography variant="h4">Welcome</Typography>
           {error && <Alert severity="error">{error}</Alert>}
-          <Button variant="contained" size="large" onClick={onSignIn} disabled={submitting}>
+          <Button
+            data-testid="hub-signin"
+            variant="contained"
+            size="large"
+            onClick={onSignIn}
+            disabled={submitting}
+          >
             {submitting ? 'Redirecting…' : 'Sign in'}
           </Button>
         </Stack>

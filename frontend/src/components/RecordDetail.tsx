@@ -308,7 +308,7 @@ function RawJsonAccordion({
         '&:before': { display: 'none' },
       }}
     >
-      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+      <AccordionSummary data-testid="record-json-toggle" expandIcon={<ExpandMoreIcon />}>
         <Stack spacing={0.25} sx={{ minWidth: 0 }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
             {title}
@@ -408,6 +408,7 @@ function PersonDetail({
           <Tooltip title="Refresh from stored lead">
             <span>
               <IconButton
+                data-testid="record-refresh"
                 aria-label="Refresh person"
                 size="small"
                 onClick={() => void handleRefresh()}
@@ -499,6 +500,7 @@ function PersonDetail({
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }} useFlexGap>
             {record.linkedin_url && (
               <Button
+                data-testid="record-person-linkedin"
                 component={Link}
                 href={record.linkedin_url}
                 target="_blank"
@@ -513,6 +515,7 @@ function PersonDetail({
             )}
             {org?.linkedin_url && (
               <Button
+                data-testid="record-person-company-linkedin"
                 component={Link}
                 href={org.linkedin_url}
                 target="_blank"
@@ -585,6 +588,7 @@ function CompanyDetail({
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }} useFlexGap>
             {website && (
               <Button
+                data-testid="record-company-website"
                 component={Link}
                 href={website}
                 target="_blank"
@@ -599,6 +603,7 @@ function CompanyDetail({
             )}
             {record.linkedin_url && (
               <Button
+                data-testid="record-company-linkedin"
                 component={Link}
                 href={record.linkedin_url}
                 target="_blank"
@@ -641,6 +646,7 @@ function CompanyDetail({
             </Alert>
           ) : (
             <Button
+              data-testid="record-company-search-people"
               variant="contained"
               startIcon={<PersonSearchIcon />}
               onClick={() =>

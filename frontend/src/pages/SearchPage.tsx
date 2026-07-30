@@ -642,6 +642,7 @@ export function SearchPage() {
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', minWidth: 0 }}>
             {showingResults && (
               <Button
+                data-testid="search-back"
                 startIcon={<ArrowBackIcon />}
                 onClick={backToSearch}
                 color="inherit"
@@ -651,6 +652,7 @@ export function SearchPage() {
               </Button>
             )}
             <Button
+              data-testid="search-history-toggle"
               startIcon={sidebarOpen ? <MenuOpenIcon /> : <HistoryIcon />}
               onClick={() => setSidebarOpen((open) => !open)}
               color="inherit"
@@ -689,6 +691,7 @@ export function SearchPage() {
               {user?.username}
             </Typography>
             <IconButton
+              data-testid="search-shortcuts"
               size="small"
               color="inherit"
               aria-label="Keyboard shortcuts"
@@ -751,10 +754,10 @@ export function SearchPage() {
               </Box>
             </Popover>
             <ColorModeToggle />
-            <Button component="a" href="/" color="inherit" size="small">
+            <Button data-testid="search-open-hub" component="a" href="/" color="inherit" size="small">
               Hub
             </Button>
-            <Button startIcon={<LogoutIcon />} onClick={logout} color="inherit">
+            <Button data-testid="search-signout" startIcon={<LogoutIcon />} onClick={logout} color="inherit">
               Log out
             </Button>
           </Stack>
@@ -874,8 +877,8 @@ export function SearchPage() {
                       value={searchSource}
                       onChange={(e) => setSearchSource(e.target.value as SearchSource)}
                     >
-                      <MenuItem value="apollo">Apollo (live)</MenuItem>
-                      <MenuItem value="similarity">Saved leads (similarity)</MenuItem>
+                      <MenuItem data-testid="search-source-apollo" value="apollo">Apollo (live)</MenuItem>
+                      <MenuItem data-testid="search-source-similarity" value="similarity">Saved leads (similarity)</MenuItem>
                     </Select>
                   </FormControl>
 
@@ -920,8 +923,8 @@ export function SearchPage() {
                             setCompanyDisplayName('')
                           }}
                         >
-                          <MenuItem value="name">Company name</MenuItem>
-                          <MenuItem value="id">Apollo company ID</MenuItem>
+                          <MenuItem data-testid="search-company-by-name" value="name">Company name</MenuItem>
+                          <MenuItem data-testid="search-company-by-id" value="id">Apollo company ID</MenuItem>
                         </Select>
                       </FormControl>
                       <TextField
@@ -963,12 +966,13 @@ export function SearchPage() {
                           value={entityType}
                           onChange={(e) => setEntityType(e.target.value as EntityType)}
                         >
-                          <MenuItem value="people">People</MenuItem>
-                          <MenuItem value="companies">Companies</MenuItem>
+                          <MenuItem data-testid="search-entity-people" value="people">People</MenuItem>
+                          <MenuItem data-testid="search-entity-companies" value="companies">Companies</MenuItem>
                         </Select>
                       </FormControl>
                     )}
                     <Button
+                      data-testid="search-run"
                       type="submit"
                       variant="contained"
                       size="large"

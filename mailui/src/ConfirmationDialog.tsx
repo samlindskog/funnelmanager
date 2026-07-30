@@ -84,10 +84,11 @@ export function ConfirmationDialog({
             </Stack>
           </DialogContent>
           <DialogActions>
-            <Button onClick={onCancel} disabled={busy}>
+            <Button data-testid="mail-confirm-cancel" onClick={onCancel} disabled={busy}>
               Cancel
             </Button>
             <Button
+              data-testid="mail-confirm"
               variant="contained"
               color="warning"
               onClick={onConfirm}

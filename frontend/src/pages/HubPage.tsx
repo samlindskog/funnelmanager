@@ -27,6 +27,15 @@ function keycloakConsoleUrl(): string {
   return realm ? `${base}/admin/${realm}/console/` : issuer
 }
 
+/** Kebab-case an app/tile name into a stable testid qualifier (e.g. the
+ * "Search" tile → `hub-open-search`). Non-alphanumerics collapse to hyphens. */
+function slug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
 export function HubPage() {
   const { user, logout } = useAuth()
   // null = probes still in flight (tiles render once discovery settles).
@@ -82,6 +91,7 @@ export function HubPage() {
         </Typography>
         <ColorModeToggle />
         <Button
+          data-testid="hub-signout"
           size="small"
           color="inherit"
           startIcon={<LogoutIcon fontSize="small" />}
@@ -123,7 +133,13 @@ export function HubPage() {
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap sx={{ flexWrap: 'wrap' }}>
               {(apps ?? []).map((app) => (
                 <Card key={app.name} variant="outlined" sx={{ minWidth: 240, flex: '0 1 280px' }}>
-                  <CardActionArea component="a" href={app.url} target="_blank" rel="noopener">
+                  <CardActionArea
+                    data-testid={`hub-open-${slug(app.name)}`}
+                    component="a"
+                    href={app.url}
+                    target="_blank"
+                    rel="noopener"
+                  >
                     <CardContent>
                       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                         <Typography variant="h6" sx={{ flexGrow: 1 }}>
@@ -153,7 +169,13 @@ export function HubPage() {
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap sx={{ flexWrap: 'wrap' }}>
                   {adminTiles.map((tile) => (
                     <Card key={tile.name} variant="outlined" sx={{ minWidth: 240, flex: '0 1 280px' }}>
-                      <CardActionArea component="a" href={tile.url} target="_blank" rel="noopener">
+                      <CardActionArea
+                        data-testid={`hub-admin-${slug(tile.name)}`}
+                        component="a"
+                        href={tile.url}
+                        target="_blank"
+                        rel="noopener"
+                      >
                         <CardContent>
                           <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                             <Typography variant="h6" sx={{ flexGrow: 1 }}>
