@@ -12,8 +12,16 @@ Google.** Full architecture is in the project `CLAUDE.md`; this is your delta.
 ## Your boundary
 - Edit only `mail/`. Never edit `mailui/` (that's `mailui-agent`) or the shared
   `frontend/`. A contract change for the UI is a hand-off, not a reach-in.
-- Refresh tokens are stored in `mail-db` in plaintext by design — do not "fix"
-  this silently; if you touch token storage, flag it for security review.
+- **Mesh-agnostic (P10):** no exchange/authz plumbing in app code beyond the
+  `fm_runtime` middleware + sanctioned `require_confirmation` gate; authorization is
+  platform-enforced.
+- Your service also owns a **campaign engine** (paced multi-domain send, suppression,
+  dedupe) and an `/api/mail/mcp/v1/*` surface consumed by MCP — these are built and
+  load-bearing (not "planned"); keep them documented, and note the **`search→mail`** edge
+  (`/contacts/contacted` for `exclude_contacted`).
+- **Both** refresh **and** access tokens are stored in `mail-db` as plaintext (only the
+  refresh token is documented as "by design"); if you touch token storage, flag the
+  access-token plaintext for `security-reviewer` too.
 
 ## Load-bearing invariants (restated from CLAUDE.md)
 - **Auth is the standard principal flow (mail-audience JWT)** with exactly two
@@ -22,14 +30,21 @@ Google.** Full architecture is in the project `CLAUDE.md`; this is your delta.
   `/api/mail/oauth/url`). Do not add or widen `@anonymous` routes without security review.
 - **Sync (`app/sync.py`)** is a background loop: per-mailbox newest-first backfill
   with a persisted page token + `history.list` increments anchored at connect time.
-  **Deletions flag `is_deleted`, never delete rows** — the archive outlives the
-  mailbox. Preserve this.
+  **Google-side deletions flag `is_deleted`, never remove rows** — the archive outlives
+  the mailbox. Note the scope limit: `DELETE /api/mail/accounts/{id}` **does** hard-purge
+  the account and its `mail_messages` (FK cascade). If archive-durability across account
+  removal is intended, that cascade is a bug to flag for security/product review — the
+  never-delete rule is about **sync**, not account removal.
 - Gmail scopes are exactly `gmail.readonly` + `gmail.send`. Don't broaden scopes.
 - The service can create its own database when pointed at any Postgres.
 
 ## Verify
-No test suite. Run the service against `mail-db`; exercise OAuth connect (state
-row → callback), a sync increment, and a send. Absolute `app` imports, CWD `mail/`.
+Run against `mail-db`; exercise OAuth connect (state row → callback), a sync increment,
+a send. **Add tests (P11):** unit — anti-spam per-domain cap + cross-campaign
+suppression, the single-use OAuth-state consume; integration (Testcontainers Postgres,
+Gmail mocked) — the P4 backup/backup-grow gate two-branch flow and the campaign pacer
+under per-account/per-campaign locks (no re-send on crash). `fm_runtime.export --check`
+for grant changes. Absolute `app` imports, CWD `mail/`.
 
 ## When done
 Clean `git diff`, hand off to reviewers. Anything touching OAuth state, token

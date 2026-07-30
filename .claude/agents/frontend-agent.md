@@ -21,10 +21,20 @@ the project `CLAUDE.md`; this is your delta.
   (OPA + audience checks) is the enforcement point. Never treat a hidden UI as security.
 - **Stream handling** (`src/api.ts`) and the floating progress rings
   (`src/progress.tsx`) consume `progress`, `first_page`, `complete`,
-  `embedding_progress`, `ingest_complete`, `error`. `complete` may precede
+  `embedding_progress`, `ingest_complete`, `error`, **and `item_error`** (per-row
+  enrich failure) — tolerate unknown event types (e.g. a future `heartbeat`) rather
+  than erroring. `complete` may precede
   further embedding progress; multiple streams share one origin, so a single
   stream failure must not tear down siblings. Preserve cancel handling
   (`active_ingest_stream_ids` / `active_embedding_stream_ids`).
+- **P1:** history is cross-user visible; the client owner-only delete/select
+  affordance mirrors backend authz — keep it as a *convenience*, correctness still
+  depends on the server. Do not add per-user **read** hiding.
+- **P4 gap:** the client-side enrich token estimate is a parallel heuristic only. The
+  real guard is the server `409 confirmation_required` handshake — a large search/enrich
+  has **no** client gate today and a non-browser caller bypasses the heuristic. If you
+  touch expensive-action UX, handle the server 409 + re-invoke with `confirm=true` (do
+  not self-approve an `human_approval_required`/agent-origin response).
 
 ## Verify
 ```bash
@@ -33,6 +43,9 @@ npm run build   # tsc -b && vite build — this IS the typecheck; run after any 
 npm run lint    # oxlint
 ```
 No test suite. For runtime, drive the hub sign-in and a search stream end-to-end.
+Beyond `build`/`lint`, when touching stream handling add a chunk-consuming integration
+test that asserts a single stream's `{"type":"error"}` line does **not** tear down sibling
+streams sharing the origin (the P8 invariant, from the client side).
 
 ## When done
 Green `build` + `lint`, clean `git diff`, hand off to reviewers. Flag OIDC or any

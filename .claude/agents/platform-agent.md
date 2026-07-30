@@ -20,15 +20,43 @@ your delta.
 ## Load-bearing invariants (restated from CLAUDE.md + CONVENTIONS.md)
 - **GitOps only:** a deploy is a git commit, never an ssh push. CI builds images
   and commits a `sha-…` pin; Flux reconciles `main`. Don't hand-edit the cluster.
-- **OPA is the mesh enforcement point** for grants; its policy **data is generated
-  from `fm_runtime`'s `@anonymous` export and must mirror `grants.py`** — if you
-  touch `deploy/policy/data.json`, coordinate with `runtime-agent` so code and
-  policy stay in lockstep.
+- **OPA is the mesh enforcement point** for grants; its policy data must mirror
+  `grants.py` and the realm. **Wire `python -m fm_runtime.export --check
+  deploy/policy/data.json --realm <dev+prod realm files>` into the CI `policy` job as a
+  blocking gate** (P7) — today it is only runnable by hand, so a hand-edited realm or
+  leftover `svc-*` over-grant ships undetected. Also extend `--check` to cover the
+  `@anonymous` list (it currently does not), and add `jobs`+`agents` to the CI `backends`
+  import job (they ship but aren't import-tested).
+- Fix stale infra prose: there is no `deploy-prod.yml` (it's `release-prod.yml`); the
+  build matrix is **ten** images (not "six") incl. `backup`; the `agents` netpol egress
+  includes **Keycloak + OpenAI** (not "only mcp + db"); Flux prod `healthChecks` omit
+  `agents`/`agentsui` — add them; `jobs/README.md` "not wired" is stale (compose+k3s
+  exist). **Posture flag (drift #33):** prod compose runs Keycloak as `start-dev
+  --import-realm` on an **H2** named volume — the *dev* storage engine as the sole prod
+  OIDC issuer, diverging from the k3s CNPG `kc-db` design. Treat this as a
+  durability/security concern (not just stale prose) and flag for review.
+- In `authz.rego` the JWT branch uses `io.jwt.decode` (decode-only) trusting "Istio
+  already validated" — either switch to `io.jwt.decode_verify` against JWKS, or assert
+  Istio verification before trusting `aud`/`azp`/roles (defense-in-depth;
+  RequestAuthentication does not reject token-less requests outside the anonymous
+  notPaths).
 - **Node roles / taints:** schedule to labels (`role=worker`, `role=edge`), never
   node names. Only `edge` gets public 80/443. `prod` PriorityClass > `dev`.
 - **Keycloak is the sole issuer.** The tracked dev realm is dev-only (admin/admin,
   published secrets); prod **requires** `KEYCLOAK_REALM_FILE`. Keep the dev/prod
   hostname + backchannel split intact.
+- **`fm_origin` multi-hop propagation (P3) is realm-wired — don't break it.** The
+  `fm-origin-passthrough` script mapper (`deploy/keycloak/providers/`, carried by the
+  `fm-origin` **client scope**) reads the inbound `subject_token`'s origin and carries it
+  onto each exchanged token. **Every exchanging client (`search`/`leads`/`mcp`/`jobs`/`mail`,
+  +`frontend`) must have the `fm-origin` scope as a *default* scope** — a new exchanging
+  client added without it **silently resets origin to `user`** downstream (agent attribution
+  lost). The `agents` client is the **only** one without the scope (it mints `agent` via its
+  own hardcoded mapper). This requires `KC_FEATURES=scripts` + the pinned provider JAR
+  (dev/prod compose bind-mount + k3s `keycloak-providers` ConfigMap); the CI `keycloak-provider`
+  job guards the JAR/ConfigMap against drift from `src/`. A KC version bump must stay on
+  26.2.x (the `scripts` preview mechanism) and re-pin the JAR — verify origin still survives
+  `agents→mcp→search→leads`.
 - **The naming convention is total:** source dir = compose service = container/DNS
   = GHCR image = API prefix. Preserve it in every manifest and compose file.
 
@@ -37,6 +65,10 @@ your delta.
 - Manifests: re-check against `deploy/CONVENTIONS.md`; if policy changed, confirm it
   matches the `fm_runtime` export.
 - Ship to dev via the `deploy-dev` skill; prod via the `deploy-funnelmanager` skill.
+- After any policy/realm/scope change, the **first** verification is
+  `fm_runtime.export --check … --realm` (make it CI-blocking, not just local). Keep the
+  Roadmap target-state in view (Flagger canary + OTel/Tempo collector + agent-driven E2E
+  gate) — new observability/netpol edges must be least-privilege and declarative.
 
 ## When done
 Clean `git diff`, hand off to reviewers. **Always** include `security-reviewer` for
