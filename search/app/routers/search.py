@@ -223,6 +223,64 @@ def _resolved_record_email(record: dict[str, Any]) -> str | None:
     return _email_from_value(data.get("email")) or _email_from_value(data.get("emails"))
 
 
+_CSV_HEADER = ["name", "email", "phone", "company", "title"]
+
+
+def _clean_str(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _phones_from_value(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            number = item.get("sanitized_number") or item.get("raw_number") or item.get("number")
+            if isinstance(number, str) and number.strip():
+                out.append(number.strip())
+    return out
+
+
+def _resolved_record_phone(record: dict[str, Any]) -> str | None:
+    """Mirror frontend resolvedRecordPhone: person phone_numbers (top-level, then
+    people/match payload) joined; company top-level phone string."""
+    if record.get("entity_type") == "person":
+        direct = _phones_from_value(record.get("phone_numbers"))
+        if direct:
+            return "; ".join(direct)
+        responses = record.get("apollo_responses")
+        if isinstance(responses, dict):
+            entry = responses.get("/api/v1/people/match")
+            data = entry.get("data") if isinstance(entry, dict) else None
+            if isinstance(data, dict):
+                person = data.get("person")
+                if isinstance(person, dict):
+                    nested = _phones_from_value(person.get("phone_numbers"))
+                    if nested:
+                        return "; ".join(nested)
+                top = _phones_from_value(data.get("phone_numbers"))
+                if top:
+                    return "; ".join(top)
+        return None
+    return _clean_str(record.get("phone"))
+
+
+def _record_company(record: dict[str, Any]) -> str | None:
+    if record.get("entity_type") == "person":
+        org = record.get("organization")
+        return _clean_str(org.get("name")) if isinstance(org, dict) else None
+    return _clean_str(record.get("name"))
+
+
+def _record_title(record: dict[str, Any]) -> str | None:
+    if record.get("entity_type") != "person":
+        return None
+    return _clean_str(record.get("title") or record.get("headline"))
+
+
 def _csv_export_filename(search: SearchHistory) -> str:
     slug = _CSV_FILENAME_SAFE.sub("-", (search.query or "search").strip())[:48].strip("-._")
     if not slug:
@@ -252,7 +310,7 @@ async def _iter_search_csv(client: LeadsClient, mongo_ids: list[str]) -> AsyncIt
         buffer.truncate(0)
         return value
 
-    writer.writerow(["name", "email"])
+    writer.writerow(_CSV_HEADER)
     yield _flush()
     # Hydration now goes through the token-authorized leads backend, so a chunk
     # can fail mid-export (expired token, OPA deny, leads down). Never raise out
@@ -266,11 +324,25 @@ async def _iter_search_csv(client: LeadsClient, mongo_ids: list[str]) -> AsyncIt
             for record in records:
                 name = str(record.get("name") or "").strip() or "null"
                 email = _resolved_record_email(record) or "null"
-                writer.writerow([_csv_cell(name), _csv_cell(email)])
+                phone = _resolved_record_phone(record) or "null"
+                company = _record_company(record) or "null"
+                title = _record_title(record) or "null"
+                writer.writerow(
+                    [
+                        _csv_cell(name),
+                        _csv_cell(email),
+                        _csv_cell(phone),
+                        _csv_cell(company),
+                        _csv_cell(title),
+                    ]
+                )
             yield _flush()
     except Exception as exc:
         logger.warning("CSV export truncated after hydrate failure: %s", exc)
-        writer.writerow(["ERROR: export truncated before all rows were written", ""])
+        writer.writerow(
+            ["ERROR: export truncated before all rows were written"]
+            + [""] * (len(_CSV_HEADER) - 1)
+        )
         yield _flush()
 
 

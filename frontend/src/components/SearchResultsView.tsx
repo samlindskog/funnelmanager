@@ -136,18 +136,71 @@ function resolvedRecordEmail(record: ApolloRecord): string | null {
   return emailFromValue(match.email) || emailFromValue(match.emails)
 }
 
-function csvEscape(value: string): string {
-  if (/[",\r\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`
+function phoneNumbersFromValue(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
   return value
+    .map((item) => {
+      if (typeof item === 'string') return item.trim()
+      if (item && typeof item === 'object') {
+        const row = item as Record<string, unknown>
+        return String(row.sanitized_number || row.raw_number || row.number || '').trim()
+      }
+      return ''
+    })
+    .filter(Boolean)
+}
+
+function resolvedRecordPhone(record: ApolloRecord): string | null {
+  if (record.entity_type === 'person') {
+    const direct = phoneNumbersFromValue(record.phone_numbers)
+    if (direct.length) return direct.join('; ')
+    const entry = record.apollo_responses?.['/api/v1/people/match']
+    const data = entry?.data
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const match = data as Record<string, unknown>
+      const person = match.person
+      if (person && typeof person === 'object' && !Array.isArray(person)) {
+        const nested = phoneNumbersFromValue((person as Record<string, unknown>).phone_numbers)
+        if (nested.length) return nested.join('; ')
+      }
+      const top = phoneNumbersFromValue(match.phone_numbers)
+      if (top.length) return top.join('; ')
+    }
+    return null
+  }
+  return (record.phone || '').trim() || null
+}
+
+function recordCompany(record: ApolloRecord): string | null {
+  if (record.entity_type === 'person') return (record.organization?.name || '').trim() || null
+  return (record.name || '').trim() || null
+}
+
+function recordTitle(record: ApolloRecord): string | null {
+  if (record.entity_type !== 'person') return null
+  return (record.title || record.headline || '').trim() || null
+}
+
+function csvEscape(value: string): string {
+  // Neutralize spreadsheet formula injection (mirrors the backend's _csv_cell):
+  // Excel/Sheets evaluate cells starting with = + - @ (or tab/CR) even when quoted.
+  const cell = value && '=+-@\t\r'.includes(value[0]) ? `'${value}` : value
+  if (/[",\r\n]/.test(cell)) return `"${cell.replace(/"/g, '""')}"`
+  return cell
 }
 
 function downloadSelectedRecordsCsv(records: ApolloRecord[], filename: string): void {
-  const lines = ['name,email,linkedin']
+  const lines = ['name,email,linkedin,phone,company,title']
   for (const record of records) {
     const name = (record.name || '').trim() || 'null'
     const email = resolvedRecordEmail(record) || 'null'
     const linkedin = (record.linkedin_url || '').trim() || 'null'
-    lines.push(`${csvEscape(name)},${csvEscape(email)},${csvEscape(linkedin)}`)
+    const phone = resolvedRecordPhone(record) || 'null'
+    const company = recordCompany(record) || 'null'
+    const title = recordTitle(record) || 'null'
+    lines.push(
+      [name, email, linkedin, phone, company, title].map(csvEscape).join(','),
+    )
   }
   const blob = new Blob([`${lines.join('\n')}\n`], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
