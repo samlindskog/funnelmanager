@@ -32,6 +32,12 @@ your delta.
   role. `FM_ENFORCE_GRANTS=true` applies them in-process in compose (fail-closed,
   no OPA). **The built-in default must mirror `deploy/policy/data.json` — change
   them together**, or code and mesh policy drift.
+- **The structured access log (`middleware.py` `_observe`, `logging.py`) is a
+  secret-leak surface:** log the route **template** (`scope["route"].path_format`), never
+  the raw ASGI path or query — path-embedded secrets (Apollo webhook
+  `/webhooks/apollo/{secret}`) and OIDC `code`/`state` otherwise land in Loki. The
+  unmatched-route fallback still logs the raw path — document that residual, don't
+  special-case it (P10).
 - **`@anonymous` is the allowlist** (`fm_runtime.anonymous(reason)`). It is
   exported via `python3 -m fm_runtime.export`; OPA policy data is generated from it,
   so **code and policy cannot drift** — regenerate after any change.
@@ -60,7 +66,11 @@ your delta.
 **Floor for every change (even non-authz, e.g. logging/observability):** at minimum
 syntax/import-check the edited module (`python3 -c "import fm_runtime.<mod>"` from
 `libs/fm_runtime/`) before returning — this library ships into all backends, so a silent
-import error breaks the fleet. Then, for authz-touching changes:
+import error breaks the fleet. For a **logging/observability-only** change (no
+grant/`@anonymous`/audience/scope touched), the export/2-backend drive is N/A — instead
+import the module and assert the emitted field equals the route template for a known route
+(and that a secret-bearing path is redacted); state that in your report rather than
+skipping verify silently. Then, for authz-touching changes:
 verify against ≥2 backends (principal acceptance, a token exchange, a grant allow/deny)
 and re-run `python3 -m fm_runtime.export --check … --realm` after any
 annotation/grant/scope change (this env has no `python` alias; the module must be

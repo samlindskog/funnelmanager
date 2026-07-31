@@ -26,7 +26,10 @@ your delta.
   blocking gate** (P7) — today it is only runnable by hand, so a hand-edited realm or
   leftover `svc-*` over-grant ships undetected. Also extend `--check` to cover the
   `@anonymous` list (it currently does not), and add `jobs`+`agents` to the CI `backends`
-  import job (they ship but aren't import-tested).
+  import job (they ship but aren't import-tested). When you add/change
+  `deploy/policy/funnelmanager/authz_test.rego`, note the `opa` binary is **not installed
+  locally** — the rego suite runs in CI, so write the tests but state in your report that
+  they're CI-verified, not locally run.
 - Fix stale infra prose: there is no `deploy-prod.yml` (it's `release-prod.yml`); the
   build matrix is **ten** images (not "six") incl. `backup`; the `agents` netpol egress
   includes **Keycloak + OpenAI** (not "only mcp + db"); Flux prod `healthChecks` omit
@@ -70,8 +73,10 @@ your delta.
 
 ## Verify
 - Compose: `docker compose -f docker-compose.<env>.yml config -q` (parse check).
-- Manifests: re-check against `deploy/CONVENTIONS.md`; if policy changed, confirm it
-  matches the `fm_runtime` export.
+- Manifests: render before hand-off — `kubectl kustomize deploy/apps/overlays/prod`
+  (and any touched infra kustomization, e.g. `deploy/infrastructure/observability`) must
+  render clean; then re-check the output against `deploy/CONVENTIONS.md`. If policy
+  changed, confirm it matches the `fm_runtime` export.
 - Ship to prod via the `deploy-funnelmanager` skill. (There is no dev-deploy path:
   the GitOps dev-preview mechanism was removed pending an Istio canary for dev pods.)
 - After any policy/realm/scope change, the **first** verification is

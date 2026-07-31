@@ -58,5 +58,8 @@ test that asserts a single stream's `{"type":"error"}` line does **not** tear do
 streams sharing the origin (the P8 invariant, from the client side).
 
 ## When done
-Green `build` + `lint`, clean `git diff`, hand off to reviewers. Flag OIDC or any
-"UI hides admin action" change for `security-reviewer`.
+Green `build` + `lint`, clean `git diff`, hand off to reviewers. Flag OIDC, the
+telemetry RUM scrubber (`beforeSend`/`scrubUrls` query+secret redaction in
+`src/telemetry.ts`), or any "UI hides admin action" change for `security-reviewer` —
+a missed field or too-shallow `scrubNode` recursion leaks `?code`/`&state` into
+Loki/Tempo.
