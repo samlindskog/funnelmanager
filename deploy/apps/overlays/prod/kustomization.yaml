@@ -22,25 +22,25 @@ resources:
 # never :latest.
 images:
   - name: ghcr.io/samlindskog/funnelmanager/search
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/leads
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/mail
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/mcp
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/jobs
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/agents
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/frontend
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/mailui
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/agentsui
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   - name: ghcr.io/samlindskog/funnelmanager/backup
-    newTag: sha-129ee2a7ec84e9d6ed82c5e6649bab2461179d97
+    newTag: sha-1e751e09723ffca8197428c03e1ffd9b15c8b4d7
   # Header-routed frontend canary (Phase 4). Its base uses the canary-logical
   # name `.../frontend-canary`; this entry remaps it to the real `frontend`
   # repo with an INDEPENDENT `canary-<sha>` tag. Kept separate from the stable
