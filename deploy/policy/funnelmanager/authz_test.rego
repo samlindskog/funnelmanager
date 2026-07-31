@@ -339,3 +339,27 @@ test_bootstrap_default_deny if {
 	r := envoy.result with input as {"attributes": {"source": {"principal": ""}, "destination": {"principal": ""}}}
 	r.allowed == false
 }
+
+# --------------------------------------------------------------------------
+# 8. leads-canary (east-west backend canary)
+# --------------------------------------------------------------------------
+# leads-canary reuses the stable `leads` ServiceAccount, so OPA resolves
+# `service := dst.sa = leads` for every request that lands on a canary pod —
+# identical to stable leads. OPA is AGNOSTIC to the `x-fm-canary` marker (the
+# east-west VirtualService does the steering; the SA/audience verdict is the
+# same for stable and canary leads). There is deliberately NO
+# `config.callers["leads-canary"]` entry — leads-canary never has its own
+# audience/SA, so such an entry would be dead policy that OPA never consults.
+# The test below asserts the REAL wire path a canary search takes.
+
+# REAL wire path: a canary search request is served by a `search-canary` pod,
+# which reuses the `search` SA, and its `search->leads` call (carrying the
+# propagated marker, invisible to OPA) lands on a leads-canary pod running under
+# the `leads` SA. To OPA this is exactly src.sa=search -> dst.sa=leads, aud
+# leads — authorized like any search->leads call.
+test_canary_search_sa_reaches_leads_canary_pod if {
+	authz.allow with input as http_input(
+		"prod", "search", "prod", "leads", "POST", "/api/leads",
+		admin_user_token("leads", "search"),
+	)
+}

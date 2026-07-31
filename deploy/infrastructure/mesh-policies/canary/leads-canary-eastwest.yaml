@@ -1,0 +1,100 @@
+# EAST-WEST leads canary route (the deferred "internal VirtualService" piece of
+# the canary program) — "canary-if-exists-else-stable", the in-mesh analogue of
+# the gateway canary HTTPRoutes.
+#
+# WHAT IT DOES. leads is INTERNAL — reached only in-mesh via `search->leads`
+# and `mcp->leads`, never through the ingress gateway. So the canary marker
+# cannot be steered at the edge for this hop; it must be steered in the mesh.
+# This Istio VirtualService attaches to the SIDECARS (`gateways: [mesh]`, NOT
+# the fm-gateway) for host `leads` and splits traffic:
+#   * a request carrying the `x-fm-canary` header (PRESENCE only) -> the
+#     `leads-canary` Service;
+#   * everything else (normal search->leads / mcp->leads) -> stable `leads`.
+# fm_runtime already propagates `x-fm-canary` across the search->leads hop, so a
+# cookie-gated canary search request (served by search-canary) carries the
+# marker onto its leads call and lands on canary leads; unmarked prod traffic is
+# untouched.
+#
+# MATCH ON PRESENCE, NEVER THE SECRET VALUE. The header match is the regex `.+`
+# (any non-empty value), NOT the secret token. This is deliberate and matches
+# the deferred-note design in search-canary/deployment.yaml: the secret value
+# lives ONLY in the gateway cookie-gate EnvoyFilter and the gateway canary
+# HTTPRoutes; it must NOT be duplicated into mesh VirtualServices. The marker is
+# already non-forgeable by the time it is in-mesh: the gateway strips any
+# client-supplied `x-fm-canary` and re-injects the secret only for a valid
+# host-only `fm_canary` cookie, and the leads-canary NetworkPolicy admits only
+# in-mesh callers (search / search-canary / mcp). So "any x-fm-canary present"
+# in-mesh already implies "originated from a cookie-gated canary request."
+#
+# WHY THIS IS A SEPARATE, TOGGLED FILE (the idle-canary 503 fix). A VirtualService
+# for host `leads` REPLACES default Service routing for that host, so while it is
+# present ALL leads traffic flows through it — including the marked route to
+# `leads-canary`. If `leads-canary` is idle (`replicas: 0`, 0 endpoints), marked
+# traffic would 503 "no healthy upstream" (Istio has no health-based failover
+# between HTTP routes). Since search-canary is itself active in git, a canary
+# search would propagate the marker and hit that 503 on its leads call. FIX:
+# tie VS PRESENCE to canary ACTIVATION — this file is listed in
+# mesh-policies/kustomization.yaml ONLY while `leads-canary` is scaled up. When
+# leads-canary is idle the VS is ABSENT, host `leads` uses default Service
+# routing (everything -> stable leads), and the propagated marker is simply
+# inert (falls through to stable leads, no 503). When present, the VS's own
+# default route (no marker -> stable leads) preserves the normal path.
+#
+# WHO TOGGLES IT (route presence == replicas, in the SAME commit):
+#   * ACTIVATE — when leads-canary is scaled 0->1, ADD
+#                `- canary/leads-canary-eastwest.yaml` to
+#                deploy/infrastructure/mesh-policies/kustomization.yaml.
+#   * RETIRE   — when leads-canary is scaled 1->0, REMOVE that line.
+# TOGGLE OWNERSHIP: the `canary` skill (.claude/skills/canary/canary.sh) and
+# build-canary.yml now MANAGE this east-west VS toggle automatically, exactly as
+# they manage the gateway canary HTTPRoutes. They key off a `routing_class`
+# taxonomy (leads/mcp/jobs = eastwest); build-canary's `pin` job ADDs
+# `- canary/<svc>-canary-eastwest.yaml` to mesh-policies/kustomization.yaml (on
+# the `- canary-cookie-gate.yaml` anchor) when it activates, and `canary.sh
+# retire` REMOVEs it on scale-to-0. Their arm/preflight guards additionally
+# assert this VS presence-matches x-fm-canary (regex .+) on gateways:[mesh] and —
+# fail closed — that it NEVER contains the secret token.
+#
+# NO DestinationRule NEEDED. `leads-canary` is a SEPARATE Service (its own
+# selector + endpoints), NOT a subset of `leads`, so the route targets its host
+# directly — there are no subsets to declare. Mesh-wide STRICT mTLS
+# (PeerAuthentication) and the default traffic policy apply to `leads-canary`
+# like any other Service; no per-host DestinationRule is required.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: leads-canary-eastwest
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: leads-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  # Short name resolves to leads.prod.svc.cluster.local within this namespace —
+  # this is exactly what callers dial (`http://leads:8001`).
+  hosts:
+    - leads
+  # SIDECARS only — this is an in-mesh (east-west) route, never attached to the
+  # ingress fm-gateway.
+  gateways:
+    - mesh
+  http:
+    # Marker present (any value) -> canary leads. PRESENCE match only (regex
+    # `.+`); the secret token is never named here.
+    - name: canary-marked
+      match:
+        - headers:
+            x-fm-canary:
+              regex: ".+"
+      route:
+        - destination:
+            host: leads-canary
+            port:
+              number: 8001
+    # Default (no marker) -> stable leads. Required as the catch-all because the
+    # VS replaces default Service routing for host `leads` while it is present.
+    - name: default-stable
+      route:
+        - destination:
+            host: leads
+            port:
+              number: 8001

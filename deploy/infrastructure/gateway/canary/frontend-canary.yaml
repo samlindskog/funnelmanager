@@ -23,12 +23,14 @@
 # the host-only `fm_canary` cookie whose value is this capability token, so an
 # unaware/induced user cannot be served unreviewed feature-branch JS same-origin.
 #
-# ROTATE the token in ALL FOUR files that must stay byte-identical (one route file
-# per canaried service, so this list grows as canaries are armed):
+# ROTATE the token in ALL these files that must stay byte-identical (one gateway
+# route file per browser-facing canary, so this list grows as canaries are armed;
+# east-west VS files stay secret-free and are NOT in this set):
 #   1. deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml (EnvoyFilter Lua)
 #   2. deploy/infrastructure/gateway/canary/search-canary.yaml    (sibling route)
 #   3. deploy/infrastructure/gateway/canary/frontend-canary.yaml  (this file)
-#   4. PLACEHOLDERS.md (Canary access)
+#   4. deploy/infrastructure/gateway/canary/searchui-canary.yaml  (sibling route)
+#   5. PLACEHOLDERS.md (Canary access)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

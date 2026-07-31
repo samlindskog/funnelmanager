@@ -49,6 +49,16 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: leads
+        # The real proof path: a canary search's `search->leads` call carries the
+        # propagated `x-fm-canary` marker, and the east-west VS reroutes the
+        # SIDECAR's connection to a `leads-canary` POD IP (not via the `leads`
+        # Service), so the CNI enforces netpol against the actual
+        # `search-canary-pod -> leads-canary-pod` flow. Without this egress rule
+        # the default-deny baseline drops it at L3 even though ingress/OPA/VS are
+        # all correct. Mirrors the ingress half in leads-canary.yaml.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads-canary
       ports:
         - protocol: TCP
           port: 8001

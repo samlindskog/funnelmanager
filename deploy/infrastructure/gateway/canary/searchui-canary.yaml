@@ -1,0 +1,53 @@
+# searchui (SPA) canary route (/search/) — "canary-if-exists-else-stable".
+#
+# Same idle-canary 503 fix as canary/frontend-canary.yaml and
+# canary/search-canary.yaml (read those headers for the full rationale): a
+# canary-marked `/search/` request routes to `searchui-canary` ONLY while it has
+# healthy endpoints, else to stable `searchui`. Route PRESENCE is tied to canary
+# ACTIVATION — this file is in the gateway kustomization `resources:` list ⇔
+# `searchui-canary` is scaled up. When idle, the only `/search/` route left is
+# the stable rule in httproutes.yaml, so the `fm_canary` cookie is always safe.
+#
+# WHO TOGGLES IT: build-canary.yml `pin` job adds `- canary/searchui-canary.yaml`
+# on activate (replicas 0→1); the canary skill removes it on retire (replicas 1→0).
+#
+# PRECEDENCE: the `x-fm-canary` header match makes this route strictly more
+# specific than the stable `/search/` rule (0 headers); Gateway API specificity
+# ordering puts it first across HTTPRoutes, and it fails SAFE to stable `searchui`
+# if that ever regressed. Only the /search/ SPA route is duplicated for the
+# canary; /api/search/* is steered separately by canary/search-canary.yaml (the
+# backend canary), so a full browser trace can span searchui-canary AND
+# search-canary independently. The secret token is the gateway-managed,
+# non-forgeable `x-fm-canary` from canary-cookie-gate.yaml.
+#
+# SECURITY: reaching the canary requires the host-only `fm_canary` cookie whose
+# value is this capability token, so an unaware/induced user cannot be served
+# unreviewed feature-branch JS same-origin.
+#
+# ROTATE the token in ALL the files that must stay byte-identical (one route file
+# per canaried service — this list grows as canaries are armed):
+#   1. deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml (EnvoyFilter Lua)
+#   2. deploy/infrastructure/gateway/canary/search-canary.yaml   (sibling route)
+#   3. deploy/infrastructure/gateway/canary/frontend-canary.yaml (sibling route)
+#   4. deploy/infrastructure/gateway/canary/searchui-canary.yaml (this file)
+#   5. PLACEHOLDERS.md (Canary access)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: searchui-canary
+  namespace: istio-ingress
+spec:
+  parentRefs:
+    - name: fm-gateway
+      sectionName: https-app
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /search/ }
+          headers:
+            - name: x-fm-canary
+              type: Exact
+              value: "8640c2f1285bf39d0323bbe540e51694"
+      backendRefs:
+        - name: searchui-canary
+          namespace: prod
+          port: 8080

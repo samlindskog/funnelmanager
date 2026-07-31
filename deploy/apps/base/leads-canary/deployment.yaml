@@ -1,0 +1,257 @@
+# Header-routed canary of the `leads` BACKEND — the SECOND backend canary
+# (after search-canary) and the piece that makes a canary search request's
+# leads calls land on canary leads code. A SEPARATE workload beside stable
+# `leads`: the stable Deployment/Service/labels are never touched, so there is
+# no routing gap. It is a FAITHFUL copy of stable `leads` (same SA, env,
+# ConfigMap/Secret refs, Mongo/Milvus URLs, Apollo/OpenAI keys, container port
+# 8001, probes, resources) so it talks to the stack EXACTLY like prod.
+#
+# EAST-WEST ROUTING (this is what makes canary leads reachable). Unlike
+# search-canary, whose inbound hop is the browser via the gateway, leads is
+# INTERNAL — reached only in-mesh via `search->leads` and `mcp->leads`. A
+# canary search request (from a `search-canary` pod) carries the propagated
+# `x-fm-canary` marker onto its `search->leads` call (fm_runtime already
+# propagates the header across the hop). An Istio east-west VirtualService for
+# host `leads` (deploy/infrastructure/mesh-policies/canary/leads-canary-eastwest.yaml)
+# matches marker PRESENCE (regex `.+`, NEVER the secret value) and routes such
+# marked traffic to the `leads-canary` Service; unmarked traffic (normal
+# search->leads / mcp->leads) falls to stable `leads`. That VS is TOGGLED with
+# activation (present iff this Deployment is scaled up) to avoid the idle-canary
+# 503 — see the VS file's header for the full "canary-if-exists-else-stable"
+# rationale.
+#
+# TRUST MODEL (READ — this is the HIGHEST-BLAST-RADIUS backend canary):
+# This pod runs feature-branch `leads` code under the SAME ServiceAccount ->
+# SAME SPIFFE identity (`spiffe://cluster.local/ns/prod/sa/leads`), SAME token
+# audience (`leads`), and SAME OPA verdict as stable prod `leads`. Reusing the
+# stable SA is REQUIRED, not incidental: leads is the sole holder of
+# APOLLO_API_KEY and the only service that talks to Apollo, and its inbound
+# tokens are minted with `aud: leads` by the `search`/`mcp` exchange — a
+# distinct SA/audience would fail the per-hop audience check. Because it holds
+# the REAL leads identity it also mounts the REAL secrets and dials the REAL
+# shared datastores:
+#   * APOLLO_API_KEY + the Apollo webhook secret  -> it can SPEND REAL APOLLO
+#     CREDITS. This is a P4 Denial-of-Wallet surface: an unreviewed branch (or a
+#     prompt-injected agent-driven canary search) that walks a large Apollo
+#     ingest bills real money against the prod Apollo account. FLAG EXPLICITLY:
+#     treat activation of this canary as authorizing real Apollo spend.
+#   * MONGODB_URL=mongodb://mongo:27017 + MILVUS_URI -> it reads AND WRITES the
+#     REAL prod lead corpus and vector index. Feature-branch write/enrich/embed
+#     code runs against production data (dedup upserts, embedding-flag flips,
+#     Milvus indexing) — a schema/format regression corrupts data stable leads
+#     serves to every user. For any data-shape-changing branch, point the canary
+#     at a SCRATCH Mongo/Milvus before activating.
+#   * OPENAI_API_KEY -> real embedding spend (a second, smaller wallet surface).
+# The containment is threefold and explicit:
+#   1. Build ONLY reviewed/trusted refs into the `leads-canary` image, AND gate
+#      ACTIVATION (security-review REQUIRED pre-activation) — the build-canary
+#      auto-activate that flips replicas 0->1 from an arbitrary ref MUST itself
+#      be gated (GitHub `environment:` required reviewers, or a decoupled manual
+#      step) BEFORE this canary is ever activated. Mandatory BECAUSE this canary
+#      attaches full prod-leads identity + APOLLO_API_KEY + the real prod
+#      Mongo/Milvus, unlike the static egress-less frontend canary.
+#      This gate now EXISTS: build-canary.yml's `pin` (activation) job carries
+#      `environment: canary-activation` (a required-reviewer GitHub environment),
+#      so flipping replicas 0->1 pauses for a human approval. `--confirm-backend`
+#      in the canary skill is the local belt to that suspenders.
+#   2. Marker-gated east-west route: leads-canary is reached ONLY by traffic
+#      carrying the propagated `x-fm-canary` marker AND only from `search-canary`
+#      — the netpol (netpol/leads-canary.yaml) admits ingress from `search-canary`
+#      ALONE (the sole workload with egress here + the sole legitimate marker
+#      origin). Stable search / mcp / the gateway are excluded at L3, so an
+#      unaware/induced user or a marker-carrying stable-path request cannot reach
+#      canary leads (it fails closed — dropped, never rerouted-and-served).
+#   3. `replicas: 0` by default: nothing serves until a deliberate test scales
+#      it up; the placeholder `canary-PINME` tag is never pulled while idle, and
+#      the east-west VS is NOT registered while idle so marked traffic safely
+#      falls through to stable leads (no 503).
+# Because it shares prod's identity + datastores + Apollo key, treat activation
+# as running unreleased code AS prod leads, spending real credits — only ever
+# from a trusted branch.
+#
+# IDENTITY (why NO OPA/data.json change is needed): OPA resolves the destination
+# service from the mTLS SPIFFE SA (`service := dst.sa`). Because this pod reuses
+# the stable `leads` SA, OPA sees `service = leads` for every request that lands
+# here — identical to stable leads — so no grants/azp_allow/audience change is
+# needed and `fm_runtime.export --check` is unaffected. There is deliberately NO
+# `config.callers["leads-canary"]` entry: OPA would never consult it (dst.sa is
+# always `leads`), so it would be dead, misleading policy — an earlier inert copy
+# was removed during review.
+#
+# IMAGE: the base uses the canary-logical name
+# `ghcr.io/samlindskog/funnelmanager/leads-canary`; the prod overlay's
+# `images:` transformer remaps it to the real `.../leads` repo with an
+# INDEPENDENT `canary-<sha>` tag. The distinct name keeps the stable `leads`
+# sha-pin from clobbering the canary tag.
+#
+# ACTIVATION (chicken-egg): the committed default is `replicas: 0` so the
+# placeholder `canary-PINME` tag is never pulled and `apps-prod` stays Ready
+# while idle. The `build-canary.yml` workflow pins a real `canary-<sha>` tag AND
+# scales this up in the same commit. To retire it, set `replicas: 0` again.
+# The `canary` skill + build-canary.yml now manage the east-west VS toggle for
+# eastwest-class canaries (leads/mcp/jobs): activation ADDs the VS to the
+# mesh-policies kustomization in the same commit that scales up; retire REMOVEs
+# it (see routing_class in canary.sh and the VS file header).
+# CO-ACTIVATION: leads-canary must be activated TOGETHER WITH search-canary (its
+# marker origin). Arming leads-canary while search-canary is idle drops stale-
+# cookie users' stable-search leads calls at L3 (fail-closed, no spend, but a
+# broken search) — never activate this one alone.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leads-canary
+  labels:
+    app.kubernetes.io/name: leads-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default (see ACTIVATION above). build-canary.yml scales up.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: leads-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: leads-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: /metrics
+    spec:
+      # Reuse the stable leads identity (see IDENTITY/TRUST MODEL notes above).
+      serviceAccountName: leads
+      # Must land on a worker (never edge/cp); PREFER worker2 — the headroom
+      # node — but stay soft so a full/absent worker2 can't make the canary
+      # unschedulable (falls back to worker1). Both workers share `role=worker`,
+      # so worker2 is singled out by its hostname label.
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # Throwaway variant — drop to the LOWER fm-dev PriorityClass so it is
+      # first-to-evict under the tight fm-quota and never competes with real
+      # prod pods (the prod overlay's blanket fm-prod patch is overridden back
+      # to fm-dev by a leads-canary-specific patch, mirroring search-canary).
+      priorityClassName: fm-dev
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: leads
+          # Canary-logical name; remapped to the real `.../leads` repo +
+          # `canary-<sha>` tag by the prod overlay images transformer. Never
+          # `:latest`.
+          image: ghcr.io/samlindskog/funnelmanager/leads-canary
+          ports:
+            - name: http
+              containerPort: 8001
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1536Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: leads
+            # Per-pod telemetry stamp: marks emissions from this workload as the
+            # canary variant so dashboards/queries can split canary vs stable.
+            # Does NOT change identity or the service name.
+            - name: FM_DEPLOYMENT_VARIANT
+              value: canary
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FM_OIDC_CLIENT_ID
+              value: leads
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-leads
+                  key: client-secret
+            # Principle-4 human-approval HMAC secret (VERIFY side; agents mints).
+            # Shared value across agents/leads/mail — if unset, agent-initiated
+            # over-threshold actions fail closed. See fm_runtime/confirmation.py.
+            - name: FM_CONFIRM_APPROVAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-approval
+                  key: secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            - name: MONGODB_URL
+              value: mongodb://mongo:27017
+            - name: MONGODB_DB
+              value: funnelmanager_leads
+            - name: MILVUS_URI
+              value: http://milvus:19530
+            - name: MILVUS_COLLECTION
+              value: leads_people
+            - name: OPENAI_EMBEDDING_MODEL
+              value: text-embedding-3-small
+            - name: APOLLO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: apollo
+                  key: api-key
+            - name: APOLLO_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: apollo
+                  key: webhook-secret
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai
+                  key: api-key
+            - name: PUBLIC_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: public-base-url
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: cors-origins

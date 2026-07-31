@@ -1,0 +1,89 @@
+# leads-canary: the east-west-routed BACKEND leads canary. NetworkPolicies
+# select by POD LABEL (not ServiceAccount), so the canary needs its own policy
+# even though it shares the stable `leads` SA — its pods are labeled
+# `leads-canary` and match none of the additive per-pod policies otherwise
+# (default-deny would leave it L3-dead on activation).
+#
+# INGRESS is DELIBERATELY NARROWER than stable leads: `search-canary` ONLY (TCP
+# 8001). This is intent, not a mirror. The east-west VirtualService reroutes a
+# marker-carrying `search->leads` call to a `leads-canary` POD IP, and netpol
+# matches the SOURCE POD LABEL — but the ONLY workload that both (a) legitimately
+# originates the marker AND (b) is granted egress to `leads-canary` is
+# `search-canary` (the canary-search proof path; its egress rule lives in
+# netpol/search-canary.yaml). Stable `search` and `mcp` are intentionally
+# EXCLUDED: neither has egress to `leads-canary` (so admitting them here would be
+# dead, misleading rules — flagged by review), and neither SHOULD reach canary
+# leads — canary leads runs unreviewed feature-branch code with the real Apollo
+# key, so it must be reachable only from the canary front-end. istio-ingress is
+# excluded too: the gateway publishes the /api/leads/webhooks/ route only to the
+# stable `leads` Service, never to leads-canary. This narrow ingress makes the
+# "any legitimately-networked caller can reach canary leads" path structurally
+# impossible at L3 (belt), on top of the source-egress constraint (suspenders).
+#
+# EGRESS mirrors stable leads EXACTLY (mongo:27017, milvus:19530, Keycloak:8080,
+# and 0.0.0.0/0:443 for Apollo + OpenAI) so the canary reaches the same
+# dependencies as prod — including REAL Apollo spend and REAL Mongo/Milvus data
+# (see deployment.yaml TRUST MODEL). Dropping any egress edge would make the
+# canary an unfaithful proof. DNS via allow-dns; mesh control plane / OPA /
+# Tempo via allow-istio-control; monitoring scrape via allow-monitoring-scrape
+# (part-of label) — all from the blanket podSelector:{} policies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: leads-canary
+  labels:
+    app.kubernetes.io/name: leads-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: leads-canary
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # search-canary ONLY: the canary-search -> canary-leads proof path. It is the
+    # sole workload with egress to leads-canary (netpol/search-canary.yaml) and
+    # the sole legitimate origin of the propagated x-fm-canary marker. See the
+    # header for why stable search / mcp / istio-ingress are excluded.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search-canary
+      ports:
+        - protocol: TCP
+          port: 8001
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mongo
+      ports:
+        - protocol: TCP
+          port: 27017
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: milvus
+      ports:
+        - protocol: TCP
+          port: 19530
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Apollo + OpenAI live on the public internet. 0.0.0.0/0:443 also matches
+    # in-cluster 443 targets, which is acceptable — everything sensitive
+    # in-cluster is further gated by its own ingress policy + mesh authz.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

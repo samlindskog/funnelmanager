@@ -1,0 +1,27 @@
+# searchui-canary: same posture as stable searchui — a static SPA the gateway
+# fetches assets from; the pod initiates nothing (DNS via allow-dns, mesh
+# control-plane via allow-istio-control). NetworkPolicies select by POD LABEL
+# (not ServiceAccount), so the canary needs its own policy even though it shares
+# the `searchui` SA (default-deny would leave it L3-dead on activation).
+# Mirrors searchui.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: searchui-canary
+  labels:
+    app.kubernetes.io/name: searchui-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: searchui-canary
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 80

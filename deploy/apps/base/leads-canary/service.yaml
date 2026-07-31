@@ -1,0 +1,21 @@
+# Distinct Service so the east-west VirtualService can target the canary
+# explicitly by host. Its selector is `leads-canary`, so the stable `leads`
+# Service (selector `leads`) never picks up canary pods and vice-versa — this
+# is what guarantees no routing gap on the stable path (and no prod traffic is
+# ever sent to the empty canary Service, since unmarked traffic keeps resolving
+# stable `leads` and the marker-matching VS is present only while the canary is
+# scaled up).
+apiVersion: v1
+kind: Service
+metadata:
+  name: leads-canary
+  labels:
+    app.kubernetes.io/name: leads-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: leads-canary
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001

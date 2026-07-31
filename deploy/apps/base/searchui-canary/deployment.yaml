@@ -1,0 +1,117 @@
+# Header-routed canary of the `searchui` SPA (the browser-originating half of
+# the full-stack search canary trace: browser → searchui-canary → search-canary
+# → leads-canary, all one trace). SEPARATE workload beside stable `searchui`;
+# the stable Deployment/Service/labels are never touched, so there is no routing
+# gap. Mirrors base/frontend-canary — read that file's headers for the full
+# rationale; only the searchui-specific deltas are noted here.
+#
+# WHY A searchui CANARY AT ALL: telemetry (Grafana Faro RUM) is DEV/CANARY-ONLY
+# — it is baked into the bundle only when built with VITE_TELEMETRY=1
+# (build-canary.yml passes it). Stable searchui ships telemetry-free. So the
+# browser can only originate a SAMPLED traceparent (the head of the browser→
+# backend trace) when it is served the searchui CANARY bundle. This is the SPA
+# that makes the `/api/search/*` calls, so it is the essential browser-side piece
+# of the search trace; the hub (frontend-canary) only does login/navigation.
+#
+# Routing (cookie-gated, canary-if-exists-else-stable): the browser sets the
+# host-only `fm_canary=<secret>` cookie; the canary-cookie-gate EnvoyFilter
+# validates it and injects the secret `x-fm-canary` header the /search/ canary
+# HTTPRoute (gateway/canary/searchui-canary.yaml) matches. No cookie → stable
+# searchui. Same prod namespace, same Keycloak session, same OPA policy.
+#
+# BROWSER-SESSION TRUST BOUNDARY (security): served SAME-ORIGIN at x9bc433.win,
+# so its feature-branch JS runs in the hub's origin and can read the prod
+# Keycloak session (`fm_oidc_*` localStorage) of any user routed here — which is
+# exactly why reaching it requires the secret `fm_canary` capability cookie and
+# the EnvoyFilter strips any forged `x-fm-canary`. Build only from TRUSTED
+# branches; rotate the token if it leaks.
+#
+# IDENTITY (why no OPA/data.json change is needed): reuses the STABLE `searchui`
+# ServiceAccount, so its SPIFFE id is identical to stable searchui and OPA's
+# verdict (service := dst.sa = searchui) is unchanged. The edge gateway resolves
+# the logical service by PATH (/search/ → searchui), not backend Service name.
+# searchui is a pure ingress target (static nginx, no egress, not a source in any
+# caller/azp allowlist), so sharing its identity grants the canary nothing beyond
+# serving the SPA shell. (Deliberate, narrow exception to one-SA-per-workload.)
+#
+# ACTIVATION: committed default `replicas: 0` (idle → the canary-PINME tag is
+# never pulled). build-canary.yml pins a real canary-<sha> tag AND scales to 1 in
+# the same commit; the canary skill scales back to 0 + removes the route on retire.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searchui-canary
+  labels:
+    app.kubernetes.io/name: searchui-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default (see ACTIVATION above). build-canary.yml scales to 1.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: searchui-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: searchui-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+    spec:
+      # Reuse the stable searchui identity (see IDENTITY note above).
+      serviceAccountName: searchui
+      # Must land on a worker; PREFER worker2 (headroom node) but stay soft so a
+      # full/absent worker2 can't make the canary unschedulable.
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # Stock nginx starts as root (see stable searchui), so no runAsNonRoot.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: searchui
+          # Canary-logical name; remapped to the real `searchui` repo + the
+          # `canary-<sha>` tag by the prod overlay images transformer. Never :latest.
+          image: ghcr.io/samlindskog/funnelmanager/searchui-canary
+          ports:
+            - name: http
+              containerPort: 80
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /search/
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /search/
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FRONTEND_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FRONTEND_OIDC_CLIENT_ID
+              value: frontend

@@ -8,6 +8,7 @@ resources:
   - search.yaml
   - search-canary.yaml
   - leads.yaml
+  - leads-canary.yaml
   - mail.yaml
   - mcp.yaml
   - jobs.yaml
@@ -17,6 +18,7 @@ resources:
   - mailui.yaml
   - agentsui.yaml
   - searchui.yaml
+  - searchui-canary.yaml
   - app-db.yaml
   - mail-db.yaml
   - jobs-db.yaml

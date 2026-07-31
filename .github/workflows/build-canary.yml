@@ -18,11 +18,32 @@
 # `ARG VITE_TELEMETRY`/`APP_VERSION` and just emit a harmless "unconsumed ARG"
 # warning, exactly like build-images.yml already does with APP_VERSION.
 #
-# Reference template: only `frontend` has canary manifests today
-# (deploy/apps/base/frontend-canary/*). To canary another service, add its
-# `<svc>-canary` base + overlay images entry (step 3 of the canary program),
-# then this workflow drives it unchanged — the pin job's manifest-existence
-# guard fails closed until those manifests land.
+# Armed canaries today: frontend + searchui (SPA, gateway), search (backend,
+# gateway), and leads (backend, EAST-WEST). Ten services are eligible (the input
+# `options:` below). To arm a NEW canary, add its THREE legs and this workflow
+# drives it unchanged (the preflight+pin guards fail closed until all three land):
+#   1. `deploy/apps/base/<svc>-canary/*` base manifests,
+#   2. the `<svc>-canary` overlay images entry, and
+#   3. the class-correct toggled route/VS file — a gateway HTTPRoute
+#      (gateway/canary/<svc>-canary.yaml) or, for INTERNAL services, an east-west
+#      VirtualService (mesh-policies/canary/<svc>-canary-eastwest.yaml).
+#
+# ROUTING TAXONOMY. How the canary marker is steered depends on the service:
+#   * gateway  (frontend/searchui/mailui/agentsui/search/mail/agents) — a
+#     cookie-gated gateway HTTPRoute under gateway/canary/<svc>-canary.yaml that
+#     Exact-matches the secret x-fm-canary header, toggled in the gateway
+#     kustomization (anchor `- referencegrants.yaml`).
+#   * eastwest (leads/mcp/jobs) — INTERNAL-only: an in-mesh Istio VirtualService
+#     under mesh-policies/canary/<svc>-canary-eastwest.yaml that PRESENCE-matches
+#     x-fm-canary (regex .+, NEVER the secret), toggled in the mesh-policies
+#     kustomization (anchor `- canary-cookie-gate.yaml`). The preflight+pin guards
+#     assert the secret is ABSENT from an east-west VS (fail closed if present).
+#
+# ACTIVATION APPROVAL GATE (now EXISTS). The `pin` job — the one that flips
+# replicas 0->1 and commits the activation — runs under the GitHub
+# `canary-activation` environment, so it PAUSES for a manual reviewer approval in
+# the Actions UI. Building/pushing the image (the `build` job) is unguarded; only
+# ACTIVATION waits for a human click.
 name: build-canary
 
 on:
@@ -76,9 +97,15 @@ jobs:
         run: |
           set -euo pipefail
           SVC="${{ inputs.service }}"
+          # ROUTING CLASS decides which toggled route artifact + gate semantics
+          # apply. Keep this enumeration in sync with the `service` input options.
+          case "$SVC" in
+            frontend|searchui|mailui|agentsui|search|mail|agents) rc=gateway ;;
+            leads|mcp|jobs) rc=eastwest ;;
+            *) echo "::error::unknown service '$SVC' (no routing class)"; exit 1 ;;
+          esac
           dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
           overlay="deploy/apps/overlays/prod/kustomization.yaml"
-          route="deploy/infrastructure/gateway/canary/${SVC}-canary.yaml"
           if [ ! -f "$dep" ]; then
             echo "::error::No canary base manifest for '$SVC' (expected $dep) — arm it on main first."
             exit 1
@@ -87,30 +114,65 @@ jobs:
             echo "::error::No '${SVC}-canary' images entry in $overlay — arm it on main first."
             exit 1
           fi
-          # Complete the canary contract: the cookie-marked route lives in its own
-          # toggled HTTPRoute (canary-if-exists-else-stable). Without it the canary
-          # would activate but be UNREACHABLE via the fm_canary cookie (fail-safe,
-          # but not what the operator asked for) — so require it at arming time.
-          if [ ! -f "$route" ]; then
-            echo "::error::No canary route for '$SVC' (expected $route) — arm it on main first (see deploy/infrastructure/gateway/canary/)."
-            exit 1
-          fi
-          # CORRECTNESS (not just presence): the route must Exact-match the
-          # x-fm-canary header AND carry the SAME secret the EnvoyFilter injects, or
-          # it would serve the canary to unmarked traffic (fail-open). Derive the
-          # secret from its canonical source (the EnvoyFilter Lua) — never hardcode
-          # a 5th copy here. Fail closed before any build/activation.
+          # The canary secret, from its canonical source (the EnvoyFilter Lua). Used
+          # to assert PRESENCE (gateway) or ABSENCE (east-west) — never hardcoded.
           cookie_gate="deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml"
           secret="$(grep -oE 'secret = "[0-9a-fA-F]+"' "$cookie_gate" | grep -oE '[0-9a-fA-F]{8,}' | head -1)"
           if [ -z "$secret" ]; then
             echo "::error::could not read the canary secret from $cookie_gate — cannot verify the route gate."
             exit 1
           fi
-          if ! grep -q 'x-fm-canary' "$route" || ! grep -q 'Exact' "$route" || ! grep -qF "$secret" "$route"; then
-            echo "::error::Canary route $route lacks the Exact x-fm-canary secret header gate — refusing (a widened/missing gate would serve the canary to unmarked traffic)."
-            exit 1
+          if [ "$rc" = gateway ]; then
+            # GATEWAY: the cookie-marked route lives in its own toggled HTTPRoute
+            # (canary-if-exists-else-stable). It must Exact-match x-fm-canary AND
+            # carry the SAME secret the EnvoyFilter injects, or it would serve the
+            # canary to unmarked EDGE traffic (fail-open).
+            route="deploy/infrastructure/gateway/canary/${SVC}-canary.yaml"
+            if [ ! -f "$route" ]; then
+              echo "::error::No canary route for '$SVC' (expected $route) — arm it on main first (see deploy/infrastructure/gateway/canary/)."
+              exit 1
+            fi
+            if ! grep -q 'x-fm-canary' "$route" || ! grep -q 'Exact' "$route" || ! grep -qF "$secret" "$route"; then
+              echo "::error::Canary route $route lacks the Exact x-fm-canary secret header gate — refusing (a widened/missing gate would serve the canary to unmarked traffic)."
+              exit 1
+            fi
+          else
+            # EAST-WEST: INTERNAL-only service steered in-mesh by a VirtualService
+            # that PRESENCE-matches x-fm-canary (regex .+) on gateways:[mesh]. The
+            # secret must NEVER appear in a mesh VS (the marker is already
+            # non-forgeable in-mesh) — fail CLOSED if it does.
+            route="deploy/infrastructure/mesh-policies/canary/${SVC}-canary-eastwest.yaml"
+            if [ ! -f "$route" ]; then
+              echo "::error::No east-west canary VS for '$SVC' (expected $route) — arm it on main first (see deploy/infrastructure/mesh-policies/canary/)."
+              exit 1
+            fi
+            # gateways: must be EXACTLY [mesh] — a stray ingress/fm-gateway entry
+            # would attach this INTERNAL route to the edge and expose it (fail closed).
+            gw_only_mesh='
+              /^[[:space:]]*gateways:[[:space:]]*\[/ {
+                l=$0; sub(/.*\[/,"",l); sub(/\].*/,"",l); gsub(/[[:space:]"]/,"",l);
+                n=split(l,a,","); for(i=1;i<=n;i++) if(a[i]!=""){t++; if(a[i]=="mesh")m++}
+                next }
+              /^[[:space:]]*gateways:[[:space:]]*$/ {g=1; next}
+              g && /^[[:space:]]*#/ {next}
+              g && /^[[:space:]]*-/ {
+                v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); gsub(/[[:space:]"]/,"",v);
+                t++; if(v=="mesh")m++; next }
+              g && /^[[:space:]]*$/ {next}
+              g {g=0}
+              END{ exit (t==1 && m==1)?0:1 }'
+            if ! grep -q 'x-fm-canary' "$route" \
+               || ! grep -Eq 'regex:[[:space:]]*"?\.\+' "$route" \
+               || ! awk "$gw_only_mesh" "$route"; then
+              echo "::error::East-west VS $route lacks a PRESENCE x-fm-canary regex (.+) on gateways EXACTLY [mesh] — refusing (no ingress/fm-gateway leak)."
+              exit 1
+            fi
+            if grep -qF "$secret" "$route"; then
+              echo "::error::East-west VS $route CONTAINS the canary secret — refusing (a mesh VS must presence-match only; the secret lives at the edge)."
+              exit 1
+            fi
           fi
-          echo "Preflight OK: '$SVC' is armed (base manifest + overlay entry + canary route with a valid x-fm-canary Exact gate)."
+          echo "Preflight OK: '$SVC' is armed (routing_class=$rc; base manifest + overlay entry + a valid toggled route/VS gate)."
 
   build:
     needs: preflight
@@ -172,6 +234,11 @@ jobs:
   pin:
     needs: build
     runs-on: ubuntu-latest
+    # ACTIVATION APPROVAL GATE: this job flips replicas 0->1 (feature-branch code
+    # goes live under stable's prod identity), so it runs under the protected
+    # `canary-activation` environment — GitHub PAUSES it for a manual reviewer
+    # approval in the Actions UI. Only ACTIVATION waits; build+push already ran.
+    environment: canary-activation
     permissions:
       contents: write
     steps:
@@ -187,9 +254,28 @@ jobs:
           SVC="${{ inputs.service }}"
           overlay="deploy/apps/overlays/prod/kustomization.yaml"
           dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
-          gw_kustomization="deploy/infrastructure/gateway/kustomization.yaml"
-          route_entry="canary/${SVC}-canary.yaml"
-          route_file="deploy/infrastructure/gateway/${route_entry}"
+          # ROUTING CLASS selects the toggled route artifact + kustomization +
+          # insertion anchor (keep in sync with preflight + the `service` options).
+          case "$SVC" in
+            frontend|searchui|mailui|agentsui|search|mail|agents) rc=gateway ;;
+            leads|mcp|jobs) rc=eastwest ;;
+            *) echo "unknown service '$SVC' (no routing class)" >&2; exit 1 ;;
+          esac
+          if [ "$rc" = gateway ]; then
+            kustomization="deploy/infrastructure/gateway/kustomization.yaml"
+            route_entry="canary/${SVC}-canary.yaml"
+            route_file="deploy/infrastructure/gateway/${route_entry}"
+            anchor='- referencegrants\.yaml'
+          else
+            kustomization="deploy/infrastructure/mesh-policies/kustomization.yaml"
+            route_entry="canary/${SVC}-canary-eastwest.yaml"
+            route_file="deploy/infrastructure/mesh-policies/${route_entry}"
+            anchor='- canary-cookie-gate\.yaml'
+          fi
+          # SINGLE derivation for this job: hand the resolved kustomization to the
+          # next step (same runner/checkout) via $GITHUB_ENV rather than re-deriving
+          # the class split from $SVC a second time.
+          echo "kustomization=$kustomization" >> "$GITHUB_ENV"
           # Guard ALL legs of the canary contract (preflight already asserted
           # this on main; re-assert here — this is the job that actually WRITES).
           if [ ! -f "$dep" ]; then
@@ -203,8 +289,8 @@ jobs:
             exit 1
           fi
           if [ ! -f "$route_file" ]; then
-            echo "No canary route for '$SVC' (expected $route_file)." >&2
-            echo "Arm its toggled HTTPRoute first — see deploy/infrastructure/gateway/canary/." >&2
+            echo "No canary route/VS for '$SVC' (expected $route_file)." >&2
+            echo "Arm its toggled route first — see deploy/infrastructure/{gateway,mesh-policies}/canary/." >&2
             exit 1
           fi
           # Re-assert the route gate correctness (preflight already checked this on
@@ -212,9 +298,41 @@ jobs:
           # replicas). Secret derived from the EnvoyFilter — no hardcoded copy.
           cookie_gate="deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml"
           secret="$(grep -oE 'secret = "[0-9a-fA-F]+"' "$cookie_gate" | grep -oE '[0-9a-fA-F]{8,}' | head -1)"
-          if [ -z "$secret" ] || ! grep -q 'x-fm-canary' "$route_file" || ! grep -q 'Exact' "$route_file" || ! grep -qF "$secret" "$route_file"; then
-            echo "Canary route $route_file lacks the Exact x-fm-canary secret header gate — refusing to activate." >&2
+          if [ -z "$secret" ]; then
+            echo "could not read the canary secret from $cookie_gate — refusing to activate." >&2
             exit 1
+          fi
+          if [ "$rc" = gateway ]; then
+            if ! grep -q 'x-fm-canary' "$route_file" || ! grep -q 'Exact' "$route_file" || ! grep -qF "$secret" "$route_file"; then
+              echo "Canary route $route_file lacks the Exact x-fm-canary secret header gate — refusing to activate." >&2
+              exit 1
+            fi
+          else
+            # east-west VS: PRESENCE regex, gateways EXACTLY [mesh] (no ingress/
+            # fm-gateway leak), and the secret must be ABSENT — all fail-closed.
+            gw_only_mesh='
+              /^[[:space:]]*gateways:[[:space:]]*\[/ {
+                l=$0; sub(/.*\[/,"",l); sub(/\].*/,"",l); gsub(/[[:space:]"]/,"",l);
+                n=split(l,a,","); for(i=1;i<=n;i++) if(a[i]!=""){t++; if(a[i]=="mesh")m++}
+                next }
+              /^[[:space:]]*gateways:[[:space:]]*$/ {g=1; next}
+              g && /^[[:space:]]*#/ {next}
+              g && /^[[:space:]]*-/ {
+                v=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); gsub(/[[:space:]"]/,"",v);
+                t++; if(v=="mesh")m++; next }
+              g && /^[[:space:]]*$/ {next}
+              g {g=0}
+              END{ exit (t==1 && m==1)?0:1 }'
+            if ! grep -q 'x-fm-canary' "$route_file" \
+               || ! grep -Eq 'regex:[[:space:]]*"?\.\+' "$route_file" \
+               || ! awk "$gw_only_mesh" "$route_file"; then
+              echo "East-west VS $route_file lacks a PRESENCE x-fm-canary regex (.+) on gateways EXACTLY [mesh] — refusing to activate." >&2
+              exit 1
+            fi
+            if grep -qF "$secret" "$route_file"; then
+              echo "East-west VS $route_file CONTAINS the canary secret — refusing to activate (mesh VS must presence-match only)." >&2
+              exit 1
+            fi
           fi
           # Rewrite ONLY this service's canary image entry — the `images:` block
           # whose name is `.../${SVC}-canary`. A blanket `s/newTag: canary-.*/`
@@ -247,24 +365,25 @@ jobs:
           # is replicas: 0 (idle so the PINME placeholder is never pulled). Scale
           # to 1 to make the canary live.
           sed -i -E "s/(^[[:space:]]*replicas:[[:space:]]*)[0-9]+/\11/" "$dep"
-          # canary-if-exists-else-stable: add the <svc>-canary route to the gateway
+          # canary-if-exists-else-stable: add the <svc>-canary route/VS to its
           # kustomization in the SAME commit that activates (replicas 0->1). The
           # route exists ONLY while the canary is up, so an idle canary can never
-          # 503 the x-fm-canary cookie — a marked request falls through to stable.
-          # `canary.sh retire` removes this line when it scales back to 0. Anchor
-          # the insert to the STRUCTURAL `- referencegrants.yaml` resource line (a
-          # stable YAML token, like build-images.yml/canary.sh anchor on field
-          # names) — NOT the prose comment, so a comment edit can't break it.
-          # Idempotent: skip if already present.
-          if grep -qF -- "- ${route_entry}" "$gw_kustomization"; then
-            echo "Canary route ${route_entry} already listed in $gw_kustomization."
+          # 503 the x-fm-canary marker — it falls through to stable. `canary.sh
+          # retire` removes this line when it scales back to 0. Anchor the insert to
+          # a STRUCTURAL resource line (a stable YAML token) — for gateway that is
+          # `- referencegrants.yaml`, for east-west `- canary-cookie-gate.yaml` —
+          # NOT a prose comment, so a comment edit can't break it. Match only
+          # UNCOMMENTED resource lines (`^  - `) so a commented note is never
+          # mistaken for an existing entry. Idempotent: skip if already present.
+          if grep -E '^[[:space:]]*- ' "$kustomization" | grep -qF -- "- ${route_entry}"; then
+            echo "Canary route ${route_entry} already listed in $kustomization."
           else
-            sed -i "/^[[:space:]]*- referencegrants\.yaml[[:space:]]*$/a\\  - ${route_entry}" "$gw_kustomization"
-            grep -qF -- "- ${route_entry}" "$gw_kustomization" || {
-              echo "::error::failed to add ${route_entry} to $gw_kustomization (- referencegrants.yaml anchor missing?)" >&2
+            sed -i "/^[[:space:]]*${anchor}[[:space:]]*$/a\\  - ${route_entry}" "$kustomization"
+            grep -E '^[[:space:]]*- ' "$kustomization" | grep -qF -- "- ${route_entry}" || {
+              echo "::error::failed to add ${route_entry} to $kustomization (anchor '${anchor}' missing?)" >&2
               exit 1
             }
-            echo "Activated canary route ${route_entry} in $gw_kustomization."
+            echo "Activated canary route ${route_entry} in $kustomization."
           fi
           git diff --stat
       - name: Commit the pin + activation
@@ -272,13 +391,16 @@ jobs:
           set -euo pipefail
           git config user.name  "funnelmanager-ci[bot]"
           git config user.email "ci@users.noreply.github.com"
-          # Stage the overlay pin, the replicas activation, AND the gateway
-          # kustomization route toggle (a no-op add if the route line was already
-          # present — the --cached guard below then reports nothing new there).
+          SVC="${{ inputs.service }}"
+          # $kustomization comes from the pin step via $GITHUB_ENV (single
+          # routing-class derivation for this job — not re-derived here). Stage the
+          # overlay pin, the replicas activation, AND that route toggle (a no-op add
+          # if the route line was already present — the --cached guard below then
+          # reports nothing new there).
           git add \
             "deploy/apps/overlays/prod/kustomization.yaml" \
-            "deploy/apps/base/${{ inputs.service }}-canary/deployment.yaml" \
-            "deploy/infrastructure/gateway/kustomization.yaml"
+            "deploy/apps/base/${SVC}-canary/deployment.yaml" \
+            "$kustomization"
           if git diff --cached --quiet; then
             echo "Nothing to pin (same tag already live)."; exit 0
           fi

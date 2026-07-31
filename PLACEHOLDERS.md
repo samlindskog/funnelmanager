@@ -106,11 +106,19 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
       `document.cookie = 'fm_canary=8640c2f1285bf39d0323bbe540e51694; path=/; secure; samesite=lax'`
       then reload; anyone without the cookie stays on stable.
 
-      **The secret value appears in FOUR files that must stay byte-identical:**
+      **The secret value appears in these files that must stay byte-identical:**
       1. `deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml` (the EnvoyFilter Lua),
       2. `deploy/infrastructure/gateway/canary/search-canary.yaml` (the search-canary route match),
       3. `deploy/infrastructure/gateway/canary/frontend-canary.yaml` (the frontend-canary route match),
-      4. this doc.
+      4. `deploy/infrastructure/gateway/canary/searchui-canary.yaml` (the searchui-canary route match),
+      5. this doc.
+
+      Note: `leads-canary` is INTERNAL (east-west) and its route
+      (`deploy/infrastructure/mesh-policies/canary/leads-canary-eastwest.yaml`)
+      deliberately does **not** carry the secret — it presence-matches
+      `x-fm-canary` (regex `.+`), because the marker is already non-forgeable in
+      the mesh (the gateway injects it only for a valid cookie). So east-west VS
+      route files are NOT part of this byte-identical set.
 
       There is **one route file per canaried service** (`canary/<svc>-canary.yaml`),
       so the count grows by one for every service armed as a canary — that
@@ -122,8 +130,9 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
       canary is active** (`canary-if-exists-else-stable`), so an idle canary never
       503s the cookie. The token is a capability/obscurity value (same class as the
       Apollo webhook secret-in-path), committed in-manifest and **rotatable** by
-      editing all four files above (and any future `canary/<svc>-canary.yaml`),
-      then re-deploying. Only ever build the canary from a TRUSTED branch — the
+      editing all the files listed above (and any future gateway
+      `canary/<svc>-canary.yaml`; east-west VS files stay secret-free and are NOT
+      in this set), then re-deploying. Only ever build the canary from a TRUSTED branch — the
       canary serves feature-branch JS same-origin and can read the prod Keycloak
       session of anyone who reaches it (see the frontend-canary deployment
       trust-boundary note).

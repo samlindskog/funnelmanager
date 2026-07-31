@@ -12,15 +12,17 @@
 # token that the app-prod HTTPRoute's /api/search/ canary rule matches. Everyone
 # without the cookie keeps hitting stable `search`.
 #
-# This step wires ONLY the BROWSER hop: browser(cookie) -> canary UI ->
-# canary search -> STABLE leads (search->leads carries the propagated canary
-# marker via fm_runtime and falls back to stable leads because no leads-canary
-# exists). The east-west inbound-to-canary route — an in-mesh VirtualService
-# that routes an internal caller (e.g. mcp->search) to search-canary — is
-# DEFERRED (not needed for the browser proof). When added it MUST match on
-# marker PRESENCE (a regex header match), NOT the secret cookie value, so the
-# secret stays out of mesh VirtualServices; the search-canary NetworkPolicy's
-# gateway-only ingress grows the matching in-mesh source at that time.
+# The BROWSER hop: browser(cookie) -> canary UI -> canary search. The
+# search->leads hop carries the propagated x-fm-canary marker via fm_runtime; if
+# `leads-canary` is ALSO active, the leads-canary east-west VirtualService
+# reroutes that hop to canary leads (spending REAL Apollo credits per
+# leads-canary's trust model), otherwise it falls through to stable leads. This
+# is why search-canary got an explicit egress rule to `leads-canary` (see
+# netpol/search-canary.yaml) — search-canary is the sole workload allowed to
+# reach canary leads. The east-west INBOUND-to-search-canary route (routing an
+# internal caller e.g. mcp->search to search-canary) remains DEFERRED — not
+# needed for the browser proof. Any such route MUST match marker PRESENCE (regex),
+# NOT the secret cookie value, so the secret stays out of mesh VirtualServices.
 #
 # TRUST MODEL (READ — this is a BACKEND canary, NOT a frontend canary):
 # This pod runs feature-branch BACKEND code under the SAME ServiceAccount ->

@@ -11,6 +11,8 @@ resources:
   - ../../base/frontend
   - ../../base/frontend-canary
   - ../../base/search-canary
+  - ../../base/searchui-canary
+  - ../../base/leads-canary
   - ../../base/mailui
   - ../../base/agentsui
   - ../../base/searchui
@@ -65,6 +67,25 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/search-canary
     newName: ghcr.io/samlindskog/funnelmanager/search
     newTag: canary-2e4fcd34
+  # Telemetry-enabled searchui (SPA) canary — the browser-originating half of the
+  # full-stack search trace. Same remap pattern: the base uses the canary-logical
+  # name `.../searchui-canary`; remap it to the real `searchui` repo with an
+  # INDEPENDENT `canary-<sha>` tag (VITE_TELEMETRY baked in by build-canary.yml),
+  # kept separate from the stable `searchui` entry so the stable sha-pin never
+  # clobbers the canary tag. `canary-PINME` placeholder rewritten by
+  # build-canary.yml; never pulled while `replicas: 0`.
+  - name: ghcr.io/samlindskog/funnelmanager/searchui-canary
+    newName: ghcr.io/samlindskog/funnelmanager/searchui
+    newTag: canary-PINME
+  # Header/east-west-routed BACKEND leads canary. Same pattern as search-canary:
+  # the base uses the canary-logical name `.../leads-canary`; this entry remaps
+  # it to the real `leads` repo with an INDEPENDENT `canary-<sha>` tag, kept
+  # separate from the stable `leads` entry so the stable sha-pin never clobbers
+  # the canary tag. `canary-PINME` is rewritten by build-canary.yml (seds only
+  # `newTag: canary-*`); never pulled while the canary is `replicas: 0`.
+  - name: ghcr.io/samlindskog/funnelmanager/leads-canary
+    newName: ghcr.io/samlindskog/funnelmanager/leads
+    newTag: canary-PINME
 
 generatorOptions:
   disableNameSuffixHash: true
@@ -139,22 +160,16 @@ patches:
         path: /imagePullSecrets
         value:
           - name: ghcr-pull
-  # The canary is a throwaway variant — drop it to the LOWER `fm-dev`
-  # PriorityClass (10000 < fm-prod 100000) so it is first-to-evict under the
-  # tight fm-quota and never competes with real prod pods. This overrides the
-  # blanket fm-prod patch above for frontend-canary only.
+  # Canaries are throwaway variants — drop them to the LOWER `fm-dev`
+  # PriorityClass (10000 < fm-prod 100000) so they are first-to-evict under the
+  # tight fm-quota and never compete with real prod pods. This overrides the
+  # blanket fm-prod patch above. Every canary Deployment (and ONLY canaries)
+  # carries `version: canary`, so a single label-selected patch covers all of
+  # them and every future one — no per-service block to add on each new canary.
+  # Must come AFTER the blanket fm-prod patch to win.
   - target:
       kind: Deployment
-      name: frontend-canary
-    patch: |-
-      - op: replace
-        path: /spec/template/spec/priorityClassName
-        value: fm-dev
-  # Same fm-dev override for the search backend canary (overrides the blanket
-  # fm-prod patch above for search-canary only).
-  - target:
-      kind: Deployment
-      name: search-canary
+      labelSelector: "version=canary"
     patch: |-
       - op: replace
         path: /spec/template/spec/priorityClassName
