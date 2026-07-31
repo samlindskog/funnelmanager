@@ -192,6 +192,9 @@ class McpExportRow(BaseModel):
     mongo_id: str | None = None
     name: str = ""
     email: str | None = None
+    phone: str | None = None
+    company: str | None = None
+    title: str | None = None
     entity_type: str = "person"
 
 
