@@ -85,7 +85,7 @@ images:
   # `newTag: canary-*`); never pulled while the canary is `replicas: 0`.
   - name: ghcr.io/samlindskog/funnelmanager/leads-canary
     newName: ghcr.io/samlindskog/funnelmanager/leads
-    newTag: canary-PINME
+    newTag: canary-8b78014d
 
 generatorOptions:
   disableNameSuffixHash: true
