@@ -4,7 +4,9 @@
 # tracing: each Envoy emits one span per hop to the `tempo` opentelemetry
 # extensionProvider (helm.yaml meshConfig). Spans are already correlated by the
 # W3C `traceparent` fm_runtime propagates across every RFC 8693 exchange hop.
-# 100% sampling is fine at current traffic; dial down later if volume grows.
+# randomSamplingPercentage is 1 (see below): mesh-wide baseline is telemetry-
+# LIGHT — prod emits only a thin ~1% forensic trace sample (logs still flow via
+# Loki, metrics via Prometheus), while CANARY flows stay fully traced.
 #
 # accessLogging: keeps the built-in `envoy` file logger (/dev/stdout, the
 # meshConfig format with query-strip) but attaches a CEL filter that SUPPRESSES
@@ -42,7 +44,21 @@ spec:
   tracing:
     - providers:
         - name: tempo
-      randomSamplingPercentage: 100
+      # 1 = telemetry-LIGHT prod baseline. Envoy's random sampler starts a new
+      # trace for only ~1% of unmarked prod traffic — a thin always-on forensic
+      # trail for incident debugging, kept low so Tempo stays light (Loki logs +
+      # Prometheus metrics are unaffected). Canary flows are still FULLY traced
+      # (not just 1%) WITHOUT a per-workload override: the canary SPA's Faro
+      # bootstrap originates a `traceparent` with the sampled flag SET, and every
+      # Istio sidecar HONORS an incoming sampled decision end-to-end — including
+      # any stable pod a canary request fans out to (Istio's default
+      # sampling respects an already-sampled parent rather than re-rolling it).
+      # So a header-routed canary request is captured across every hop regardless
+      # of the 1% baseline. NOTE: this honor-incoming-sampled behavior is the
+      # load-bearing assumption of the whole light-baseline design — VERIFY IT
+      # LIVE at the canary promotion gate (a canary request must yield a complete
+      # multi-hop trace in Tempo while ambient prod traffic is only ~1% sampled).
+      randomSamplingPercentage: 1
       # SECURITY: overwrite Envoy's built-in `http.url` span tag with a literal
       # so the full path+query never lands in Tempo. That URL would otherwise
       # leak the Apollo webhook path-secret (/api/leads/webhooks/apollo/{secret})
@@ -53,10 +69,12 @@ spec:
         http.url:
           literal:
             value: redacted
-# DEFERRED — canary trace-sampling. Baseline is 100% above, so the frontend
-# canary is already fully traced; nothing to add now. Once the baseline is
-# lowered for volume, add a namespaced Telemetry in `prod` selecting
-# `app.kubernetes.io/name: frontend-canary` at `randomSamplingPercentage: 100`
-# to keep the canary at 100%. Note Istio samples PER WORKLOAD, not per header —
-# end-to-end capture relies on the canary SPA's Faro build propagating a
-# sampled `traceparent` from the browser.
+# CANARY trace-sampling. Baseline is a thin 1% above, and canary flows are
+# captured FULLY (not just 1%) WITHOUT a per-workload override: the canary SPA's Faro build originates a
+# sampled `traceparent` from the browser and every sidecar honors that incoming
+# decision (see the randomSamplingPercentage comment). No namespaced Telemetry
+# selecting the canary workload is needed, and it would NOT help anyway — Istio's
+# random sampler acts on the ROOT decision only, so a per-workload override
+# cannot retro-sample a request whose parent arrived unsampled. If a future need
+# arises to force-sample a fraction of AMBIENT prod traffic, raise the baseline
+# here rather than adding a workload override.
