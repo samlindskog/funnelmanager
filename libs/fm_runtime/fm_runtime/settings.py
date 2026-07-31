@@ -79,6 +79,13 @@ class RuntimeSettings:
 
     log_level: str = field(default_factory=lambda: os.environ.get("FM_LOG_LEVEL", "INFO"))
 
+    # This pod's deployment variant, e.g. "stable" or "canary". Read once from
+    # the environment and stamped onto every log line for telemetry. Purely a
+    # label — never an access-control or routing input inside the app.
+    deployment_variant: str = field(
+        default_factory=lambda: os.environ.get("FM_DEPLOYMENT_VARIANT", "stable")
+    )
+
     @property
     def effective_audience(self) -> str:
         return self.audience or self.service_name

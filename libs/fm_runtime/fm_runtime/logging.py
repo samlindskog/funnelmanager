@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from fm_runtime.context import current_context
+from fm_runtime.settings import get_runtime_settings
 
 _STANDARD_ATTRS = frozenset(
     logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()
@@ -47,6 +48,12 @@ class JsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key not in _STANDARD_ATTRS and not key.startswith("_"):
                 entry[key] = value
+        # Platform-owned fields stamped AFTER the extras loop so a caller's
+        # extra={...} can never clobber them. variant is always present; canary
+        # is a boolean marker only (NEVER the raw x-fm-canary secret value).
+        entry["variant"] = get_runtime_settings().deployment_variant
+        if ctx is not None and ctx.is_canary:
+            entry["canary"] = True
         if record.exc_info and record.exc_info[0] is not None:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, default=str, ensure_ascii=False)

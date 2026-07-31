@@ -2,8 +2,10 @@
 
 Set by PrincipalMiddleware at ingress; read anywhere (handlers, log
 formatter, outbound InternalClient) without threading arguments through every
-call. Detached background jobs run outside this context — they capture what
-they need (see InternalClient.detached)."""
+call. A task spawned via asyncio.create_task copies the current context, so a
+background job started mid-request inherits these values; InternalClient.detached
+still explicitly freezes what it needs so work that outlives the request (and
+its contextvar reset) keeps a stable subject token / trace context."""
 
 from __future__ import annotations
 
@@ -22,6 +24,15 @@ TRACE_HEADERS = (
     "x-b3-parentspanid",
     "x-b3-sampled",
     "x-b3-flags",
+    # Canary routing marker, forwarded verbatim internally so canary requests
+    # route to <svc>-canary workloads where they exist and fall back to stable
+    # otherwise. NOT trusted for authz: today the gateway only header-matches
+    # x-fm-canary on the frontend "/" route — no /api/* backend route matches or
+    # strips it, so any external caller can set it. Trustworthiness awaits a
+    # gateway ingress-strip (drop any client-supplied x-fm-canary on ALL routes,
+    # re-inject only from the validated fm_canary cookie); until then treat it as
+    # spoofable and use it only as a telemetry hint.
+    "x-fm-canary",
 )
 
 
@@ -29,8 +40,13 @@ TRACE_HEADERS = (
 class RequestContext:
     principal: Principal | None = None
     peer: Peer | None = None
-    trace_headers: dict[str, str] = field(default_factory=dict)
+    # repr=False: trace_headers may hold the secret x-fm-canary token value, so
+    # keep it out of any accidental repr(ctx) / f-string dump.
+    trace_headers: dict[str, str] = field(default_factory=dict, repr=False)
     request_id: str = ""
+    # Best-effort telemetry hint set from x-fm-canary PRESENCE only (never the
+    # raw value); spoofable until the gateway ingress-strip lands. Never authz.
+    is_canary: bool = False
 
 
 _current: ContextVar[RequestContext | None] = ContextVar("fm_request_context", default=None)

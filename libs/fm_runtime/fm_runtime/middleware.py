@@ -123,11 +123,20 @@ class PrincipalMiddleware:
                 trace_headers[name] = value
         trace_headers.setdefault("x-request-id", request_id)
 
+        # Presence only, best-effort telemetry hint — NEVER an authorization
+        # input. This is trivially spoofable today: the gateway header-matches
+        # x-fm-canary only on the frontend "/" route, so any external caller can
+        # set it on an /api/* request. It becomes trustworthy only once the
+        # gateway strips client-supplied x-fm-canary on all routes and re-injects
+        # it from the validated fm_canary cookie. Used solely for log labeling.
+        is_canary = "x-fm-canary" in trace_headers
+
         ctx = fm_context.RequestContext(
             principal=principal,
             peer=parse_peer(_header(scope, b"x-forwarded-client-cert")),
             trace_headers=trace_headers,
             request_id=request_id,
+            is_canary=is_canary,
         )
         scope.setdefault("state", {})["fm_context"] = ctx
 
