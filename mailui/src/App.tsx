@@ -40,7 +40,6 @@ export default function App() {
       }
       setUser({
         username: claims.username,
-        role: claims.roles.includes('admin') ? 'admin' : '',
       })
     }
     bootstrap().catch((err: unknown) => {

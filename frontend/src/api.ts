@@ -60,6 +60,7 @@ export class ApiError extends Error {
 const DEFAULT_APPS: AppLink[] = [
   { name: 'Search', description: 'Apollo person/company search', url: '/search/', probe: '/api/search/whoami' },
   { name: 'Mail', description: 'Google Workspace inboxes & sending', url: '/mail/', probe: '/api/mail/whoami' },
+  { name: 'Agents', description: 'AI agents that run tasks for you', url: '/agents/', probe: '/api/agents/whoami' },
 ]
 
 export function fetchApps(): AppLink[] {

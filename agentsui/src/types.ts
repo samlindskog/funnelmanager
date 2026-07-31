@@ -1,6 +1,5 @@
 export interface User {
   username: string
-  role: string
 }
 
 /** A runtime-AI-agent run. Cross-user visible (principle 1): the list/detail
