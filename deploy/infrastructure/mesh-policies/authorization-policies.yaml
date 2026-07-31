@@ -94,6 +94,7 @@ spec:
               - "/login"
               - "/callback"
               - "/search"
+              - "/search/*"
               # Bare SPA entry paths (no trailing slash): a top-level browser
               # navigation to /mail or /agents (e.g. the mail OAuth callback's
               # 303 back to "/mail?error=..." or a user typing the path) is
@@ -146,6 +147,7 @@ spec:
               - "/login"
               - "/callback"
               - "/search"
+              - "/search/*"
               # Bare SPA entry paths (no trailing slash): a top-level browser
               # navigation to /mail or /agents (e.g. the mail OAuth callback's
               # 303 back to "/mail?error=..." or a user typing the path) is
