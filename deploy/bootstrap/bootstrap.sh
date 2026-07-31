@@ -150,7 +150,7 @@ YAML
       kubectl -n "$n" get secret "$s" >/dev/null 2>&1 && { echo "have $n/$s"; return; }
       kubectl -n "$n" create secret "$@"
     }
-    for n in identity prod dev monitoring flux-system cert-manager; do ns "$n"; done
+    for n in identity prod monitoring flux-system cert-manager; do ns "$n"; done
 
     # cert-manager DNS-01 solver: Cloudflare API token (Zone:DNS Edit +
     # Zone:Zone Read on the domain zone). Lives in the cert-manager namespace.
@@ -161,15 +161,17 @@ YAML
     read -rsp "Keycloak console admin password: " KCPW; echo
     ensure identity keycloak-admin generic keycloak-admin \
       --from-literal=username=admin --from-literal=password="$KCPW"
-    # NOTE: the `keycloak-realm` secret (the hardened realm exports mounted
+    # NOTE: the `keycloak-realm` secret (the hardened PROD realm export mounted
     # into Keycloak's import dir) is provisioned OUT OF BAND, not here — e.g.
     #   kubectl -n identity create secret generic keycloak-realm \
-    #     --from-file=realm.json=<prod> --from-file=realm-dev.json=<dev>
-    # (or via SOPS). Keep the export files off this script's prompt path.
+    #     --from-file=realm.json=<prod>
+    # (or via SOPS). The cluster Keycloak imports ONLY the prod realm; the
+    # funnelmanager-dev realm is compose/local-dev only and must NEVER be
+    # imported into the prod issuer. Keep the export files off this prompt path.
 
     read -rp  "Object storage ACCESS_KEY_ID: " OSK
     read -rsp "Object storage SECRET: " OSS; echo
-    for n in prod dev identity; do
+    for n in prod identity; do
       ensure "$n" objectstore-backups generic objectstore-backups \
         --from-literal=ACCESS_KEY_ID="$OSK" --from-literal=ACCESS_SECRET_KEY="$OSS"
     done
@@ -186,7 +188,7 @@ YAML
     ensure monitoring grafana-oidc generic grafana-oidc \
       --from-literal=GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET="$GFOIDC"
 
-    for n in prod dev; do
+    for n in prod; do
       for svc in search leads mail mcp jobs agents; do
         read -rsp "fm-oidc client-secret for $svc ($n realm): " CS; echo
         ensure "$n" "fm-oidc-$svc" generic "fm-oidc-$svc" --from-literal=client-secret="$CS"
@@ -214,7 +216,7 @@ YAML
     # GHCR pull secret (read-only token) for the app namespaces.
     read -rp  "GHCR username: " GU
     read -rsp "GHCR read-only token: " GT; echo
-    for n in prod dev; do
+    for n in prod; do
       ensure "$n" ghcr-pull docker-registry ghcr-pull \
         --docker-server=ghcr.io --docker-username="$GU" --docker-password="$GT"
       kubectl -n "$n" patch serviceaccount default \

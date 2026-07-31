@@ -7,22 +7,21 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
 
 ## Domains & endpoints  ✅ (filled for x9bc433.win)
 
-- [x] **App host** → `x9bc433.win` (apex = prod), dev → `dev.x9bc433.win`.
-      Consumed by: Gateway listeners/Certificates, HTTPRoutes, OPA
-      `config.hosts`, overlay `fm-web` (CORS/`PUBLIC_BASE_URL`), Keycloak
-      `frontend` client redirect URIs.
+- [x] **App host** → `x9bc433.win` (prod). Consumed by: Gateway
+      listeners/Certificates, HTTPRoutes, OPA `config.hosts`, overlay `fm-web`
+      (CORS/`PUBLIC_BASE_URL`), Keycloak `frontend` client redirect URIs.
 - [x] **Keycloak host** → `kc.x9bc433.win` → issuer
-      `https://kc.x9bc433.win/realms/funnelmanager` (prod) /
-      `…/funnelmanager-dev` (dev). Consumed by: OPA `issuers`/`keycloak_host`,
-      RequestAuthentication, overlay `fm-oidc`, Grafana OIDC.
+      `https://kc.x9bc433.win/realms/funnelmanager` (prod). Consumed by: OPA
+      `issuers`/`keycloak_host`, RequestAuthentication, overlay `fm-oidc`,
+      Grafana OIDC.
 - [x] **Grafana host** → `grafana.x9bc433.win` (own gateway listener/cert/
       route; OPA `grafana_host` bypass; Grafana enforces Keycloak OIDC).
 - [x] **Let's Encrypt email** → `sam@slindskog.net` (cert-manager issuers).
-- [ ] **DNS records to create** — `A` for `x9bc433.win`, `dev.x9bc433.win`,
-      `kc.x9bc433.win`, `grafana.x9bc433.win` → the **edge** node's public IP
+- [ ] **DNS records to create** — `A` for `x9bc433.win`, `kc.x9bc433.win`,
+      `grafana.x9bc433.win` → the **edge** node's public IP
       (`192.81.135.223`). Cloudflare proxy may stay **ON** (DNS-01 validates
-      via the API). Today apex/dev resolve to Cloudflare — repoint origin to
-      edge.
+      via the API). Today apex resolves to Cloudflare — repoint origin to
+      edge. (`dev.x9bc433.win` is the compose/usfr3 dev box, not the cluster.)
 - [ ] **Cloudflare API token** (DNS-01) — Zone:DNS Edit + Zone:Zone Read on
       `x9bc433.win` → `cloudflare-api-token` Secret in `cert-manager`
       (the `secrets` bootstrap stage prompts for it).
@@ -31,18 +30,13 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
 
 ## Identity
 
-- [ ] **Two hardened realm exports**, kept OUT of git, derived from the
-      templates in `deploy/keycloak/`:
-      - prod realm `funnelmanager` (from
-        `realm-funnelmanager-prod.example.json`) — no human users; create
-        them in the console.
-      - dev realm `funnelmanager-dev` (from `realm-funnelmanager-dev.json`,
-        renaming `realm` to `funnelmanager-dev` and swapping localhost
-        redirect URIs for `https://dev.x9bc433.win/*`).
-      Rotate every `REPLACE-*`/`dev-*` client secret; mirror each into the
-      matching `fm-oidc-<svc>` Secret. The `keycloak-realm` import Secret
-      points at the **prod** export; import the dev realm via the console or a
-      second import.
+- [ ] **Hardened prod realm export** for the cluster, kept OUT of git,
+      derived from `deploy/keycloak/realm-funnelmanager-prod.example.json`
+      (realm `funnelmanager`; no human users — create them in the console).
+      Rotate every `REPLACE-*` client secret; mirror each into the matching
+      `fm-oidc-<svc>` Secret. The `keycloak-realm` import Secret points at this
+      **prod** export. (The `funnelmanager-dev` realm is compose/local-dev
+      only and is never imported to the cluster Keycloak.)
 - [ ] **Grafana OIDC client secret** — the `grafana` confidential client's
       secret from the realm export → `grafana-oidc` Secret in `monitoring`
       (key `GF_OAUTH_CLIENT_SECRET`; the `secrets` stage prompts).
@@ -61,8 +55,8 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
       `deploy/apps/base/data/*/cluster.yaml`, `deploy/infrastructure/identity/cluster.yaml`,
       `deploy/infrastructure/observability/loki.yaml`. Keys go into the
       `objectstore-backups` / `objectstore-loki` Secrets (bootstrap prompts).
-- [ ] **GHCR read-only token** → `ghcr-pull` (prod + dev ns; bootstrap prompts).
-- [ ] **App/identity secrets** (bootstrap prompts, both prod + dev ns):
+- [ ] **GHCR read-only token** → `ghcr-pull` (prod ns; bootstrap prompts).
+- [ ] **App/identity secrets** (bootstrap prompts, prod ns):
       `keycloak-admin`, per-service `fm-oidc-*`, `apollo`, `openai`,
       `google-oauth`, `milvus-minio`, `grafana-admin`.
 

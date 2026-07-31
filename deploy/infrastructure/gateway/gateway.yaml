@@ -29,17 +29,6 @@ spec:
       allowedRoutes:
         namespaces:
           from: Same
-    - name: https-dev
-      port: 443
-      protocol: HTTPS
-      hostname: dev.x9bc433.win # PLACEHOLDERS.md (e.g. dev.<domain>)
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - name: fm-dev-tls
-      allowedRoutes:
-        namespaces:
-          from: Same
     - name: https-kc
       port: 443
       protocol: HTTPS
@@ -75,19 +64,6 @@ spec:
     kind: ClusterIssuer
   dnsNames:
     - x9bc433.win
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: fm-dev-tls
-  namespace: istio-ingress
-spec:
-  secretName: fm-dev-tls
-  issuerRef:
-    name: letsencrypt
-    kind: ClusterIssuer
-  dnsNames:
-    - dev.x9bc433.win
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

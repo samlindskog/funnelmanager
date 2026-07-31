@@ -14,9 +14,11 @@ at the repo root.
   **edge** node's public IP.
 - Linode Object Storage buckets created (CNPG + Loki; names in
   PLACEHOLDERS) with an access key pair.
-- Hardened Keycloak realm exports (prod realm `funnelmanager`, dev realm
-  `funnelmanager-dev`) with rotated client secrets — derived from
-  `deploy/keycloak/realm-funnelmanager-dev.json`, kept out of git.
+- A hardened Keycloak realm export for the cluster: the **prod** realm
+  `funnelmanager` with rotated client secrets — derived from
+  `deploy/keycloak/realm-funnelmanager-prod.example.json`, kept out of git.
+  The cluster imports ONLY the prod realm; `funnelmanager-dev` is
+  compose/local-dev only and is never imported to the prod Keycloak.
 - `flux` CLI ≥ 2.3 and `kubectl` on the operator workstation.
 
 ## 1. Firewall (per node, before install)

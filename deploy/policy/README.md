@@ -1,7 +1,7 @@
 # OPA policy bundle
 
 The single authorization decision point for the mesh: every Envoy (sidecars
-in `prod`/`dev`, plus the edge gateway) calls its node-local OPA via
+in `prod`, plus the edge gateway) calls its node-local OPA via
 ext_authz, and OPA evaluates `data.funnelmanager.envoy.result`. Default
 deny.
 

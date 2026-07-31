@@ -27,7 +27,7 @@
 # There is therefore no CRD that removes `jwt_authn` for just this one host
 # without restructuring the shared gateway. This EnvoyFilter surgically REMOVES
 # the `jwt_authn` HTTP filter from ONLY the grafana SNI filter chain:
-#   - Every OTHER filter chain (x9bc433.win, dev.x9bc433.win, kc.x9bc433.win,
+#   - Every OTHER filter chain (x9bc433.win, kc.x9bc433.win,
 #     the :80 redirect) keeps the RA's `jwt_authn` untouched, so app-host
 #     `/api/*` JWT validation and the token-less DENY policy are byte-for-byte
 #     unchanged. NO app-host validation is weakened.

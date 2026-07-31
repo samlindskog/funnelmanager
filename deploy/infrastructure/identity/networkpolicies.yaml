@@ -46,19 +46,11 @@ spec:
           podSelector:
             matchExpressions:
               # search-canary does the same search->leads RFC 8693 exchange as
-              # stable search, so it needs the Keycloak backchannel too (prod
-              # only — there is no dev canary). Added explicitly to the set.
+              # stable search, so it needs the Keycloak backchannel too. Added
+              # explicitly to the set.
               - key: app.kubernetes.io/name
                 operator: In
                 values: [search, search-canary, mcp, agents, jobs]
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: dev
-          podSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values: [search, mcp, agents, jobs]
       ports:
         - port: 8080
           protocol: TCP

@@ -23,9 +23,6 @@ spec:
     - issuer: https://kc.x9bc433.win/realms/funnelmanager # PLACEHOLDERS.md
       jwksUri: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/certs
       forwardOriginalToken: true
-    - issuer: https://kc.x9bc433.win/realms/funnelmanager-dev
-      jwksUri: https://kc.x9bc433.win/realms/funnelmanager-dev/protocol/openid-connect/certs
-      forwardOriginalToken: true
 ---
 apiVersion: security.istio.io/v1
 kind: RequestAuthentication
@@ -36,15 +33,4 @@ spec:
   jwtRules:
     - issuer: https://kc.x9bc433.win/realms/funnelmanager
       jwksUri: https://kc.x9bc433.win/realms/funnelmanager/protocol/openid-connect/certs
-      forwardOriginalToken: true
----
-apiVersion: security.istio.io/v1
-kind: RequestAuthentication
-metadata:
-  name: keycloak-jwt
-  namespace: dev
-spec:
-  jwtRules:
-    - issuer: https://kc.x9bc433.win/realms/funnelmanager-dev
-      jwksUri: https://kc.x9bc433.win/realms/funnelmanager-dev/protocol/openid-connect/certs
       forwardOriginalToken: true

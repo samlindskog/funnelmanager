@@ -2,12 +2,10 @@
   "funnelmanager": {
     "config": {
       "issuers": {
-        "prod": "https://kc.x9bc433.win/realms/funnelmanager",
-        "dev": "https://kc.x9bc433.win/realms/funnelmanager-dev"
+        "prod": "https://kc.x9bc433.win/realms/funnelmanager"
       },
       "hosts": {
-        "x9bc433.win": "prod",
-        "dev.x9bc433.win": "dev"
+        "x9bc433.win": "prod"
       },
       "keycloak_host": "kc.x9bc433.win",
       "grafana_host": "grafana.x9bc433.win",

@@ -118,7 +118,6 @@ spec:
             namespaces:
               names:
                 - prod
-                - dev
                 - identity
         relabel_configs:
           - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]

@@ -1,6 +1,6 @@
 # Funnel Manager authorization core.
 #
-# Called by every Envoy (sidecars in prod/dev + the edge gateway) through
+# Called by every Envoy (sidecars in prod + the edge gateway) through
 # ext_authz. Default deny. Two branches:
 #   - HTTP: both identities checked — the calling WORKLOAD (mTLS SPIFFE
 #     principal) against the caller allowlists, and the ORIGINATING
@@ -96,7 +96,7 @@ azp_ok_for(svc) if {
 azp_ok_for(svc) if not config.azp_allow[svc]
 
 # Caller allowlists. ns "env" means "same namespace as the destination"
-# (prod calls prod, dev calls dev); anything else is a literal namespace.
+# (prod calls prod, same-namespace); anything else is a literal namespace.
 # An entry with path_prefixes only admits the caller on those paths
 # (e.g. the gateway may reach leads solely for the Apollo webhooks).
 caller_ok if {

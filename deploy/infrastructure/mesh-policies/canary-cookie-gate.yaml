@@ -43,7 +43,7 @@
 # our OWN stable SNI hostname (`x9bc433.win`, the app host) plus Envoy's stable
 # filter constants — no Gateway-API-generated route/vhost name is referenced.
 # Scope is one workload (the edge gateway) and one filter chain (the app host);
-# the kc./dev./grafana. chains and the :80 redirect are untouched.
+# the kc./grafana. chains and the :80 redirect are untouched.
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:

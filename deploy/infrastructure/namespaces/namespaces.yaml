@@ -61,12 +61,3 @@ metadata:
     app.kubernetes.io/part-of: funnelmanager
     istio-injection: enabled
     env: prod
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: dev
-  labels:
-    app.kubernetes.io/part-of: funnelmanager
-    istio-injection: enabled
-    env: dev

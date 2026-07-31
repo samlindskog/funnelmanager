@@ -19,7 +19,10 @@ jwt(claims) := io.jwt.encode_sign({"typ": "JWT", "alg": "HS256"}, claims, {
 
 prod_iss := "https://kc.x9bc433.win/realms/funnelmanager"
 
-dev_iss := "https://kc.x9bc433.win/realms/funnelmanager-dev"
+# A validly-signed token from an issuer that is NOT in config.issuers (e.g. a
+# foreign/other Keycloak realm). Its presence proves realm isolation: only the
+# configured prod issuer is accepted; any other issuer is rejected.
+foreign_iss := "https://kc.x9bc433.win/realms/funnelmanager-other"
 
 admin_user_token(aud, azp) := jwt({
 	"iss": prod_iss,
@@ -213,18 +216,20 @@ test_gateway_rejected_by_every_dependency if {
 }
 
 test_cross_env_dependency_rejected if {
-	not authz.allow with input as tcp_input("dev", "leads", "prod", "mongo")
+	# A workload in a DIFFERENT namespace ("other") cannot reach prod's mongo:
+	# the pairing requires src.ns == dst.ns, so cross-namespace TCP is refused.
+	not authz.allow with input as tcp_input("other", "leads", "prod", "mongo")
 }
 
 # --------------------------------------------------------------------------
 # 6. Environment separation + misc
 # --------------------------------------------------------------------------
 
-test_dev_issuer_rejected_in_prod if {
+test_foreign_issuer_rejected_in_prod if {
 	not authz.allow with input as http_input(
 		"prod", "search", "prod", "leads", "POST", "/api/leads",
 		jwt({
-			"iss": dev_iss, "aud": "leads", "azp": "search",
+			"iss": foreign_iss, "aud": "leads", "azp": "search",
 			"sub": "u", "realm_access": {"roles": ["admin"]},
 		}),
 	)

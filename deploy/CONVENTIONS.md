@@ -33,11 +33,11 @@ node (tolerates both taints). Only `edge` gets public 80/443.
 | `cnpg-system` | CloudNativePG operator | disabled |
 | `monitoring` | Prometheus, Loki, Grafana, Fluent Bit | disabled (scrapes/ships across the mesh boundary) |
 | `prod` | full app + data stack | enabled (`istio-injection: enabled`) |
-| `dev` | full app + data stack (small) | enabled |
 | `flux-system` | Flux controllers | disabled |
 
-`prod` PriorityClass `fm-prod` (value 100000) > `dev` `fm-dev` (10000);
-every pod in prod/dev sets `priorityClassName` accordingly (patched by the
+`prod` PriorityClass `fm-prod` (value 100000) > `fm-dev` (10000, now carried
+only by throwaway canary variants — see the prod overlay's `version=canary`
+patch); every prod pod sets `priorityClassName` accordingly (patched by the
 overlay, not in base).
 
 ## Names, labels, service accounts
@@ -105,15 +105,18 @@ istiod values (64Mi/256Mi). The summed budget lives in
 | fluent-bit (per node) | 25m / 64Mi | 100m / 128Mi |
 | kube-state-metrics | 25m / 64Mi | 100m / 128Mi |
 
-Dev workloads halve app requests, keep limits, replicas 1 everywhere. (The
-GitOps dev-preview overlay that applied this was removed pending an Istio
-canary for dev pods; the `dev` namespace, quotas, `fm-dev` PriorityClass, and
-mesh/gateway policies remain for that future work.)
+The GitOps dev-preview overlay was removed pending an Istio canary for dev
+pods, and the inert in-cluster `dev` namespace, quotas, LimitRanges, and its
+mesh/gateway/identity policies were retired (Phase 0 cleanup) once the prod
+cluster ran nothing in `dev`. The `fm-dev` PriorityClass was kept and is now
+carried by throwaway canary variants (see the prod overlay). Local/compose
+dev is unaffected — it runs from `docker-compose.dev.yml`.
 
 ## Identity & app env
 
-- Keycloak realm per env: `funnelmanager` (prod), `funnelmanager-dev`
-  (dev). Issuer `https://<KC_HOST>/realms/<realm>`.
+- Keycloak realm (cluster): `funnelmanager` (prod only). Issuer
+  `https://<KC_HOST>/realms/funnelmanager`. (The `funnelmanager-dev` realm is
+  compose/local-dev only and is not imported to the cluster Keycloak.)
 - Backend env (from `fm-oidc` ConfigMap + `fm-oidc-<svc>` Secret per ns):
   `FM_SERVICE_NAME`, `FM_OIDC_ISSUER`, `FM_OIDC_CLIENT_ID`,
   `FM_OIDC_CLIENT_SECRET` (secretKeyRef), `FM_JWT_VERIFY: "false"`

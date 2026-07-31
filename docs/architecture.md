@@ -27,7 +27,7 @@ graph with health gates: namespaces → cert-manager/Gateway-API
 CRDs/CNPG → Istio → OPA → mesh policies → identity → gateway →
 observability → apps.
 
-Identity: **Keycloak** (realms `funnelmanager`, `funnelmanager-dev`),
+Identity: **Keycloak** (realm `funnelmanager`),
 humans via auth-code+PKCE, services/agents as confidential clients,
 **RFC 8693 token exchange per internal hop** with the realm's `svc-<target>`
 scopes as the exchange allowlist. Apps consume identity through
