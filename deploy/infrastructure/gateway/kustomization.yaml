@@ -4,6 +4,7 @@ resources:
   - gateway.yaml
   - httproutes.yaml
   - referencegrants.yaml
+  - canary/search-canary.yaml
   # CANARY ROUTES — "canary-if-exists-else-stable" (the idle-canary 503 fix).
   # Each `canary/<svc>-canary.yaml` is a SEPARATE HTTPRoute for the cookie-marked
   # canary path. It is listed here ⇔ that `<svc>-canary` Deployment is scaled up
