@@ -39,15 +39,20 @@ session. Setup driver: `.claude/skills/drive-canary/setup.sh`.
 1. **Log in** — `browser_navigate` to `FM_HUB_URL`, follow the Keycloak sign-in, and
    authenticate as `FM_E2E_USER` / `FM_E2E_PASS` (`browser_type` into the KC form,
    `browser_click` submit). The hub shares the KC session via `fm_oidc_*` localStorage.
-2. **Seed the canary cookie (once)** — a persistent-profile cookie can't be set from
-   the static config, so seed it at runtime; it persists across the session:
+2. **Set the canary cookie (once)** — `browser_navigate` to the gateway toggle
+   endpoint, which sets the cookie **server-side (HttpOnly)** — identical to the human
+   `enter-canary` flow. A Playwright top-level navigation sends `Sec-Fetch-Dest:
+   document`, so the endpoint's anti-drive-by guard passes:
    ```
-   document.cookie = "fm_canary=<FM_CANARY_TOKEN>; path=/; Secure; SameSite=Lax"
+   browser_navigate  https://x9bc433.win/canary/on?t=<FM_CANARY_TOKEN>
    ```
-   via `browser_evaluate`, then `browser_navigate`/reload. The gateway now serves the
-   **canary bundle** and routes `/api/*` to `<svc>-canary` (with automatic stable
-   fallback where no canary exists). This host-only cookie triggers no CORS preflight,
-   which is why it also **fixes the KC-refresh CORS bug** the old header caused.
+   It 302s back to `/` with the HttpOnly `fm_canary` cookie set; the gateway then serves
+   the **canary bundle** and routes `/api/*` to `<svc>-canary` (automatic stable fallback
+   where no canary exists). The cookie is host-only (no CORS preflight), which also keeps
+   the **KC-refresh CORS fix** the old header broke. `.../canary/off` clears it.
+   *(The old `document.cookie = "fm_canary=…"` + reload still works — the gateway routes
+   on any valid `fm_canary` cookie — but the endpoint is preferred: HttpOnly + one flow
+   for human and headless.)*
 3. **Snapshot** — `browser_snapshot` (accessibility tree) exposes the `data-testid`s
    of every labeled control; pick the one to exercise.
 4. **Click a labeled control** — `browser_click` it. Prefer a **deliberate,
