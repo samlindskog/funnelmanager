@@ -1,4 +1,4 @@
-# Prod release (k3s GitOps). Builds the six images and pins them into the
+# Prod release (k3s GitOps). Builds the eleven images and pins them into the
 # prod overlay on main; Flux rolls them out. Never triggered by a plain push
 # to main — only by:
 #   * pushing a release tag `v*`  (git tag v1.2.0 && git push origin v1.2.0)

@@ -26,5 +26,6 @@ resources:
   # (anchored on the `- canary-cookie-gate.yaml` resource line above) in the same
   # commit that activates an internal canary (leads/mcp/jobs, replicas 0->1), and
   # `.claude/skills/canary/canary.sh retire` REMOVEs it when it scales back to 0.
-  # leads-canary is idle (replicas: 0) in git today, so NO east-west VS line is
-  # listed here — the tooling adds one on activation, removes it on retire.
+  # leads-canary is ACTIVE in git today, so its east-west VS
+  # (`- canary/leads-canary-eastwest.yaml`) IS listed above — VS present ⇔ canary
+  # active; the tooling removes the line on retire.

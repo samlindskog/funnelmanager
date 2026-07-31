@@ -160,7 +160,7 @@ The three encodings of authorization — `fm_runtime/grants.py` (`_DEFAULT_ROLE_
 
 ### P8 — Never raise once a stream has started; correct streaming lifecycle · **partial (convention)**
 
-**Honored by (convention, not machine-enforced):** the never-raise pattern is **hand-repeated** in `search/app/routers/search.py` (`_run_search_job`, enrich/match/org generators, CSV sentinel), `search/app/routers/internal_jobs.py`, `leads/app/stream_jobs.py` (`run_paged_search_stream`), the `agents` job stream; frontend `src/api.ts` / `src/progress.tsx`. **Nothing catches a stray `raise` in a streaming router** — the connection simply resets. This is `partial`, not `enforced`: promoting it to `enforced` means lifting the pattern into the shared `fm_runtime` streaming helper below (then a violation becomes structurally impossible, and the new `agents` service can't regress it).
+**Honored by (convention, not machine-enforced):** the never-raise pattern is **hand-repeated** in `search/app/routers/search.py` (`_run_search_job`, enrich/match/org generators, CSV sentinel), `search/app/routers/internal_jobs.py`, `leads/app/stream_jobs.py` (`run_paged_search_stream`), the `agents` job stream; searchui `src/api.ts` / `src/progress.tsx`. **Nothing catches a stray `raise` in a streaming router** — the connection simply resets. This is `partial`, not `enforced`: promoting it to `enforced` means lifting the pattern into the shared `fm_runtime` streaming helper below (then a violation becomes structurally impossible, and the new `agents` service can't regress it).
 
 Searches and enrichment are **NDJSON streams**. **Once an NDJSON response has started, a router must never raise** — Starlette resets the connection and the browser reports a generic network error that kills sibling streams sharing the origin. Instead, catch `HTTPException`/`Exception` and emit `{"type":"error","detail":…}` as a stream line, and always emit a terminal sentinel. Preserve the sibling-isolation, per-job history buffering (late subscribers replay), and round-robin multiplexing (embedding progress isn't stuck behind ingest). RUNNING jobs never TTL-expire; finished jobs drop after ~90s.
 
@@ -327,7 +327,7 @@ Searches and enrichment are **NDJSON streams**, not request/response. This is th
 - **Critical invariant:** once an NDJSON response has started, routers must **never raise** — Starlette would reset the connection and the browser reports a generic network error that kills sibling streams sharing the origin. Instead, catch `HTTPException` and emit `{"type": "error", "detail": ...}` as a stream line. Every streaming endpoint in `search.py` follows this pattern; preserve it.
 - Event `type`s the frontend consumes: `progress`, `first_page`, `complete`, `embedding_progress`, `ingest_complete`, `error`. Enrichment batches (`_enrich_ndjson_events`) additionally carry `active_ingest_stream_ids` / `active_embedding_stream_ids` so the UI can cancel an in-flight batch.
 
-Frontend stream handling and the floating progress rings live in `frontend/src/api.ts` and `frontend/src/progress.tsx`.
+Search-app stream handling and the floating progress rings live in `searchui/src/api.ts` and `searchui/src/progress.tsx` (extracted from `frontend/` with the search app).
 
 ## Auth + authorization
 

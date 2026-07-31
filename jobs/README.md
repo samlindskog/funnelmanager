@@ -64,14 +64,6 @@ The two-tier trust for a control action:
 - Only anonymous route: `GET /api/jobs/health` (legacy probe; k8s uses
   `/healthz` + `/readyz`).
 
-## Not wired here (deferred to platform-agent, Phase 2)
-
-Per the build plan, docker-compose / k3s manifests / the dedicated `jobs-db` are
-**intentionally not added in this phase** — that wiring lands with `search` (the
-first real producer) so the whole path can be integration-tested end-to-end. This
-service is self-contained and boots against any Postgres; the platform wiring
-(compose service, `jobs-db`, prod loopback bind, manifests) is a separate step.
-
 ## Local verification (no cluster, no real producers)
 
 A throwaway stub producer (`scripts/stub_producer.py`, not shipped in the image)

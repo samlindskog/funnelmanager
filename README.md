@@ -99,7 +99,7 @@ cp .env.prod.example .env.prod
 # Set DOMAIN, KC_* / FM_OIDC_*, APOLLO_API_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DATABASE_URL
 
 # Prod uses prebuilt images from GHCR (no local builds) — built and pushed by
-# .github/workflows/deploy-prod.yml; see deploy/README.md for the full flow.
+# .github/workflows/release-prod.yml; see deploy/README.md for the full flow.
 docker compose -f docker-compose.prod.yml --env-file .env.prod pull
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```

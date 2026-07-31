@@ -1,5 +1,5 @@
 # Prod runs prebuilt images pulled from GHCR — nothing builds on the host and no
-# source checkout is needed. `.github/workflows/deploy-prod.yml` builds/pushes the
+# source checkout is needed. `.github/workflows/release-prod.yml` builds/pushes the
 # images on GitHub runners, then ships this file to the server and pulls.
 # IMAGE_TAG selects the image set (default: the moving `prod` tag CI pushes on
 # every deploy; per-commit `sha-<sha>` and release `v*` tags exist for pinning).

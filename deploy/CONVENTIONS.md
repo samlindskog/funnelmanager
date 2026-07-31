@@ -43,11 +43,14 @@ overlay, not in base).
 ## Names, labels, service accounts
 
 - App/workload names are the short service names: `search`, `leads`,
-  `mail`, `mcp`, `jobs`, `agents`, `frontend`, `mailui`, `agentsui`,
-  `keycloak`, `opa`.
+  `mail`, `mcp`, `jobs`, `agents`, `frontend`, `searchui`, `mailui`,
+  `agentsui`, `keycloak`, `opa`.
 - Data workloads: `app-db` (search's Postgres, CNPG), `mail-db` (CNPG),
   `jobs-db` (CNPG), `agents-db` (CNPG), `kc-db` (CNPG, in `identity`),
   `mongo`, `milvus`, `etcd`, `minio`.
+- Scheduled job: `mongo-backup` (CronJob in `prod`; image
+  `.../funnelmanager/backup` — mongodump inside the mongo pod → object
+  storage). Not a long-running workload; no Service.
 - Every Deployment/StatefulSet has its own ServiceAccount named exactly
   like the workload → SPIFFE `spiffe://cluster.local/ns/<ns>/sa/<name>`.
   No workload uses `default`, none is cluster-admin.
@@ -67,7 +70,9 @@ overlay, not in base).
 
 - Apps: `ghcr.io/samlindskog/funnelmanager/<name>` — tag is set ONLY in
   overlays via the kustomize `images:` transformer (`sha-<gitsha>`; the
-  prod overlay carries the currently-deployed pin). Never `:latest`.
+  prod overlay carries the currently-deployed pin). Never `:latest`. The
+  built set is the ten deployed services plus `backup` (the `mongo-backup`
+  CronJob runner) — eleven images in all (`build-images.yml` matrix).
 - Third-party images pinned to exact versions:
   `quay.io/keycloak/keycloak:26.2.5@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9`, `mongo:7.0.21`,
   `milvusdb/milvus:v2.5.4`, `quay.io/coreos/etcd:v3.5.18`,
@@ -90,6 +95,7 @@ istiod values (64Mi/256Mi). The summed budget lives in
 | jobs | 50m / 128Mi | 500m / 512Mi |
 | agents | 50m / 128Mi | 500m / 768Mi |
 | frontend (nginx) | 10m / 16Mi | 100m / 64Mi |
+| searchui (nginx) | 10m / 16Mi | 100m / 64Mi |
 | mailui (nginx) | 10m / 16Mi | 100m / 64Mi |
 | agentsui (nginx) | 10m / 16Mi | 100m / 64Mi |
 | app-db / mail-db / jobs-db / agents-db / kc-db (CNPG, each) | 100m / 192Mi | 500m / 512Mi |
@@ -129,8 +135,9 @@ dev is unaffected — it runs from `docker-compose.dev.yml`.
   issuer because Keycloak's backchannel hostname is not dynamic.
 - Probes: HTTP GET `/healthz` (liveness) and `/readyz` (readiness) on the
   app port for the backends (`search`, `leads`, `mail`, `mcp`, `jobs`,
-  `agents`); `/` for static nginx (`agentsui` probes `/agents/`, its base
-  path); Keycloak uses `/health/ready` on port 9000 (management).
+  `agents`); `/` for static nginx (`searchui` probes `/search/` and
+  `agentsui` probes `/agents/`, their base paths); Keycloak uses
+  `/health/ready` on port 9000 (management).
 
 ## Secrets (refs only — values supplied at bootstrap / via SOPS)
 
@@ -166,4 +173,5 @@ loki 5Gi (cache; chunks go to object storage).
 - Never routed from the gateway: leads (except `/api/leads/webhooks/`),
   mcp, jobs, all data stores, OPA. Gateway-routed: `search` (`/api/search`),
   `mail` (`/api/mail`), `agents` (`/api/agents`), the SPAs `frontend` (`/`),
-  `mailui` (`/mail/`), `agentsui` (`/agents/`), and `leads`'s webhook prefix.
+  `searchui` (`/search/`), `mailui` (`/mail/`), `agentsui` (`/agents/`), and
+  `leads`'s webhook prefix.
