@@ -113,8 +113,44 @@ function scrubUrls(item: TransportItem): TransportItem {
   return item
 }
 
+// Dev/canary UI indicator: a thin red viewport outline + a small corner label,
+// so it is visually unmistakable that you are on a telemetry-enabled canary/dev
+// build and not stable prod. Lives in this module (not main.tsx) so it is
+// tree-shaken from the prod bundle exactly like the rest of the RUM bootstrap.
+// Purely cosmetic and best-effort — a fixed, pointer-events:none overlay that
+// never affects layout or intercepts clicks, and never throws.
+function markCanaryUi(): void {
+  try {
+    if (document.getElementById('fm-canary-marker')) {
+      return
+    }
+    const frame = document.createElement('div')
+    frame.id = 'fm-canary-marker'
+    frame.style.cssText =
+      'position:fixed;inset:0;border:2px solid red;pointer-events:none;z-index:2147483647'
+    const label = document.createElement('div')
+    label.textContent = 'CANARY · telemetry on'
+    label.style.cssText =
+      'position:fixed;top:0;right:0;background:red;color:#fff;' +
+      'font:11px/1.5 ui-monospace,monospace;padding:1px 6px;' +
+      'pointer-events:none;z-index:2147483647'
+    const attach = () => {
+      document.body.appendChild(frame)
+      document.body.appendChild(label)
+    }
+    if (document.body) {
+      attach()
+    } else {
+      document.addEventListener('DOMContentLoaded', attach, { once: true })
+    }
+  } catch {
+    // Indicator is cosmetic; never let it break the app.
+  }
+}
+
 export function initTelemetry(): void {
   try {
+    markCanaryUi()
     initializeFaro({
       url: '/telemetry/collect',
       app: {
