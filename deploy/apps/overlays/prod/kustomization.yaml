@@ -24,27 +24,27 @@ resources:
 # never :latest.
 images:
   - name: ghcr.io/samlindskog/funnelmanager/search
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/leads
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/mail
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/mcp
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/jobs
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/agents
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/frontend
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/mailui
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/agentsui
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/searchui
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   - name: ghcr.io/samlindskog/funnelmanager/backup
-    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+    newTag: sha-7ccbc1bba400022ad5931fb350ac57fa77117f26
   # Header-routed frontend canary (Phase 4). Its base uses the canary-logical
   # name `.../frontend-canary`; this entry remaps it to the real `frontend`
   # repo with an INDEPENDENT `canary-<sha>` tag. Kept separate from the stable
