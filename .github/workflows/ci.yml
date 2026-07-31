@@ -52,14 +52,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Install fm_runtime + service deps, import every app
+      - name: Import every backend app in an isolated venv
+        # Each service is resolved in its OWN venv: services legitimately pin
+        # conflicting transitive deps (e.g. agents' pydantic-ai vs leads/mail's
+        # openai), so a single shared environment is ResolutionImpossible. This
+        # is the same isolation each service's own Docker image gives it.
         run: |
-          python -m pip install -q ./libs/fm_runtime
-          python -m pip install -q -r search/requirements.txt -r leads/requirements.txt \
-            -r mail/requirements.txt -r mcp/requirements.txt \
-            -r jobs/requirements.txt -r agents/requirements.txt
+          set -e
           for svc in search leads mail mcp jobs agents; do
-            (cd "$svc" && python -c "import app.main" && echo "$svc imports OK")
+            echo "== $svc =="
+            python -m venv "/tmp/venv-$svc"
+            "/tmp/venv-$svc/bin/pip" install -q ./libs/fm_runtime -r "$svc/requirements.txt"
+            (cd "$svc" && "/tmp/venv-$svc/bin/python" -c "import app.main") && echo "$svc imports OK"
+            rm -rf "/tmp/venv-$svc"
           done
 
   policy:
