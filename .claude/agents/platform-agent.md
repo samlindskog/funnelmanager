@@ -21,7 +21,7 @@ your delta.
 - **GitOps only:** a deploy is a git commit, never an ssh push. CI builds images
   and commits a `sha-…` pin; Flux reconciles `main`. Don't hand-edit the cluster.
 - **OPA is the mesh enforcement point** for grants; its policy data must mirror
-  `grants.py` and the realm. **Wire `python -m fm_runtime.export --check
+  `grants.py` and the realm. **Wire `python3 -m fm_runtime.export --check
   deploy/policy/data.json --realm <dev+prod realm files>` into the CI `policy` job as a
   blocking gate** (P7) — today it is only runnable by hand, so a hand-edited realm or
   leftover `svc-*` over-grant ships undetected. Also extend `--check` to cover the
@@ -57,6 +57,14 @@ your delta.
   job guards the JAR/ConfigMap against drift from `src/`. A KC version bump must stay on
   26.2.x (the `scripts` preview mechanism) and re-pin the JAR — verify origin still survives
   `agents→mcp→search→leads`.
+- **Observability + canary surface is shipped — treat it as owned.** The manifests
+  live in `deploy/infrastructure/observability/` (`loki.yaml`, `prometheus.yaml`,
+  `grafana.yaml`, `fluent-bit.yaml`, `tempo.yaml`, `alloy.yaml`, `helmrepos.yaml`,
+  `networkpolicies.yaml`). The browser RUM path (`/telemetry/collect` HTTPRoute → Alloy
+  `faro.receiver` → Tempo/Loki) and the header-routed `frontend-canary` (`build-canary.yml`,
+  `x-fm-canary` secret-token match) are live. **Size observability pods against real
+  WAL/compaction usage:** Tempo needs `limits.memory ≥ 1Gi` / `requests ≥ 512Mi` — 512Mi
+  OOMKills at idle (a Phase-1 lesson that cost an extra rollout).
 - **The naming convention is total:** source dir = compose service = container/DNS
   = GHCR image = API prefix. Preserve it in every manifest and compose file.
 
@@ -67,7 +75,9 @@ your delta.
 - Ship to prod via the `deploy-funnelmanager` skill. (There is no dev-deploy path:
   the GitOps dev-preview mechanism was removed pending an Istio canary for dev pods.)
 - After any policy/realm/scope change, the **first** verification is
-  `fm_runtime.export --check … --realm` (make it CI-blocking, not just local). Keep the
+  `python3 -m fm_runtime.export --check … --realm` (run `python3 -m pip install -e
+  ./libs/fm_runtime` first if the module isn't importable; the `python` alias is absent
+  in this env). Make it CI-blocking, not just local. Keep the
   Roadmap target-state in view (Flagger canary + OTel/Tempo collector + agent-driven E2E
   gate) — new observability/netpol edges must be least-privilege and declarative.
 

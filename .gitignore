@@ -37,3 +37,6 @@ agentsui/dist/
 
 # Throwaway multi-agent workflow runners (operational, not tracked)
 .claude/workflows/
+
+# Playwright MCP session artifacts (snapshots/console logs)
+.playwright-mcp/

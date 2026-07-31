@@ -33,7 +33,7 @@ your delta.
   no OPA). **The built-in default must mirror `deploy/policy/data.json` — change
   them together**, or code and mesh policy drift.
 - **`@anonymous` is the allowlist** (`fm_runtime.anonymous(reason)`). It is
-  exported via `python -m fm_runtime.export`; OPA policy data is generated from it,
+  exported via `python3 -m fm_runtime.export`; OPA policy data is generated from it,
   so **code and policy cannot drift** — regenerate after any change.
 - Dev compose verifies JWTs locally (`FM_JWT_VERIFY=true` + JWKS); issuer pinned to
   the browser URL while token/JWKS dial the `keycloak` container. Keep that split and
@@ -57,9 +57,16 @@ your delta.
   service-local; own only the mechanism.
 
 ## Verify
-Verify against ≥2 backends (principal acceptance, a token exchange, a grant allow/deny)
-and re-run `python -m fm_runtime.export --check … --realm` after any
-annotation/grant/scope change. **You own the base of the pyramid (P11):** add unit tests
+**Floor for every change (even non-authz, e.g. logging/observability):** at minimum
+syntax/import-check the edited module (`python3 -c "import fm_runtime.<mod>"` from
+`libs/fm_runtime/`) before returning — this library ships into all backends, so a silent
+import error breaks the fleet. Then, for authz-touching changes:
+verify against ≥2 backends (principal acceptance, a token exchange, a grant allow/deny)
+and re-run `python3 -m fm_runtime.export --check … --realm` after any
+annotation/grant/scope change (this env has no `python` alias; the module must be
+importable — run inside a backend venv or `python3 -m pip install -e ./libs/fm_runtime`
+first). The canonical invocation is `python3 -m fm_runtime.export …` — documented the same
+way in `agents-`/`search-`/`jobs-`/`mcp-`/`mail-`/`platform-agent`; keep them consistent. **You own the base of the pyramid (P11):** add unit tests
 here for the grants matrix (each `-access`→its prefix; `admin`=service:\*;
 `internal-service`=leads-only; `jobs-internal` scoped to `/internal/jobs`), the
 `@anonymous` allowlist, `TokenBroker` cache keying, segment-boundary grant matching, and

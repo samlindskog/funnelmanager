@@ -27,6 +27,13 @@ project `CLAUDE.md`; this is your delta.
 - **Same-origin serving is what lets it share the hub's Keycloak session** from
   `localStorage` (`fm_oidc_*` keys, mirrored in `src/oidc.ts`). Unauthenticated →
   redirect to Keycloak. Don't break the localStorage key contract or the base path.
+- **Faro telemetry** (`src/telemetry.ts`, gated dev/canary-only in `main.tsx` via
+  `import.meta.env.DEV || import.meta.env.VITE_TELEMETRY === '1'`, `src/vite-env.d.ts`)
+  is **copied verbatim from `frontend/`** — the ONLY intended diff is
+  `app.name: 'mailui'` (verify `diff frontend/src/telemetry.ts mailui/src/telemetry.ts`
+  = one line; prod `npm run build` → 0 `faro`/`grafana` hits in `dist`). This is the
+  sanctioned duplication (P10 counter-example) — re-sync when frontend's canonical
+  changes; never `import` it.
 - It appears on the hub only as a `WEB_APPS` tile (`/mail/`).
 
 ## Verify

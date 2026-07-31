@@ -30,6 +30,13 @@ This is your delta.
   `src/oidc.ts`); unauthenticated → redirect to Keycloak. Don't break the base path or
   the localStorage key contract.
 - Appears on the hub as a `WEB_APPS` tile (`/agents/`) — same tile for every user.
+- **Faro telemetry** (`src/telemetry.ts`, gated dev/canary-only in `main.tsx` via
+  `import.meta.env.DEV || import.meta.env.VITE_TELEMETRY === '1'`, `src/vite-env.d.ts`)
+  is **copied verbatim from `frontend/`** — the only intended diff is
+  `app.name: 'agentsui'` (verify `diff frontend/src/telemetry.ts agentsui/src/telemetry.ts`
+  = one line; prod `npm run build` → 0 `faro`/`grafana` hits in `dist`). Re-sync on
+  canonical change; never import it. `data-testid`s are the maintained Playwright/E2E
+  (P11) contract — keep them unique and inert in prod.
 
 ## Verify
 ```bash
