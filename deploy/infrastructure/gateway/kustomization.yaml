@@ -16,4 +16,3 @@ resources:
   # To add a new canaried service, drop `canary/<svc>-canary.yaml` and the toggle
   # tooling manages its line here automatically.
   - canary/search-canary.yaml
-  - canary/frontend-canary.yaml
