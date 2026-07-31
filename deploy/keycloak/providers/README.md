@@ -29,9 +29,12 @@ on a user exchange yields `fm_origin=user`.
 
 - Keycloak **feature `scripts`** (preview) enabled: `KC_FEATURES=scripts`.
 - This JAR present in `/opt/keycloak/providers/`.
-- dev/prod compose: bind-mount the JAR + `KC_FEATURES=scripts`.
+- dev/prod compose: bind-mount the JAR + `KC_FEATURES=scripts`. **The JAR is a
+  gitignored build intermediate** — run `build.sh` once after cloning so the
+  bind-mounted file exists (a fresh clone has no JAR until you build it).
 - k3s: mounted from the `keycloak-providers` ConfigMap (`binaryData`) +
-  `KC_FEATURES=scripts` env (see `deploy/infrastructure/identity/`).
+  `KC_FEATURES=scripts` env (see `deploy/infrastructure/identity/`). The k3s path
+  needs no local JAR — the committed ConfigMap embeds it.
 
 The Keycloak image is **pinned** (tag + `@sha256` digest) in
 `docker-compose.dev.yml`, `docker-compose.prod.yml`, and
@@ -46,12 +49,14 @@ digest via the quay.io tags API before pinning).
 - `src/fm-origin-passthrough.js` — the mapper script.
 - `src/META-INF/keycloak-scripts.json` — its provider descriptor.
 
-Two artifacts are **generated from `src/` and committed** (they are not
-hand-authored):
+These are **generated from `src/`** (not hand-authored):
 
 - `fm-origin-provider.jar` — a ZIP of `src/`, bind-mounted by dev/prod compose.
+  **GITIGNORED** (a build intermediate; not tracked — the public repo carries no
+  standalone binary). `build.sh` produces it locally/in CI.
 - `../../infrastructure/identity/providers-configmap.yaml` — the same JAR as
-  base64 `binaryData`, mounted in k3s (Flux applies it — GitOps).
+  base64 `binaryData`, mounted in k3s (Flux applies it — GitOps). This IS
+  committed: it is the k3s delivery artifact + the CI reproducibility gate.
 
 ## Rebuilding
 
@@ -61,20 +66,20 @@ Run the build script — the **same** command CI and developers use:
 deploy/keycloak/providers/build.sh
 ```
 
-It rebuilds the JAR from `src/` and regenerates the ConfigMap, then you commit
-both. The build is **byte-reproducible** on any POSIX host (STORED zip, fixed
-1980 timestamp, no zlib dependency), so a fresh build on macOS and on Ubuntu CI
-produce identical bytes.
+It rebuilds the JAR from `src/` (gitignored intermediate) and regenerates the
+ConfigMap, which you commit. The build is **byte-reproducible** on any POSIX host
+(STORED zip, fixed 1980 timestamp, no zlib dependency), so a fresh build on macOS
+and on Ubuntu CI produce identical bytes — which is why the standalone JAR need
+not be tracked (the committed ConfigMap embeds the exact bytes and is CI-verified).
 
 Two CI guardrails enforce this:
 
 - **`keycloak-provider` job** (`.github/workflows/ci.yml`, every PR/push) runs
-  `build.sh` and fails if the committed JAR or ConfigMap differ from a fresh
-  build — so the committed artifacts can never drift from `src/`.
+  `build.sh` and fails if the committed **ConfigMap** differs from a fresh build —
+  so the delivered artifact can never drift from `src/`.
 - **On release** (`build-images.yml` `pin` job, invoked by `release-prod.yml`)
-  CI regenerates and commits both artifacts alongside the
-  `sha-…` image pin, exactly like the image pins. Because the build is
-  deterministic, this is a no-op unless `src/` changed.
+  CI regenerates and commits the **ConfigMap** alongside the `sha-…` image pin.
+  Because the build is deterministic, this is a no-op unless `src/` changed.
 
 If you edit `src/`, run `build.sh` locally and commit all three (`src/`, the JAR,
 the ConfigMap) so CI stays green.

@@ -132,8 +132,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rebuild provider JAR + ConfigMap from src/
         run: deploy/keycloak/providers/build.sh
-      - name: Fail if committed artifacts differ from a fresh build
+      - name: Fail if the delivered ConfigMap differs from a fresh build
+        # The JAR is a gitignored build intermediate; the DELIVERY artifact is the
+        # generated providers-configmap.yaml (Flux ships it, Keycloak mounts it).
+        # A src/ change that isn't reflected in the committed ConfigMap fails here
+        # (the ConfigMap embeds the exact JAR bytes, so this is the reproducibility
+        # gate — the standalone binary no longer needs tracking).
         run: |
-          git diff --exit-code -- \
-            deploy/keycloak/providers/fm-origin-provider.jar \
-            deploy/infrastructure/identity/providers-configmap.yaml
+          git diff --exit-code -- deploy/infrastructure/identity/providers-configmap.yaml

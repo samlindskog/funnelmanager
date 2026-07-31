@@ -58,3 +58,7 @@ id_ed25519.*
 
 # Playwright MCP session artifacts (snapshots/console logs)
 .playwright-mcp/
+
+# Keycloak provider JAR — a deterministic build intermediate (build.sh);
+# the delivery artifact is the generated providers-configmap.yaml.
+deploy/keycloak/providers/fm-origin-provider.jar

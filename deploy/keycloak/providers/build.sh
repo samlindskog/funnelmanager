@@ -6,13 +6,15 @@
 # host (macOS dev + Ubuntu CI): entries are STORED (no deflate, so the output
 # does not depend on the local zlib version), emitted in a fixed order with a
 # fixed 1980-01-01 timestamp. That reproducibility is load-bearing — CI runs
-# this same script and fails the build if the committed fm-origin-provider.jar
-# or providers-configmap.yaml differ from a fresh build (see .github/workflows).
+# this same script and fails the build if the committed providers-configmap.yaml
+# differs from a fresh build (see .github/workflows).
 #
-# Run it after editing anything under src/:
+# The JAR itself is a GITIGNORED build intermediate (not tracked): the delivery
+# artifact is the generated ConfigMap below, which embeds the exact JAR bytes and
+# is what Flux ships + Keycloak mounts. Run this after editing anything under src/:
 #   deploy/keycloak/providers/build.sh
-# then commit the regenerated JAR + ConfigMap. On a release, CI regenerates and
-# commits them for you, exactly like the sha-image pins.
+# then commit the regenerated ConfigMap (the JAR stays untracked). On a release,
+# CI regenerates + commits the ConfigMap for you, like the sha-image pins.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
