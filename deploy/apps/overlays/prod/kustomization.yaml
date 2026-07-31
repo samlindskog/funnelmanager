@@ -13,6 +13,7 @@ resources:
   - ../../base/search-canary
   - ../../base/mailui
   - ../../base/agentsui
+  - ../../base/searchui
   # Data stack (CNPG clusters, mongo, milvus, etcd, minio) — authored under
   # base/data; this overlay just instantiates it in the prod namespace.
   - ../../base/data
@@ -39,6 +40,8 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/mailui
     newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
   - name: ghcr.io/samlindskog/funnelmanager/agentsui
+    newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
+  - name: ghcr.io/samlindskog/funnelmanager/searchui
     newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
   - name: ghcr.io/samlindskog/funnelmanager/backup
     newTag: sha-7192b469fcd3d8cf054b0d555fad51cc71a9c355
@@ -82,7 +85,7 @@ configMapGenerator:
       # under the user's token — the backing service's authz is the source of
       # truth). Setting web-apps replaces the built-in Search+Mail default, so
       # list all three here.
-      - 'web-apps=[{"name":"Search","description":"Apollo person/company search","url":"/search","probe":"/api/search/whoami"},{"name":"Mail","description":"Google Workspace inboxes & sending","url":"/mail/","probe":"/api/mail/whoami"},{"name":"Agents","description":"AI agents that run tasks for you","url":"/agents/","probe":"/api/agents/whoami"}]'
+      - 'web-apps=[{"name":"Search","description":"Apollo person/company search","url":"/search/","probe":"/api/search/whoami"},{"name":"Mail","description":"Google Workspace inboxes & sending","url":"/mail/","probe":"/api/mail/whoami"},{"name":"Agents","description":"AI agents that run tasks for you","url":"/agents/","probe":"/api/agents/whoami"}]'
       - 'admin-apps=[{"name":"Grafana","description":"Metrics, logs & dashboards","url":"https://grafana.x9bc433.win"}]'
 
 patches:

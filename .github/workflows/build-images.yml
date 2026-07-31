@@ -1,4 +1,4 @@
-# Reusable: build+push all six images to GHCR, then pin the resulting
+# Reusable: build+push all eleven images to GHCR, then pin the resulting
 # immutable sha tag into an environment overlay and commit it back to main.
 # Flux (watching main) reconciles the pin and rolls out the new version —
 # the deploy is a git commit, not an SSH push. GitOps for k3s.
@@ -37,7 +37,7 @@ jobs:
     strategy:
       matrix:
         # Python services build from the repo root so their Dockerfiles can
-        # COPY libs/fm_runtime; the two SPA images keep their own contexts.
+        # COPY libs/fm_runtime; the SPA images keep their own contexts.
         include:
           - { service: search,   context: .,        dockerfile: search/Dockerfile }
           - { service: leads,    context: .,        dockerfile: leads/Dockerfile }
@@ -48,6 +48,7 @@ jobs:
           - { service: jobs,     context: .,        dockerfile: jobs/Dockerfile }
           - { service: agents,   context: .,        dockerfile: agents/Dockerfile }
           - { service: agentsui, context: ./agentsui, dockerfile: agentsui/Dockerfile }
+          - { service: searchui, context: ./searchui, dockerfile: searchui/Dockerfile }
           - { service: backup,   context: ./backup, dockerfile: backup/Dockerfile }
     steps:
       - uses: actions/checkout@v4

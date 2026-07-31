@@ -41,6 +41,7 @@ on:
           - frontend
           - mailui
           - agentsui
+          - searchui
           - search
           - leads
           - mail
@@ -138,7 +139,7 @@ jobs:
           case "${{ inputs.service }}" in
             search|leads|mcp|mail|jobs|agents)
               echo "context=." >> "$GITHUB_OUTPUT" ;;
-            frontend|mailui|agentsui)
+            frontend|mailui|agentsui|searchui)
               echo "context=./${{ inputs.service }}" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "Unknown service '${{ inputs.service }}'." >&2; exit 1 ;;

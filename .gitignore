@@ -20,6 +20,8 @@ mailui/node_modules/
 mailui/dist/
 agentsui/node_modules/
 agentsui/dist/
+searchui/node_modules/
+searchui/dist/
 
 # Docker / env
 .env

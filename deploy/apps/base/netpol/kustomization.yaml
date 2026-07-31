@@ -16,6 +16,7 @@ resources:
   - frontend-canary.yaml
   - mailui.yaml
   - agentsui.yaml
+  - searchui.yaml
   - app-db.yaml
   - mail-db.yaml
   - jobs-db.yaml

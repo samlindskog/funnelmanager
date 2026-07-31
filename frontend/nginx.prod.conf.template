@@ -67,6 +67,17 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # Standalone search app (static, built with base /search/).
+    # /api/search/ above still wins by longest prefix.
+    location /search/ {
+        proxy_pass http://searchui:80;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     # Mail backend (Google mailbox archive + send).
     location /api/mail/ {
         proxy_pass http://mail:8004/api/mail/;

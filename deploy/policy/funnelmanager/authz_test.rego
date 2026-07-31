@@ -261,6 +261,29 @@ test_gateway_spa_shell_anonymous if {
 	authz.allow with input as gateway_input("x9bc433.win", "GET", "/login", {})
 }
 
+# The extracted search SPA (searchui) serves its static shell anonymously at
+# /search/, exactly like mailui (/mail/) and agentsui (/agents/). Without the
+# data.json legs (route + caller + anonymous) the sidecar/gateway would deny
+# every visitor before any auth logic. Assert both the route resolution and
+# the anonymous GET allow.
+test_gateway_searchui_shell_resolves if {
+	authz.gateway_service == "searchui" with input as gateway_input("x9bc433.win", "GET", "/search/", {})
+}
+
+test_gateway_searchui_shell_anonymous if {
+	authz.allow with input as gateway_input("x9bc433.win", "GET", "/search/", {})
+}
+
+# Sidecar branch: the ingress gateway workload is an allowed caller for the
+# searchui pod (config.callers.searchui), so the fronted shell request is
+# admitted at the pod's sidecar too (caller_ok + anonymous GET).
+test_searchui_pod_reachable_from_gateway if {
+	authz.allow with input as http_input_noauth(
+		"istio-ingress", "istio-ingress", "prod", "searchui",
+		"GET", "/search/",
+	)
+}
+
 test_gateway_mixed_case_www_host_normalized if {
 	# Host normalization lowercases BEFORE trimming "www." so any
 	# capitalization of the prefix still resolves the environment.

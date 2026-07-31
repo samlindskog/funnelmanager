@@ -23,7 +23,7 @@ set -euo pipefail
 CP=usfr4                              # k3s control plane; flux/kubectl live here
 # Every prod Deployment we wait on during a release (matches prod-health's
 # authoritative workload list: backends + frontends, all 1-replica Deployments).
-SERVICES="frontend mailui agentsui search leads mail mcp jobs agents"
+SERVICES="frontend searchui mailui agentsui search leads mail mcp jobs agents"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $CP"
 # Plain `flux`/`kubectl` on the box fail with "dial tcp [::1]:8080: connection
 # refused" — root's kubeconfig must be passed explicitly.

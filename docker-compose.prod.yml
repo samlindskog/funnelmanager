@@ -453,6 +453,22 @@ services:
     depends_on:
       - agents
 
+  # Standalone search UI — static app served same-origin at /search/ behind the
+  # frontend nginx so it shares the hub's session token.
+  searchui:
+    image: ghcr.io/samlindskog/funnelmanager/searchui:${IMAGE_TAG:-prod}
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      # Baked into /search/config.js at container start (shared OIDC session
+      # with the hub — same public client).
+      FRONTEND_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FRONTEND_OIDC_CLIENT_ID: ${FRONTEND_OIDC_CLIENT_ID:-frontend}
+    expose:
+      - "80"
+    depends_on:
+      - search
+
   frontend:
     image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}
     restart: unless-stopped
@@ -476,6 +492,7 @@ services:
       - mailui
       - agents
       - agentsui
+      - searchui
 
 volumes:
   keycloak_data:

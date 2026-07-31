@@ -9,9 +9,10 @@ Apollo person/company search + enrichment platform with a zero-trust identity ar
 - **Search backend:** FastAPI, SQLAlchemy (Postgres) — search history + Mongo `_id` index; exchanges the caller's token for a leads-audience token on every relay
 - **Leads backend:** FastAPI, MongoDB (Motor) — Apollo People/Organization Search + Complete Info enrichment; internal-only, accepts only leads-audience JWTs (webhooks keep secret-in-path auth)
 - **Mail backend:** FastAPI, SQLAlchemy (dedicated `mail-db` Postgres container) — archives every message from connected Gmail/Workspace mailboxes (any number of domains, OAuth per mailbox), keeps them in sync in the background, and sends mail via the Gmail API
-- **Mail UI:** its own React + TypeScript + Material UI app (`mailui/`, separate container) served same-origin at `/mail/` — appears on the hub as an app tile and shares the hub's session token; no code shared with the search frontend
+- **Mail UI:** its own React + TypeScript + Material UI app (`mailui/`, separate container) served same-origin at `/mail/` — appears on the hub as an app tile and shares the hub's session token; no code shared with the hub frontend (`frontend/`) or the search UI (`searchui/`)
+- **Search UI:** its own React + TypeScript + Vite + Material UI app (`searchui/`, separate container) served same-origin at `/search/` — the search app (searches, streamed ingest/embedding progress, enrichment); extracted from `frontend/`, mirrors `mailui`/`agentsui`; appears on the hub as an app tile and shares the hub's session token
 - **MCP server:** Python MCP SDK (streamable HTTP) — internal-only read-only tools over the leads backend for agents; every tool call carries a per-profile session token that is forwarded upstream
-- **Frontend:** React + TypeScript + Vite + Material UI — nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels) + the search app at `/search` (searches, streamed ingest/embedding progress, enrichment)
+- **Frontend:** React + TypeScript + Vite + Material UI — the **hub only**: nondescript landing (sign in / request access) + post-login hub (profile, apps, admin panels). The search app moved out to the standalone `searchui/` (served at `/search/`)
 - **Deploy:** Docker Compose (interim), nginx, Postgres, MongoDB, Keycloak — migrating to k3s + Istio + OPA (see `deploy/`)
 
 ## Features
@@ -61,7 +62,7 @@ Source is bind-mounted:
 
 - `./search`, `./leads`, `./mail`, `./mcp` → their containers
 - `./libs/fm_runtime` → every backend (editable install; live lib edits)
-- `./frontend`, `./mailui` → their Vite dev containers
+- `./frontend`, `./searchui`, `./mailui` → their Vite dev containers
 - `./frontend/nginx.dev.conf` → `nginx` container
 
 Default login: `admin` / `admin` (seeded by the dev Keycloak realm import;
@@ -145,7 +146,17 @@ npm install
 npm run dev
 ```
 
-Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8000`). In Docker Compose, nginx is the public entry and routes `/api/search` traffic to the search backend.
+Vite proxies `/api` for non-Docker local runs (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8000`). The hub frontend no longer hosts the search app — it moved to the standalone `searchui/` (below). In Docker Compose, nginx is the public entry and routes `/api/search` traffic to the search backend.
+
+### Search UI
+
+```bash
+cd searchui
+npm install
+npm run dev   # serves at http://localhost:5173/search/ (base /search/)
+```
+
+Standalone app — same MUI theme, no shared code with `frontend/` (extracted from it; mirrors `mailui`/`agentsui`). It shares the hub's Keycloak OIDC session via localStorage (`fm_oidc_*` keys; it can also sign in on its own via `/search/callback`) and proxies `/api` to `VITE_API_PROXY_TARGET` (default `http://127.0.0.1:8000`).
 
 ### Mail UI
 
@@ -169,7 +180,7 @@ Standalone app — same MUI theme, no shared code with `frontend/`. It shares th
 | `KEYCLOAK_REALM_FILE` | Realm import file. **Required in prod** (no default — start from `deploy/keycloak/realm-funnelmanager-prod.example.json`); dev compose mounts the tracked dev realm |
 | `FM_SERVICE_NAME`, `FM_JWT_VERIFY`, `FM_OIDC_TOKEN_URL`, `FM_OIDC_JWKS_URL`, `FM_OIDC_CLIENT_ID`, `FM_OIDC_CLIENT_SECRET`, `FM_SERVICE_AUDIENCE`, `FM_ENFORCE_AUDIENCE`, `FM_REQUIRE_PRINCIPAL`, `FM_ENFORCE_GRANTS`, `FM_ROLE_GRANTS`, `FM_ROLE_GRANTS_FILE`, `FM_EXCHANGE_SCOPE_TEMPLATE`, `FM_LOG_LEVEL` | fm_runtime per-service identity config (set by compose/k8s manifests; see `libs/fm_runtime/fm_runtime/settings.py`). `FM_ENFORCE_GRANTS` applies OPA's role-grant rule in-process where no mesh runs (both compose files set it) |
 | `FRONTEND_OIDC_CLIENT_ID` | Public browser client id (default `frontend`); baked with the issuer into `/config.js` at container start |
-| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]` baked into `/config.js`; blank = default Search (`/search`) + Mail (`/mail/`) entries |
+| `WEB_APPS` | JSON list of hub apps `[{"name","description","url"}]` baked into `/config.js`; blank = default Search (`/search/`) + Mail (`/mail/`) entries |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client (Web application type, Gmail API enabled) used by the mail backend to connect mailboxes — scopes `gmail.readonly` + `gmail.send` |
 | `MAIL_OAUTH_REDIRECT_URL` | Authorized redirect URI registered on the OAuth client; blank = derived from `PUBLIC_BASE_URL`, dev default `http://localhost:8000/api/mail/oauth/callback` |
 | `MAIL_DATABASE_URL` | Mail backend Postgres URL (prod compose; the dedicated `mail-db` container) |

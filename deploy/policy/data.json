@@ -14,6 +14,7 @@
       "routes": {
         "/api/leads/webhooks/": "leads",
         "/api/search/": "search",
+        "/search/": "searchui",
         "/api/mail/": "mail",
         "/mail/": "mailui",
         "/api/agents/": "agents",
@@ -37,6 +38,7 @@
           }
         ],
         "frontend": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
+        "searchui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "mailui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "agentsui": [{"ns": "istio-ingress", "sa": "istio-ingress"}],
         "leads": [
@@ -96,6 +98,12 @@
           "methods": ["GET", "HEAD"],
           "prefixes": ["/"],
           "reason": "static SPA shell must load pre-auth (login page)"
+        },
+        {
+          "service": "searchui",
+          "methods": ["GET", "HEAD"],
+          "prefixes": ["/search"],
+          "reason": "static SPA shell must load pre-auth"
         },
         {
           "service": "mailui",

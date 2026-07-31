@@ -5,8 +5,6 @@ import { AuthProvider, useAuth } from './auth'
 import { CallbackPage } from './pages/CallbackPage'
 import { HubPage } from './pages/HubPage'
 import { LandingPage } from './pages/LandingPage'
-import { SearchPage } from './pages/SearchPage'
-import { ProgressCircles, ProgressProvider } from './progress'
 import { theme } from './theme'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -27,32 +25,21 @@ export default function App() {
     <ThemeProvider theme={theme} defaultMode="system" forceThemeRerender>
       <CssBaseline />
       <AuthProvider>
-        <ProgressProvider>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/login" element={<LandingPage />} />
-              <Route path="/callback" element={<CallbackPage />} />
-              <Route
-                path="/"
-                element={
-                  <ProtectedRoute>
-                    <HubPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/search"
-                element={
-                  <ProtectedRoute>
-                    <SearchPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </BrowserRouter>
-          <ProgressCircles />
-        </ProgressProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/login" element={<LandingPage />} />
+            <Route path="/callback" element={<CallbackPage />} />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <HubPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>
   )

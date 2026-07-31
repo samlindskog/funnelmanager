@@ -137,15 +137,12 @@ export function HubPage() {
                     data-testid={`hub-open-${slug(app.name)}`}
                     component="a"
                     href={app.url}
-                    target="_blank"
-                    rel="noopener"
                   >
                     <CardContent>
                       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                         <Typography variant="h6" sx={{ flexGrow: 1 }}>
                           {app.name}
                         </Typography>
-                        <LaunchIcon fontSize="small" color="action" />
                       </Stack>
                       {app.description && (
                         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>

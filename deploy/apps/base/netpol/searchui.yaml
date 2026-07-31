@@ -1,0 +1,23 @@
+# searchui: static SPA — the gateway fetches assets; the pod initiates
+# nothing (DNS via allow-dns, mesh control-plane via allow-istio-control).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: searchui
+  labels:
+    app.kubernetes.io/name: searchui
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: searchui
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 80

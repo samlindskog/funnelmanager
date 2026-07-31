@@ -64,6 +64,15 @@ spec:
         - name: mailui
           namespace: prod
           port: 8080
+    # Standalone search SPA (its nginx does the /search/ SPA fallback).
+    # The search API stays at /api/search/ (rule above); this serves only the
+    # browser bundle under /search/.
+    - matches:
+        - path: { type: PathPrefix, value: /search/ }
+      backendRefs:
+        - name: searchui
+          namespace: prod
+          port: 8080
     # Agents task API (browser-facing, like search/mail).
     - matches:
         - path: { type: PathPrefix, value: /api/agents/ }
@@ -150,6 +159,12 @@ spec:
         - path: { type: PathPrefix, value: /mail/ }
       backendRefs:
         - name: mailui
+          namespace: dev
+          port: 8080
+    - matches:
+        - path: { type: PathPrefix, value: /search/ }
+      backendRefs:
+        - name: searchui
           namespace: dev
           port: 8080
     - matches:
