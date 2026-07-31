@@ -1,0 +1,219 @@
+# Header-routed canary of the `search` BACKEND (Step 3b of the observability
+# program) — the FIRST backend canary. A SEPARATE workload beside stable
+# `search`: the stable Deployment/Service/labels are never touched, so there is
+# no routing gap. It is a faithful copy of stable `search` (same SA, env,
+# ConfigMap/Secret refs, DB URL, LEADS_BACKEND_URL, JWT/OIDC config, container
+# port 8000, probes, resources) so it talks to the stack EXACTLY like prod.
+#
+# Routing (cookie-gated, browser hop only): to reach the canary the browser
+# sets a host-only `fm_canary=<secret>` cookie on x9bc433.win; the
+# canary-cookie-gate EnvoyFilter validates that cookie at the gateway, strips
+# any client-supplied `x-fm-canary` header, and injects the secret `x-fm-canary`
+# token that the app-prod HTTPRoute's /api/search/ canary rule matches. Everyone
+# without the cookie keeps hitting stable `search`.
+#
+# This step wires ONLY the BROWSER hop: browser(cookie) -> canary UI ->
+# canary search -> STABLE leads (search->leads carries the propagated canary
+# marker via fm_runtime and falls back to stable leads because no leads-canary
+# exists). The east-west inbound-to-canary route — an in-mesh VirtualService
+# that routes an internal caller (e.g. mcp->search) to search-canary — is
+# DEFERRED (not needed for the browser proof). When added it MUST match on
+# marker PRESENCE (a regex header match), NOT the secret cookie value, so the
+# secret stays out of mesh VirtualServices; the search-canary NetworkPolicy's
+# gateway-only ingress grows the matching in-mesh source at that time.
+#
+# TRUST MODEL (READ — this is a BACKEND canary, NOT a frontend canary):
+# This pod runs feature-branch BACKEND code under the SAME ServiceAccount ->
+# SAME SPIFFE identity (`spiffe://cluster.local/ns/prod/sa/search`), SAME token
+# audience, and SAME OPA verdict as stable prod `search`, and it talks to the
+# REAL shared datastores — the prod Postgres (`app-db-app`) and, via
+# `LEADS_BACKEND_URL=http://leads:8001`, the real Apollo/Mongo/Milvus path.
+# The frontend-canary justification for reusing the stable SA ("safe because
+# frontend is a pure ingress target: static nginx, no egress, in no
+# caller/azp_allow allowlist") DOES NOT TRANSFER to a backend: `search` DOES
+# egress (it exchanges tokens and calls `leads`) and IS a source in the
+# exchange topology. Same-identity-as-prod is the INTENDED design here — the
+# canary must interact with the stack exactly like prod to be a faithful proof —
+# so this is deliberate, not an oversight. The containment is threefold and
+# explicit:
+#   1. Build ONLY reviewed/trusted refs into the `search-canary` image, AND gate
+#      ACTIVATION (security-review REQUIRED pre-activation control): before this
+#      backend canary is ever activated, the build-canary auto-activate — it
+#      flips replicas 0->1 in the same run from an arbitrary `ref`, with NO
+#      review gate — MUST itself be gated. Add a GitHub `environment:` protection
+#      with required reviewers on the pin/activate job, OR decouple activation
+#      into a separate manual step. This is mandatory BECAUSE a backend canary
+#      attaches FULL prod-search identity + the real prod Postgres + real Apollo
+#      spend (via leads), unlike the static, egress-less frontend canary. (The
+#      build-canary.yml change itself is a later pass — this comment records the
+#      requirement; do not activate until it lands.)
+#   2. The secret `fm_canary` cookie gate: a request reaches this workload only
+#      if it carries the capability-token cookie (an unaware/induced user
+#      cannot be routed here), and the EnvoyFilter strips any forged header.
+#   3. `replicas: 0` by default: nothing serves until a deliberate test scales
+#      it up; the placeholder `canary-PINME` tag is never pulled while idle.
+# Because it shares prod's identity + datastores, treat activation as running
+# unreleased code AS prod search — only ever from a trusted branch.
+#
+# SHARED-DB DDL ACTIVATION HAZARD: on startup this canary runs stable search's
+# UNCONDITIONAL schema DDL (`init_db` — create_all + _drop_column_if_exists + a
+# check-then-ALTER TOCTOU) against the SAME prod Postgres (`app-db`) as stable
+# search. ACTIVATION CONSTRAINT: only activate branches whose schema is
+# COMPATIBLE with stable's — a destructive/renaming migration will alter columns
+# stable search depends on and break prod search for ALL users; and two search
+# pods (stable + canary) starting near-simultaneously can hit the check-then-
+# ALTER TOCTOU. For any schema-changing work, point the canary at a SCRATCH DB
+# instead of the shared one before activating.
+#
+# IDENTITY (why no OPA/data.json change is needed): reuses the STABLE `search`
+# ServiceAccount, so OPA's ext_authz resolves `service := dst.sa = search`,
+# identical to stable search — no grants/azp_allow/audience change, so
+# fm_runtime.export --check is unaffected.
+#
+# IMAGE: the base uses the canary-logical name
+# `ghcr.io/samlindskog/funnelmanager/search-canary`; the prod overlay's
+# `images:` transformer remaps it to the real `.../search` repo with an
+# INDEPENDENT `canary-<sha>` tag (see overlays/prod/kustomization.yaml). The
+# distinct name keeps the stable `search` sha-pin from clobbering the canary tag.
+#
+# ACTIVATION (chicken-egg): the committed default is `replicas: 0` so the
+# placeholder `canary-PINME` tag is never pulled and `apps-prod` stays Ready
+# while idle. The `build-canary.yml` workflow pins a real `canary-<sha>` tag AND
+# scales this up in the same commit — that is how the canary goes live. To
+# retire it, set `replicas: 0` again (a one-line GitOps commit).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search-canary
+  labels:
+    app.kubernetes.io/name: search-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default (see ACTIVATION above). build-canary.yml scales up.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: search-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: search-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      # Reuse the stable search identity (see IDENTITY/TRUST MODEL notes above).
+      serviceAccountName: search
+      # Must land on a worker (never edge/cp); PREFER worker2 — the headroom
+      # node — but stay soft so a full/absent worker2 can't make the canary
+      # unschedulable (falls back to worker1). Both workers share `role=worker`,
+      # so worker2 is singled out by its hostname label.
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # Throwaway variant — drop to the LOWER fm-dev PriorityClass so it is
+      # first-to-evict under the tight fm-quota and never competes with real
+      # prod pods (the prod overlay's blanket fm-prod patch is overridden back
+      # to fm-dev by a search-canary-specific patch, mirroring frontend-canary).
+      priorityClassName: fm-dev
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: search
+          # Canary-logical name; remapped to the real `.../search` repo +
+          # `canary-<sha>` tag by the prod overlay images transformer. Never
+          # `:latest`.
+          image: ghcr.io/samlindskog/funnelmanager/search-canary
+          ports:
+            - name: http
+              containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: search
+            # Per-pod telemetry stamp (step 1): marks emissions from this
+            # workload as the canary variant so dashboards/queries can split
+            # canary vs stable. Does NOT change identity or the service name.
+            - name: FM_DEPLOYMENT_VARIANT
+              value: canary
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            # In-cluster token endpoint (split horizon) — the public issuer
+            # host is unreachable under the namespace's default-deny egress.
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
+            - name: FM_OIDC_CLIENT_ID
+              value: search
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-search
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            # CNPG's generated `app-db-app` secret has key `uri` — use it directly.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-db-app
+                  key: uri
+            - name: LEADS_BACKEND_URL
+              value: http://leads:8001
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: cors-origins

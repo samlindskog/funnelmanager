@@ -1,0 +1,19 @@
+# Distinct Service so the HTTPRoute header-match rule can target the canary
+# explicitly. Its selector is `search-canary`, so the stable `search` Service
+# (selector `search`) never picks up canary pods and vice-versa — this is what
+# guarantees no routing gap on the stable path (and no prod traffic is ever sent
+# to the empty canary Service).
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-canary
+  labels:
+    app.kubernetes.io/name: search-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: search-canary
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

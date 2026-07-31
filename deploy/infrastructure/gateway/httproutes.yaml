@@ -37,6 +37,35 @@ spec:
         - name: leads
           namespace: prod
           port: 8001
+    # Cookie-gated BACKEND search canary (Step 3b) — the browser->search hop.
+    # Same secret `x-fm-canary` token + gate model as the frontend-canary "/"
+    # rule below: the canary-cookie-gate EnvoyFilter always STRIPS any
+    # client-supplied `x-fm-canary` header and re-injects it — set to this SAME
+    # secret — ONLY when the request carries a valid `fm_canary=<secret>` cookie.
+    # At the gateway the injected value IS the secret, so an Exact-secret match
+    # is correct and consistent with the frontend-canary rule (and fails safe to
+    # stable if the filter ever detaches — an external caller without the secret
+    # cannot forge it).
+    #
+    # PRECEDENCE: this rule and the plain /api/search/ rule below both match the
+    # same PathPrefix; the Gateway API tie-break — after (1) path length and
+    # (2) method (both tie) — is (3) the number of HEADER matches: this rule has
+    # one, the plain rule has zero, so this rule ALWAYS wins for correctly-marked
+    # requests REGARDLESS of list order (placed first only for readability).
+    # Everyone without the secret cookie falls through to stable `search`.
+    # Carries the SAME 300s request timeout as the stable rule (NDJSON streams).
+    - matches:
+        - path: { type: PathPrefix, value: /api/search/ }
+          headers:
+            - name: x-fm-canary
+              type: Exact
+              value: "8640c2f1285bf39d0323bbe540e51694"
+      backendRefs:
+        - name: search-canary
+          namespace: prod
+          port: 8000
+      timeouts:
+        request: 300s # NDJSON streams
     - matches:
         - path: { type: PathPrefix, value: /api/search/ }
       backendRefs:

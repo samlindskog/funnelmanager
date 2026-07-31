@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No serviceaccount.yaml: the canary reuses the stable `search` SA (defined in
+# base/search) so its SPIFFE identity — and thus OPA's verdict — is identical to
+# stable search. See deployment.yaml IDENTITY/TRUST MODEL notes (the deferred
+# east-west inbound-to-canary routing note now lives with the routing comment
+# in deployment.yaml).
+resources:
+  - deployment.yaml
+  - service.yaml

@@ -20,6 +20,11 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: search
+        # search-canary reaches leads exactly like stable search (the proof
+        # path is canary-search -> STABLE leads). Added explicitly.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search-canary
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: mcp

@@ -10,6 +10,7 @@ resources:
   - ../../base/agents
   - ../../base/frontend
   - ../../base/frontend-canary
+  - ../../base/search-canary
   - ../../base/mailui
   - ../../base/agentsui
   # Data stack (CNPG clusters, mongo, milvus, etcd, minio) — authored under
@@ -51,6 +52,16 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/frontend-canary
     newName: ghcr.io/samlindskog/funnelmanager/frontend
     newTag: canary-bed99787
+  # Header-routed BACKEND search canary (Step 3b). Same pattern as
+  # frontend-canary above: the base uses the canary-logical name
+  # `.../search-canary`; this entry remaps it to the real `search` repo with an
+  # INDEPENDENT `canary-<sha>` tag, kept separate from the stable `search` entry
+  # so the stable sha-pin never clobbers the canary tag. `canary-PINME` is a
+  # placeholder rewritten by .github/workflows/build-canary.yml (which seds only
+  # `newTag: canary-*`); it is never pulled while the canary is `replicas: 0`.
+  - name: ghcr.io/samlindskog/funnelmanager/search-canary
+    newName: ghcr.io/samlindskog/funnelmanager/search
+    newTag: canary-PINME
 
 generatorOptions:
   disableNameSuffixHash: true
@@ -132,6 +143,15 @@ patches:
   - target:
       kind: Deployment
       name: frontend-canary
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/priorityClassName
+        value: fm-dev
+  # Same fm-dev override for the search backend canary (overrides the blanket
+  # fm-prod patch above for search-canary only).
+  - target:
+      kind: Deployment
+      name: search-canary
     patch: |-
       - op: replace
         path: /spec/template/spec/priorityClassName

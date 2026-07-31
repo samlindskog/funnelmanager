@@ -34,10 +34,14 @@ spec:
           port: 8004
     # search reads /api/mail/contacts/contacted for the exclude_contacted
     # filter (OPA gates on the search->mail exchange edge + mail-access grant).
+    # search-canary shares that path, added explicitly (not a widened selector).
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: search
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search-canary
       ports:
         - protocol: TCP
           port: 8004

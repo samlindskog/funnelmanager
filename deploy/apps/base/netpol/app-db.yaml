@@ -23,6 +23,11 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: search
+        # The search-canary backend canary shares stable search's DB (app-db)
+        # so it behaves like prod. Added explicitly (not a widened selector).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search-canary
       ports:
         - protocol: TCP
           port: 5432

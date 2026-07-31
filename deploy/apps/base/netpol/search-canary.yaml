@@ -1,0 +1,81 @@
+# search-canary: the header-routed BACKEND search canary. NetworkPolicies select
+# by POD LABEL (not ServiceAccount), so the canary needs its own policy even
+# though it shares the stable `search` SA — its pods are labeled `search-canary`
+# and match none of the additive per-pod policies otherwise (default-deny would
+# leave it L3-dead on activation).
+#
+# INGRESS is INTENTIONALLY NARROWER than stable search: gateway-only on 8000.
+# stable search also admits in-mesh callers (jobs, mcp), but the east-west
+# VirtualService that would route an internal caller to the canary is DEFERRED
+# (see search-canary/deployment.yaml), so nothing legitimately calls the canary
+# in-mesh yet. Keeping ingress gateway-only is a defense-in-depth backstop: the
+# cookie gate is enforced only at the edge, and the `search-canary` Service is
+# otherwise freely addressable in-mesh while carrying full prod-search identity —
+# so we do NOT open jobs/mcp ingress here. When east-west routing is added, this
+# policy grows the corresponding source (matched on marker PRESENCE, per the
+# deferred note), never a broadened selector.
+#
+# EGRESS mirrors stable search EXACTLY (leads:8001, mail:8004, app-db:5432,
+# Keycloak:8080) so the canary reaches the same dependencies as prod. DNS
+# (allow-dns) and the mesh control plane / OPA / Tempo (allow-istio-control)
+# come from the blanket podSelector:{} policies; monitoring scrape from
+# allow-monitoring-scrape (part-of label).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-canary
+  labels:
+    app.kubernetes.io/name: search-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: search-canary
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Gateway only (browser->search canary hop). NO jobs/mcp ingress — the
+    # east-west route to the canary is deferred (see above).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads
+      ports:
+        - protocol: TCP
+          port: 8001
+    # mail: search reads the contacted set (GET /api/mail/contacts/contacted)
+    # for the exclude_contacted filter (search->mail exchange edge).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mail
+      ports:
+        - protocol: TCP
+          port: 8004
+    # CNPG labels instance pods with cnpg.io/cluster, not app.kubernetes.io/name.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: app-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080

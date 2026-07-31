@@ -6,6 +6,7 @@ resources:
   - allow-istio-control.yaml
   - allow-monitoring-scrape.yaml
   - search.yaml
+  - search-canary.yaml
   - leads.yaml
   - mail.yaml
   - mcp.yaml
