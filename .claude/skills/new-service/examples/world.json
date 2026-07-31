@@ -1,0 +1,11 @@
+{
+  "name": "world",
+  "port": 8008,
+  "stateful": false,
+  "browser": true,
+  "ui": false,
+  "callers": [
+    {"from": "jobs", "path_prefix": "/internal/jobs"}
+  ],
+  "deps": []
+}

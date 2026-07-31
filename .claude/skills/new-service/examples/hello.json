@@ -1,0 +1,11 @@
+{
+  "name": "hello",
+  "port": 8007,
+  "stateful": true,
+  "browser": false,
+  "ui": false,
+  "callers": [
+    {"from": "mcp"}
+  ],
+  "deps": []
+}
