@@ -31,7 +31,9 @@ your delta.
   locally** — the rego suite runs in CI, so write the tests but state in your report that
   they're CI-verified, not locally run.
 - Fix stale infra prose: there is no `deploy-prod.yml` (it's `release-prod.yml`); the
-  build matrix is **ten** images (not "six") incl. `backup`; the `agents` netpol egress
+  build matrix is **eleven** images (not "six") — the ten deployed services
+  (`frontend searchui mailui agentsui search leads mail mcp jobs agents`) plus
+  `backup`; the `agents` netpol egress
   includes **Keycloak + OpenAI** (not "only mcp + db"); Flux prod `healthChecks` omit
   `agents`/`agentsui` — add them; `jobs/README.md` "not wired" is stale (compose+k3s
   exist). **Posture flag (drift #33):** prod compose runs Keycloak as `start-dev

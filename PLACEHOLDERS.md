@@ -1,9 +1,12 @@
 # PLACEHOLDERS — values you must supply
 
-Domain, Keycloak host, Grafana host, and the LE email are now **filled in**
-for `x9bc433.win` (the ✅ items below). What remains are cluster/credential
-values that cannot live in git — the only literal `REPLACE_` tokens left are
-the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
+Domain, Keycloak host, and Grafana host are now **filled in** for `x9bc433.win`
+(the ✅ items below). A few *decided* values are intentionally **redacted** to the
+gitignored ops config rather than printed here (the repo is public): the LE contact
+email and the node public IPs appear as `<…>` placeholders. What remains genuinely
+unset are cluster/credential values that cannot live in git — the only literal
+`REPLACE_` tokens left are the object-storage bucket names + region
+(`grep -rn REPLACE_ deploy`).
 
 ## Domains & endpoints  ✅ (filled for x9bc433.win)
 
@@ -16,12 +19,14 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
       Grafana OIDC.
 - [x] **Grafana host** → `grafana.x9bc433.win` (own gateway listener/cert/
       route; OPA `grafana_host` bypass; Grafana enforces Keycloak OIDC).
-- [x] **Let's Encrypt email** → `sam@slindskog.net` (cert-manager issuers).
+- [x] **Let's Encrypt email** → `<le-contact-email>` (cert-manager issuers; the
+      real address lives in the gitignored ops config, not this public repo).
 - [ ] **DNS records to create** — `A` for `x9bc433.win`, `kc.x9bc433.win`,
       `grafana.x9bc433.win` → the **edge** node's public IP
-      (`192.81.135.223`). Cloudflare proxy may stay **ON** (DNS-01 validates
-      via the API). Today apex resolves to Cloudflare — repoint origin to
-      edge. (`dev.x9bc433.win` is the compose/usfr3 dev box, not the cluster.)
+      (`<edge-public-ip>` — see the gitignored ops config / your infra records).
+      Cloudflare proxy may stay **ON** (DNS-01 validates via the API). Today apex
+      resolves to Cloudflare — repoint origin to edge. (`dev.x9bc433.win` is the
+      compose/usfr3 dev box, not the cluster.)
 - [ ] **Cloudflare API token** (DNS-01) — Zone:DNS Edit + Zone:Zone Read on
       `x9bc433.win` → `cloudflare-api-token` Secret in `cert-manager`
       (the `secrets` bootstrap stage prompts for it).
@@ -45,10 +50,11 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
 
 ## Cluster (bootstrap — `deploy/bootstrap/README.md`)
 
-- [x] **Node roles/IPs** — cp = `usfr4` (`45.33.110.78`), edge = `usfr3`
-      (`192.81.135.223`), worker1 = `usfr2` (`192.155.85.254`). Private-network
-      IPs + `PRIVATE_IFACE` still needed for the k3s `--node-ip`/`--flannel-iface`
-      flags.
+- [x] **Node roles/IPs** — cp = `usfr4` (`<cp-public-ip>`), edge = `usfr3`
+      (`<edge-public-ip>`), worker1 = `usfr2` (`<worker1-public-ip>`). The real
+      public IPs live in the gitignored ops config, not this public repo — the ssh
+      aliases here are what the tooling uses. Private-network IPs + `PRIVATE_IFACE`
+      are still needed for the k3s `--node-ip`/`--flannel-iface` flags.
 - [ ] **Linode Object Storage** — create two buckets and one access-key pair;
       fill `REPLACE_BUCKET_CNPG`, `REPLACE_BUCKET_LOKI`, `REPLACE_REGION`
       (endpoint `https://<REPLACE_REGION>.linodeobjects.com`) in

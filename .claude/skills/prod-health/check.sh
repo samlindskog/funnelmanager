@@ -23,16 +23,15 @@
 
 set -uo pipefail   # NOT -e: a failed signal must not abort the whole report
 
-CP=usfr4
+# Shared ops config + read-only invocation prefixes (FM_CP_HOST / FM_KUBECONFIG
+# from the gitignored ops env; SSH/K/FLUX). See .claude/skills/_lib/common.sh.
+. "$(cd "$(dirname "$0")/../_lib" && pwd)/common.sh"
+
 URL=https://x9bc433.win
 OVERLAY=deploy/apps/overlays/prod/kustomization.yaml
-# Backends that carry an app container named after the service (for log scans).
+# Backends that carry an app container named after the service (for log scans) —
+# the subset of FM_SERVICES with a scannable app container (frontends have none).
 BACKENDS="search leads mail mcp jobs agents"
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $CP"
-# Plain flux/kubectl on usfr4 fail with "dial tcp [::1]:8080: connection
-# refused" — root's kubeconfig must be passed explicitly. These stay read-only.
-FLUX="sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux"
-K="sudo -n kubectl"
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 OK="✅"; WARN="⚠️"; BAD="❌"
@@ -198,5 +197,5 @@ case "${1:-all}" in
     echo; logs_scan
     echo; echo "############ end — read-only; nothing was changed ############"
     ;;
-  *) sed -n '17,26p' "$0"; exit 1 ;;
+  *) sed -n '15,22p' "$0"; exit 1 ;;   # print the Usage block (lines 15–22)
 esac

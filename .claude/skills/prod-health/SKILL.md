@@ -37,12 +37,14 @@ smoke → pods → drift → flux → ci → logs.
   with `dial tcp [::1]:8080: connection refused`. The driver prefixes every call
   with `sudo -n kubectl …` and `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml
   flux …`.
-- **Images:** `ghcr.io/samlindskog/funnelmanager/<svc>:sha-<sha>`. The live pin
-  is `deploy/apps/overlays/prod/kustomization.yaml` (`images: … newTag: sha-…`),
+- **Images:** `ghcr.io/samlindskog/funnelmanager/<svc>:sha-<sha>`. The build
+  matrix is **eleven** images — the ten deployed services plus `backup` (a batch
+  CronJob image, not a Deployment). The live pin is
+  `deploy/apps/overlays/prod/kustomization.yaml` (`images: … newTag: sha-…`),
   committed by CI as `ci(prod): pin images to sha-… [skip ci]`. Deploys trigger
   on `v*` tags via the `release-prod` workflow.
 - **Workloads:** backends `search leads mail mcp jobs agents`, frontends
-  `frontend mailui agentsui`, all `Deployment`s (1 replica each in prod).
+  `frontend searchui mailui agentsui`, all `Deployment`s (1 replica each in prod).
   StatefulSets: `etcd milvus minio mongo`. Databases are **CNPG** clusters whose
   instance pods are `app-db-1` (search), `mail-db-1`, `jobs-db-1`, `agents-db-1`
   (labelled `cnpg.io/podRole=instance`); Keycloak's DB `kc-db-1` lives in

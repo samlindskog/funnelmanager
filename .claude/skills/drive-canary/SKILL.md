@@ -86,8 +86,13 @@ that verification runs are estimate-first and read-mostly.
   the **very first on-mount fetch may miss its `traceparent`** — the telemetry chunk
   isn't ready yet. Use a **deliberate post-settle click** (wait for the page to be
   idle, then act) so the request you're tracing carries a `traceparent`.
-- **Idle canary → 503.** If `<svc>-canary` is scaled to `replicas:0`, a cookie'd
-  request 503s. Activate the target first (canary skill / `deploy-funnelmanager`).
+- **Idle canary now falls through to STABLE (no longer 503).** With the
+  route/VS toggle (`canary-if-exists-else-stable`), an idle `<svc>-canary`
+  (`replicas: 0`) has no route, so a cookie'd request routes to **stable** — not a
+  503. The trap is the inverse: a "successful" drive against an idle canary is
+  silently exercising stable. Confirm the target is ACTIVE first (`canary` skill
+  `list`, or `deploy-funnelmanager`), and verify `variant="canary"` in the resulting
+  telemetry (via observe-grafana) before trusting the run.
 - **Icon-only buttons may not emit a *named* Faro user-action** (Faro reads the exact
   pointer target). Text controls + backend traces cover the agent's paths; the testid
   still resolves the Playwright selector.

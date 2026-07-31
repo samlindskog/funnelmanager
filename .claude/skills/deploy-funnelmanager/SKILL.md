@@ -22,12 +22,20 @@ All paths are relative to the repo root. The driver is
 `.claude/skills/deploy-funnelmanager/deploy.sh`.
 
 **The model is GitOps — a deploy is a git commit, never an ssh push.**
-`release-prod` (GitHub Actions) builds the images (ten: the nine deployed
-services plus `backup`) to `ghcr.io/samlindskog/funnelmanager/<svc>`, then commits
-a `sha-<sha>` pin into `deploy/apps/overlays/prod/kustomization.yaml` on `main`
-(`[skip ci]`). Flux on the k3s control plane (**usfr4**; usfr2 runs `k3s-agent` —
-the old compose-prod there is retired) reconciles `main` and rolls out the `prod`
-namespace behind Cloudflare at https://x9bc433.win.
+`release-prod` (GitHub Actions) builds the images (**eleven**: the ten deployed
+services — `frontend searchui mailui agentsui search leads mail mcp jobs agents` —
+plus `backup`, a batch CronJob image nothing waits a rollout on) to
+`ghcr.io/samlindskog/funnelmanager/<svc>`, then commits a `sha-<sha>` pin into
+`deploy/apps/overlays/prod/kustomization.yaml` on `main` (`[skip ci]`). Flux on the
+k3s control plane (**usfr4**; usfr2 runs `k3s-agent` — the old compose-prod there is
+retired) reconciles `main` and rolls out the `prod` namespace behind Cloudflare at
+https://x9bc433.win.
+
+The node host/alias, kubeconfig path, and Cloudflare zone id are no longer hardcoded
+in the driver — they come from the gitignored ops env (`$FM_OPS_ENV`, default
+`~/.config/fm-ops/env`) via `.claude/skills/_lib/common.sh`. Copy
+`.claude/skills/_lib/ops-env.example` to `~/.config/fm-ops/env` and set `FM_CF_ZONE_ID`
+(required for `purge`; host + kubeconfig default to the current cluster).
 
 ## Prerequisites
 
@@ -71,8 +79,8 @@ gh run watch <run-id> --exit-status --interval 15  # ~2.5 min
 git pull origin main                               # fetch CI's pin commit
 ssh usfr4 'sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux reconcile source git flux-system -n flux-system'
 ssh usfr4 'sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux reconcile kustomization apps-prod'
-# wait every prod Deployment (frontend mailui agentsui search leads mail mcp jobs agents):
-ssh usfr4 'for d in frontend mailui agentsui search leads mail mcp jobs agents; do sudo -n kubectl -n prod rollout status deploy/$d --timeout=300s; done'
+# wait every prod Deployment (the ten in FM_SERVICES: frontend searchui mailui agentsui search leads mail mcp jobs agents):
+ssh usfr4 'for d in frontend searchui mailui agentsui search leads mail mcp jobs agents; do sudo -n kubectl -n prod rollout status deploy/$d --timeout=300s; done'
 .claude/skills/prod-health/check.sh drift          # running sha == pinned sha on every deploy
 .claude/skills/prod-health/check.sh smoke          # 200 hub + whoami 403 (OPA deny) = healthy
 ```
@@ -89,11 +97,18 @@ ssh usfr4 'for d in frontend mailui agentsui search leads mail mcp jobs agents; 
   driver).
 - **Unauthenticated `/api/*/whoami` returns 403, not 401** — OPA default-deny
   answers before auth challenges. 403 is the healthy signal; don't "fix" it.
+- **`release`/`reconcile` force ONLY `apps-prod`.** The infra Kustomizations
+  (`infra-istio`, `infra-mesh-policies`, `infra-gateway`, `infra-identity`,
+  `infra-observability`, `infra-opa`) are separate and land on Flux's own ~1m poll
+  — a release does **not** force them. When an infra change must apply **now**, name
+  it explicitly: `deploy.sh reconcile infra-gateway infra-mesh-policies` (extra args
+  to `reconcile` are infra kustomizations to also force, after `apps-prod`).
 - **Cloudflare API calls from usfr4 must be `curl -4`.** Over IPv6 the scoped
   token fails with "Cannot use the access token from location". The token
   (secret `cloudflare-api-token`, ns `cert-manager`) is DNS/purge-scoped:
-  `/zones` listing returns auth errors — that's expected; the zone id for
-  x9bc433.win is `8303098fbf6f966ac44b6f2945e9d732`.
+  `/zones` listing returns auth errors — that's expected. The zone id is **not**
+  hardcoded any more: `purge` reads it from `FM_CF_ZONE_ID` in the gitignored ops
+  env (see the ops-env note above), and errors clearly if it is unset.
 - **Static assets are edge-cached (max-age 14400).** After changing favicons
   or other long-cached assets, `deploy.sh purge <url…>` or users see stale
   copies for up to 4h (`cf-cache-status: HIT`).
@@ -109,13 +124,18 @@ ssh usfr4 'for d in frontend mailui agentsui search leads mail mcp jobs agents; 
 | `git push origin vX.Y.Z` rejected / tag exists | you re-used a tag — bump the version; tags are immutable releases |
 | `push` to main rejected (non-fast-forward) | the CI pin commit landed — `git pull` then push |
 | `flux … connection refused` on usfr4 | missing `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml` prefix |
-| Cloudflare "Invalid API Token" / "access token from location" | add `-4` to curl; use the hardcoded zone id |
+| Cloudflare "Invalid API Token" / "access token from location" | add `-4` to curl; ensure `FM_CF_ZONE_ID` is set in the ops env (`purge` errors if unset) |
 | Rollout hangs on one deploy | `ssh usfr4 'sudo -n kubectl -n prod describe pod <pod>'` — usually an image pull or probe failure; `deploy.sh rollback <last-good-tag>` |
 
-## Self-improvement hook
+## Self-improvement hook (advisory)
 
 `.claude/settings.json` registers a `SessionEnd` hook that runs
-`improve-skill.sh`: after any session whose transcript shows deploy activity,
-it spawns a headless `claude -p` (file-edit tools only) to fold new errors,
-workarounds, or commands from that session back into this skill. Log:
-`.claude/skills/deploy-funnelmanager/improve.log`.
+`improve-skill.sh`: after any session whose transcript shows deploy activity, it
+spawns a headless **read-only** `claude -p` (Read/Grep/Glob only) that writes an
+**advisory proposal** to `.claude/agent-runs/pending/<stamp>-deploy-skill.md`. It
+does **not** edit SKILL.md/deploy.sh directly — Edit/Write is permission-blocked in
+that headless context, so the old direct-edit version detected learnings it could
+never apply. The proposal is surfaced next session by the
+`domain-proposals-notice.sh` SessionStart hook for yes/no approval; a human/agent
+then applies the approved edits and moves the file into `.claude/agent-runs/applied/`.
+Log: `.claude/skills/deploy-funnelmanager/improve.log`.

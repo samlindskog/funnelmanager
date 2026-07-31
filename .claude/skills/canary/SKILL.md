@@ -24,6 +24,32 @@ sibling already owns — it does not re-implement flux/kubectl/curl/PromQL:
 
 The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
 
+## Routing classes (how the marker is steered) — ORTHOGONAL to SPA/backend
+
+The driver classifies every canary two independent ways. `svc_class` (spa vs
+backend) decides only whether the extra `--confirm-backend` gate applies.
+`routing_class` decides **HOW** the `x-fm-canary` marker reaches the canary, and
+therefore which toggled artifact + which kustomization the tooling operates on:
+
+- **gateway** — edge-reachable services (`frontend searchui mailui agentsui search
+  mail agents`): a cookie-gated **HTTPRoute** at
+  `deploy/infrastructure/gateway/canary/<svc>-canary.yaml`, toggled in the
+  `infra-gateway` kustomization. It **Exact-matches** the secret `x-fm-canary`
+  header the EnvoyFilter injects, so the secret lives in each such route file (the
+  byte-identical set in PLACEHOLDERS.md). `armed` fails closed if the match is
+  missing/widened.
+- **east-west** — internal-only services (`leads mcp jobs`, never through the
+  ingress gateway): an in-mesh Istio **VirtualService** at
+  `deploy/infrastructure/mesh-policies/canary/<svc>-canary-eastwest.yaml`, toggled
+  in the `infra-mesh-policies` kustomization. It **presence-matches** `x-fm-canary`
+  (regex `.+`, on `gateways: [mesh]`) and **must NOT contain the secret** — the
+  marker is already non-forgeable in-mesh (the gateway strips client-supplied
+  headers and re-injects the secret only for a valid cookie). `armed` fails closed
+  if the secret leaks into a mesh VS or an ingress/`fm-gateway` entry appears in its
+  `gateways:` list. An internal canary is reached by a marked request that
+  **propagates** `x-fm-canary` across hops (e.g. a cookie'd canary `search` whose
+  `search→leads` hop lands on `leads-canary`), never by an edge route.
+
 ## Prerequisites
 
 - `gh` (authed) — dispatches + watches `build-canary.yml`.
@@ -33,10 +59,14 @@ The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
   query is run by the agent via **observe-grafana** (Grafana MCP).
 - The service must already be **ARMED**: its `deploy/apps/base/<svc>-canary/`
   manifests, a `<svc>-canary` entry in
-  `deploy/apps/overlays/prod/kustomization.yaml`, **and** the toggled route
-  `deploy/infrastructure/gateway/canary/<svc>-canary.yaml`. Only `frontend` (SPA)
-  and `search` (backend) are armed today. This driver never scaffolds one — arming
-  a canary is a reviewed trust decision.
+  `deploy/apps/overlays/prod/kustomization.yaml`, **and** its class-specific toggled
+  route (a **gateway** HTTPRoute
+  `deploy/infrastructure/gateway/canary/<svc>-canary.yaml`, or an **east-west**
+  VirtualService `deploy/infrastructure/mesh-policies/canary/<svc>-canary-eastwest.yaml`
+  — see *Routing classes* above). **Four services are armed today:** `frontend` +
+  `searchui` (SPA, gateway), `search` (backend, gateway), and `leads` (backend,
+  east-west/internal). This driver never scaffolds one — arming a canary is a
+  reviewed trust decision.
 
 ## Verbs
 
@@ -47,9 +77,10 @@ The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
 ```
 
 ### `deploy <svc> <ref>` — build + activate a canary
-1. **Requires armed.** If `<svc>` has no `<svc>-canary` base + overlay entry it
-   FAILS with guidance pointing at the template to copy — `frontend-canary` (SPA)
-   or `search-canary` (backend). It does **not** auto-scaffold.
+1. **Requires armed.** If `<svc>` is not fully armed it FAILS with class-aware
+   guidance pointing at the template to copy — `frontend-canary`/`searchui-canary`
+   (SPA, gateway), `search-canary` (backend, gateway), or `leads-canary` (backend,
+   east-west). It does **not** auto-scaffold.
 2. **Drift-check:** diffs `<svc>-canary` against stable `<svc>` and warns on any
    divergence outside the known canary deltas (name, labels/selector, replicas,
    priorityClassName, affinity, image, `FM_DEPLOYMENT_VARIANT`). We deliberately
@@ -80,14 +111,15 @@ The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
    `fm_http_*` series by variant) and **refuses without `--force`**. Run the
    observe-grafana query first; if idle, re-run with `--force`.
 2. Scales down via a **GitOps commit** — seds `replicas: 1→0` in
-   `deploy/apps/base/<svc>-canary/deployment.yaml` **and removes the
-   `canary/<svc>-canary.yaml` line from the gateway kustomization** (the
-   canary-if-exists-else-stable route toggle: no active canary ⇒ no route ⇒ the
-   `x-fm-canary` cookie falls through to stable instead of 503'ing a zero-endpoint
-   canary Service), commits `[skip ci]`, pushes `main`, and delegates the
-   reconcile to deploy-funnelmanager. `build-canary` re-adds the route line on the
-   next activation. The `canary-<sha>` pin stays in the overlay but is never
-   pulled while idle.
+   `deploy/apps/base/<svc>-canary/deployment.yaml` **and removes its class-specific
+   route/VS line from the matching kustomization** (the gateway
+   `canary/<svc>-canary.yaml` HTTPRoute from `infra-gateway`, or the east-west
+   `canary/<svc>-canary-eastwest.yaml` VirtualService from `infra-mesh-policies`) —
+   the canary-if-exists-else-stable toggle: no active canary ⇒ no route/VS ⇒ the
+   `x-fm-canary` marker falls through to stable instead of 503'ing a zero-endpoint
+   canary Service. Commits `[skip ci]`, pushes `main`, and delegates the reconcile
+   to deploy-funnelmanager. `build-canary` re-adds the line on the next activation.
+   The `canary-<sha>` pin stays in the overlay but is never pulled while idle.
 
 ### `list` / `status`
 Shows every `<svc>-canary` workload: current replicas (ACTIVE vs idle), the
@@ -107,12 +139,20 @@ should run for last-seen canary traffic.
   the line deletes the HTTPRoute); the Deployment lives in `apps-prod`, which
   `dependsOn: infra-gateway` — so on retire the route is pruned before the pods
   scale down (no 503 window), and on activate the route may briefly precede ready
-  endpoints (transient, cookie holders only).
-- **Armed today:** `frontend-canary` (SPA, static, egress-less — no `--confirm-backend`)
-  and `search-canary` (the first backend canary — full prod-search identity, real
-  prod Postgres + Apollo path via leads; treat activation as running unreleased
-  code AS prod search). Both ship all four arming legs: base Deployment, overlay
-  images entry, netpol, and the `canary/<svc>-canary.yaml` route.
+  endpoints (transient, cookie holders only). **East-west canaries follow the
+  identical toggle** with the VirtualService line in the `infra-mesh-policies`
+  kustomization instead of the gateway one (e.g. `leads`), so an idle internal
+  canary likewise has no VS and marked in-mesh traffic falls through to stable.
+- **Armed today (4) — active vs idle.** `searchui-canary` (SPA, gateway),
+  `search-canary` (backend, gateway — full prod-search identity, real prod Postgres
+  + Apollo path via leads; treat activation as running unreleased code AS prod
+  search), and `leads-canary` (backend, **east-west/internal** — no edge route;
+  reached only in-mesh via a marked `search→leads` hop) are **ACTIVE** in git today
+  (`replicas: 1`, route/VS listed in its kustomization). `frontend-canary` (SPA,
+  gateway, egress-less — no `--confirm-backend`) is armed but **idle**
+  (`replicas: 0`, no route line). Each ships its arming legs: base Deployment,
+  overlay images entry, netpol, and its class-specific route/VS (a gateway
+  HTTPRoute, or the east-west VirtualService for `leads`).
 - **The cookie is the only way in.** Reaching a canary needs the host-only
   `fm_canary=<secret>` cookie on `x9bc433.win`; the EnvoyFilter strips any
   client-supplied `x-fm-canary` header, so it isn't forgeable. Rotating the token

@@ -20,15 +20,11 @@
 
 set -euo pipefail
 
-CP=usfr4                              # k3s control plane; flux/kubectl live here
-# Every prod Deployment we wait on during a release (matches prod-health's
-# authoritative workload list: backends + frontends, all 1-replica Deployments).
-SERVICES="frontend searchui mailui agentsui search leads mail mcp jobs agents"
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $CP"
-# Plain `flux`/`kubectl` on the box fail with "dial tcp [::1]:8080: connection
-# refused" — root's kubeconfig must be passed explicitly.
-FLUX="sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux"
-K="sudo -n kubectl"
+# Shared ops config + invocation prefixes (FM_CP_HOST / FM_KUBECONFIG /
+# FM_CF_ZONE_ID from the gitignored ops env, plus SSH/K/FLUX and the FM_SERVICES
+# rollout-wait list — the ten deployed 1-replica Deployments). See
+# .claude/skills/_lib/common.sh + ops-env.example.
+. "$(cd "$(dirname "$0")/../_lib" && pwd)/common.sh"
 
 cd "$(git rev-parse --show-toplevel)"
 die() { echo "error: $*" >&2; exit 1; }
@@ -48,15 +44,26 @@ preflight() {
 }
 
 reconcile() {
-  echo "--- forcing Flux reconcile on $CP (otherwise it polls within ~1m) ---"
+  echo "--- forcing Flux reconcile on $FM_CP_HOST (otherwise it polls within ~1m) ---"
   $SSH "$FLUX reconcile source git flux-system -n flux-system 2>&1 | tail -2
         $FLUX reconcile kustomization flux-system -n flux-system 2>&1 | tail -2
         $FLUX reconcile kustomization apps-prod 2>&1 | tail -2"
+  # A release/reconcile forces ONLY apps-prod. The infra Kustomizations
+  # (infra-istio, infra-mesh-policies, infra-gateway, infra-identity,
+  # infra-observability, infra-opa) are SEPARATE and land on Flux's own ~1m poll —
+  # they are NOT forced here. When an infra change must apply NOW, name it/them:
+  #   deploy.sh reconcile infra-gateway infra-mesh-policies
+  if [ "$#" -gt 0 ]; then
+    echo "--- also forcing infra kustomization(s): $* ---"
+    for kust in "$@"; do
+      $SSH "$FLUX reconcile kustomization $kust 2>&1 | tail -2"
+    done
+  fi
 }
 
 rollout() {
   echo "--- waiting for prod rollout ---"
-  $SSH "for d in $SERVICES; do $K -n prod rollout status deploy/\$d --timeout=300s 2>&1 | tail -1; done"
+  $SSH "for d in $FM_SERVICES; do $K -n prod rollout status deploy/\$d --timeout=300s 2>&1 | tail -1; done"
 }
 
 # Post-rollout verification — delegated to prod-health (running-sha-vs-pin drift
@@ -110,18 +117,20 @@ case "$cmd" in
     watch_run
     ;;
   watch)     watch_run ;;
-  reconcile) reconcile; rollout ;;
+  reconcile) shift; reconcile "$@"; rollout ;;   # extra args = infra kustomizations to also force
   rollout)   rollout ;;
   smoke)     health smoke ;;
   purge)
     shift; [ $# -gt 0 ] || die "usage: deploy.sh purge <full-url> [...]"
+    [ -n "$FM_CF_ZONE_ID" ] || die "FM_CF_ZONE_ID is unset — set it in the ops env (\$FM_OPS_ENV, default ~/.config/fm-ops/env; see .claude/skills/_lib/ops-env.example)"
     files=$(printf '"%s",' "$@"); files="[${files%,}]"
     # Token lives in the cluster; it is purge/DNS-scoped and rejects requests
     # arriving over IPv6, hence curl -4. Zone lookup may also fail auth — the
-    # known zone id for x9bc433.win is used directly.
+    # zone id is supplied via the gitignored ops env (FM_CF_ZONE_ID) and used
+    # directly rather than looked up.
     $SSH "TOKEN=\$($K -n cert-manager get secret cloudflare-api-token -o jsonpath='{.data.api-token}' | base64 -d)
           curl -4 -sS -m 10 -X POST -H \"Authorization: Bearer \$TOKEN\" -H 'Content-Type: application/json' \
-            'https://api.cloudflare.com/client/v4/zones/8303098fbf6f966ac44b6f2945e9d732/purge_cache' \
+            'https://api.cloudflare.com/client/v4/zones/$FM_CF_ZONE_ID/purge_cache' \
             --data '{\"files\":$files}' | python3 -m json.tool"
     ;;
   *) sed -n '11,19p' "$0"; exit 1 ;;

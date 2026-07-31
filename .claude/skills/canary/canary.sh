@@ -26,7 +26,10 @@
 
 set -uo pipefail   # NOT -e: a failed remote read must not abort list/status
 
-CP=usfr4
+# Shared ops config + invocation prefixes (FM_CP_HOST from the gitignored ops
+# env; SSH/K/FLUX; the fm_canary_secret helper). See .claude/skills/_lib/common.sh.
+. "$(cd "$(dirname "$0")/../_lib" && pwd)/common.sh"
+
 BASE=deploy/apps/base
 OVERLAY=deploy/apps/overlays/prod/kustomization.yaml
 GW_KUSTOMIZATION=deploy/infrastructure/gateway/kustomization.yaml
@@ -42,11 +45,6 @@ EW_CANARY_DIR=deploy/infrastructure/mesh-policies/canary
 COOKIE_GATE=deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml
 DEPLOY=.claude/skills/deploy-funnelmanager/deploy.sh
 HEALTH=.claude/skills/prod-health/check.sh
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $CP"
-# Plain flux/kubectl on usfr4 fail with "dial tcp [::1]:8080: connection
-# refused" — root's kubeconfig must be passed explicitly (baked into the
-# sibling drivers too).
-K="sudo -n kubectl"
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 OK="✅"; WARN="⚠️"; BAD="❌"
@@ -147,9 +145,9 @@ ew_gateways_only_mesh() {
   ' "$1"
 }
 
-# The canary secret, read from its canonical source (the EnvoyFilter Lua) so it
-# is never re-hardcoded here. Empty if the filter/token can't be found.
-canary_secret() { grep -oE 'secret = "[0-9a-fA-F]+"' "$COOKIE_GATE" 2>/dev/null | grep -oE '[0-9a-fA-F]{8,}' | head -1; }
+# The canary secret, read from its canonical source (the EnvoyFilter Lua) via the
+# shared _lib helper so it is never re-hardcoded here. Empty if not found.
+canary_secret() { fm_canary_secret "$COOKIE_GATE"; }
 
 # Armed = ALL legs of the canary contract present on main (mirrors the
 # build-canary.yml preflight guard): the base Deployment + the overlay images
@@ -267,8 +265,15 @@ idle_gate() {
   local svc=$1 force=$2
   echo "--- idle-check for ${svc}-canary ---"
   echo "Run this via observe-grafana (Grafana MCP) over the last ~30m — expect NO rows/samples:"
-  echo "    LogQL : {service_name=\"$svc\"} | json | variant=\"canary\""
-  echo "    PromQL: sum(rate(fm_http_requests_total{service=\"$svc\",variant=\"canary\"}[30m]))"
+  # The LOKI query is the authoritative idle-proof: the per-pod FM_DEPLOYMENT_VARIANT
+  # already stamps `variant` on every canary log line today, so an empty result here
+  # genuinely means no canary traffic.
+  echo "    LogQL : {service_name=\"$svc\"} | json | variant=\"canary\"   (authoritative idle-proof — works today)"
+  # The PromQL `variant` label on fm_http_* is being ADDED in a parallel workstream;
+  # until those images redeploy the selector may match NOTHING (an empty result is
+  # then NOT proof of idle). Keep it — it starts working post-release — but rely on
+  # the Loki query above for the actual idle decision.
+  echo "    PromQL: sum(rate(fm_http_requests_total{service=\"$svc\",variant=\"canary\"}[30m]))   (may be EMPTY until the fm_http_* variant label ships — not idle-proof yet)"
   if [ "$force" = 1 ]; then
     echo "$WARN --force set: skipping idle proof, scaling ${svc}-canary to 0 anyway."
     return 0
@@ -441,8 +446,11 @@ case "$cmd" in
     done
     echo
     echo "For last-seen canary traffic, run observe-grafana (Grafana MCP) per workload:"
-    echo "    LogQL : {service_name=\"<svc>\"} | json | variant=\"canary\"   (last ~30m)"
-    echo "    PromQL: sum(rate(fm_http_requests_total{variant=\"canary\"}[30m])) by (service)"
+    echo "    LogQL : {service_name=\"<svc>\"} | json | variant=\"canary\"   (last ~30m; works today)"
+    # NOTE: the fm_http_* `variant` label is being added in a parallel workstream;
+    # until those images redeploy this PromQL may return nothing. Prefer the Loki
+    # `variant` field (above) for a definitive idle/traffic read today.
+    echo "    PromQL: sum(rate(fm_http_requests_total{variant=\"canary\"}[30m])) by (service)   (may be EMPTY until the variant label ships)"
     ;;
 
   *) sed -n '18,21p' "$0"; exit 1 ;;

@@ -1,0 +1,30 @@
+# funnelmanager operator ops config — TEMPLATE (tracked). The REAL file is
+# gitignored because it lives outside the repo.
+#
+# Set it up once:
+#   mkdir -p ~/.config/fm-ops
+#   cp .claude/skills/_lib/ops-env.example ~/.config/fm-ops/env
+#   chmod 600 ~/.config/fm-ops/env
+#   $EDITOR ~/.config/fm-ops/env      # fill in FM_CF_ZONE_ID (required)
+#
+# ~/.config/fm-ops/env lives OUTSIDE the repo, so git never sees it (the repo is
+# public — do not commit real cluster values). Point elsewhere with
+# FM_OPS_ENV=/path/to/env if you keep it in another location.
+#
+# `.claude/skills/_lib/common.sh` sources this file and derives the SSH / K / FLUX
+# prefixes the deploy-funnelmanager, prod-health, and canary drivers use. Anything
+# left unset here falls back to the common.sh defaults (except FM_CF_ZONE_ID,
+# which has none).
+
+# k3s control-plane ssh alias (from ~/.ssh/config). Flux + kubectl run here.
+# Default if unset: usfr4.
+FM_CP_HOST=usfr4
+
+# Root kubeconfig path on the control plane. Bare flux/kubectl fail without it
+# ("dial tcp [::1]:8080: connection refused"). Default if unset: the k3s path below.
+FM_KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# Cloudflare zone id for the public app host — used ONLY by `deploy.sh purge`
+# (edge cache purge). REQUIRED: no default; the purge verb errors without it.
+# Find it on the Cloudflare dashboard (Overview → API → Zone ID).
+FM_CF_ZONE_ID=your-cloudflare-zone-id
