@@ -1,0 +1,124 @@
+# observe-grafana — query cookbook
+
+Canonical LogQL / TraceQL / PromQL joins for the funnelmanager telemetry stack, to
+hand to the Grafana MCP (`mcp__grafana__*`). **Run `mcp__grafana__list_datasources`
+first** to resolve live datasource uids (Loki is usually `loki`; Tempo/Prometheus
+discover live). **Run `mcp__grafana__query_loki_stats` before any broad Loki query**,
+and bound every query to a window (`now-15m` default; UTC).
+
+## Telemetry shape (ground truth — the labels these joins rely on)
+
+- **Backend logs** (`fm_runtime` structured JSON, one stream per service:
+  `{service_name="search"}`, `leads`, `mail`, `mcp`, `jobs`, `agents`):
+  - Step-1 stamps `variant` on **every** log line (`stable` | `canary`, from the
+    per-pod `FM_DEPLOYMENT_VARIANT`).
+  - Canary-request lines additionally carry `canary: true` (presence-only marker,
+    propagated across every internal hop via the `x-fm-canary` trace header).
+  - Every request-scoped line carries the `traceparent` (hence a `trace_id`).
+- **Faro RUM** (browser, canary-only) lands under `{service_name="faro"}`:
+  - `event_data_userActionName=<testid>` — the Phase-3 `data-testid` of the clicked
+    control (= Faro user-action name = Playwright selector).
+  - `app_version=canary-<sha>` — canary bundle version (stable prod ships no Faro).
+- **Tempo** — mesh spans (1% baseline) + Faro-originated `sampled=1` canary traces,
+  keyed by `trace_id`. Loki `derivedFields` link `trace_id` → Tempo;
+  `tracesToLogs` links a span back to its Loki lines.
+- **Prometheus** — `fm_http_*` request series; split by `variant` where present.
+
+---
+
+## Loki (LogQL)
+
+### Faro user-action by testid
+Find the RUM event a specific labeled control emitted:
+```logql
+{service_name="faro"} |= "<testid>"
+```
+Narrower (parse then match the action-name field):
+```logql
+{service_name="faro"} | logfmt | event_data_userActionName="<testid>"
+```
+
+### Canary RUM only
+All browser telemetry from a canary bundle (excludes any stray stable data):
+```logql
+{service_name="faro"} | logfmt | app_version=~"canary-.*"
+```
+
+### Backend logs for a canary request
+By the presence marker, then optionally by variant label:
+```logql
+{service_name="search"} | json | canary="true"
+```
+```logql
+{service_name="search"} | json | variant="canary"
+```
+Swap `search` for any backend (`leads` `mail` `mcp` `jobs` `agents`) to follow the
+request across hops — the `canary` marker propagates on every internal call.
+
+### Backend logs by trace id
+The workhorse pivot — every service line for one request, by its `trace_id`:
+```logql
+{service_name="<svc>"} |= "<trace_id>"
+```
+Across all backends at once (bound the window; run stats first):
+```logql
+{service_name=~"search|leads|mail|mcp|jobs|agents"} |= "<trace_id>"
+```
+
+### Error/critical lines for a canary (promotion gate input)
+```logql
+{service_name=~"search|leads|mail|mcp|jobs|agents"} | json | variant="canary" | level=~"error|critical"
+```
+
+---
+
+## Tempo (TraceQL)
+
+### Fetch a trace by id
+```traceql
+{ trace:id = "<trace_id>" }
+```
+Use `mcp__grafana__query_tempo` (discover the exact tool name from the proxied Tempo
+tools) with the Tempo datasource uid from `list_datasources`.
+
+### The pivots (use the built-in links, don't re-query by text)
+- **Loki → Tempo:** a backend log line's `trace_id` is a Loki **derivedField** — it
+  resolves straight to the Tempo trace. Get the `trace_id` from the LogQL join above,
+  then open the trace.
+- **Tempo → Loki (`tracesToLogs`):** from any span, pivot back to the Loki lines for
+  that `trace_id` / service — this is how you go span → the structured log detail the
+  span doesn't carry.
+- **Metric spike → trace:** Prometheus **exemplars** on `fm_http_*` carry a
+  `trace_id`; jump from a latency/error spike to the exact slow trace, then to its
+  logs.
+
+Expected canary shape: a single trace spanning browser (Faro) → istio-ingress →
+`<svc>-canary` → stable upstreams, sampled because the canary SPA originated
+`sampled=1` (honor-incoming-sampled at the 1% mesh baseline).
+
+---
+
+## Prometheus (PromQL)
+
+### Success-rate by variant (promotion gate)
+Split the `fm_http_*` request counter by `variant` where the label exists:
+```promql
+sum by (variant) (rate(fm_http_requests_total{code!~"5.."}[5m]))
+  / sum by (variant) (rate(fm_http_requests_total[5m]))
+```
+
+### P99 latency by variant
+```promql
+histogram_quantile(0.99,
+  sum by (le, variant) (rate(fm_http_request_duration_seconds_bucket[5m])))
+```
+
+### Canary vs stable, one service
+```promql
+sum by (variant) (rate(fm_http_requests_total{service="search"}[5m]))
+```
+
+Confirm the exact metric names with `mcp__grafana__list_prometheus_metric_names` /
+`...metric_metadata` (the `fm_http_*` family) and the available label values with
+`...label_values` before charting — `variant` is only present where step-1 emitted
+it, so a missing split means the series predates the label or the pod isn't a canary.
