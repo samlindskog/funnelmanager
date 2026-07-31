@@ -1,31 +1,47 @@
-# Build a TELEMETRY-ENABLED canary image of an SPA from an arbitrary feature
-# branch, push it as `<service>:canary-<shortsha>`, then pin+activate it in the
-# prod canary Deployment on main. Flux reconciles the commit and the canary
-# goes live for requests carrying the secret `x-fm-canary` token (see
-# deploy/infrastructure/gateway/httproutes.yaml). Mirrors build-images.yml's
-# auth/login/buildx + sed-commit pin pattern; scoped to the SPA services, which
-# accept `ARG VITE_TELEMETRY` (backends would ignore it).
+# Build a TELEMETRY-ENABLED canary image of ANY deployable service from an
+# arbitrary feature branch, push it as `<service>:canary-<shortsha>`, then
+# pin+activate it in that service's prod canary Deployment on main. Flux
+# reconciles the commit and the canary goes live for requests carrying the
+# secret `x-fm-canary` token (see deploy/infrastructure/gateway/httproutes.yaml).
+# Mirrors build-images.yml's auth/login/buildx + commit-pin pattern.
 #
-# Reference pattern: only `frontend` has canary manifests today
-# (deploy/apps/base/frontend-canary/*). To canary mailui/agentsui later, add
-# their `<svc>-canary` base + overlay images entry, then this workflow drives
-# them unchanged.
+# General over every deployed service (NOT `backup` — it's a batch job, not a
+# Deployment). A SPA canary bakes the Faro RUM bootstrap into its bundle via
+# `ARG VITE_TELEMETRY`; a BACKEND canary is the SAME image build as stable —
+# same context/Dockerfile — just built from a feature ref and tagged
+# `canary-<sha>` instead of `sha-<sha>`. Backends don't declare
+# `ARG VITE_TELEMETRY`/`APP_VERSION` and just emit a harmless "unconsumed ARG"
+# warning, exactly like build-images.yml already does with APP_VERSION.
+#
+# Reference template: only `frontend` has canary manifests today
+# (deploy/apps/base/frontend-canary/*). To canary another service, add its
+# `<svc>-canary` base + overlay images entry (step 3 of the canary program),
+# then this workflow drives it unchanged — the pin job's manifest-existence
+# guard fails closed until those manifests land.
 name: build-canary
 
 on:
   workflow_dispatch:
     inputs:
       service:
-        description: SPA service to build as a canary.
+        description: Service to build as a canary.
         required: true
         default: frontend
         type: choice
-        # frontend ONLY for now: mailui/agentsui need `ARG VITE_TELEMETRY` in
-        # their Dockerfile AND `<svc>-canary` manifests (base + overlay images
-        # entry) before they can be canaried — otherwise this would silently
-        # build a non-telemetry image. Add them here once both exist.
+        # Every deployed service (a Deployment) can be canaried. `backup` is
+        # excluded (it's a batch job, no Deployment / canary manifests). A
+        # service still needs its `<svc>-canary` manifests (base + overlay
+        # images entry) before the pin job will activate it.
         options:
           - frontend
+          - mailui
+          - agentsui
+          - search
+          - leads
+          - mail
+          - mcp
+          - jobs
+          - agents
       ref:
         description: Git branch or SHA to build the canary image from.
         required: true
@@ -37,7 +53,37 @@ env:
   IMAGE_PREFIX: ghcr.io/${{ github.repository }}
 
 jobs:
+  preflight:
+    # FAIL CLOSED before anything is built or pushed: refuse to build a
+    # `<svc>-canary` image for a service that isn't ARMED on main. The canary
+    # manifests (base Deployment + overlay `<svc>-canary` images entry) are a
+    # deliberate trust decision — until BOTH land on main, a canary image must
+    # never reach the registry (registry-poisoning guard; also stops an
+    # un-routable image that would only ImagePullBackOff). Checks out MAIN, not
+    # the feature `ref`, because the manifests live on main.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Assert canary manifests exist on main
+        run: |
+          set -euo pipefail
+          SVC="${{ inputs.service }}"
+          dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
+          overlay="deploy/apps/overlays/prod/kustomization.yaml"
+          if [ ! -f "$dep" ]; then
+            echo "::error::No canary base manifest for '$SVC' (expected $dep) — arm it on main first."
+            exit 1
+          fi
+          if ! grep -q "funnelmanager/${SVC}-canary" "$overlay"; then
+            echo "::error::No '${SVC}-canary' images entry in $overlay — arm it on main first."
+            exit 1
+          fi
+          echo "Preflight OK: '$SVC' is armed (base manifest + overlay entry present on main)."
+
   build:
+    needs: preflight
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,6 +96,25 @@ jobs:
           ref: ${{ inputs.ref }}
       - id: rev
         run: echo "shortsha=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+      - id: ctx
+        # Resolve build context + Dockerfile per service, mirroring
+        # build-images.yml's matrix: Python backends build from the repo root so
+        # their Dockerfiles can COPY libs/fm_runtime; the SPA images keep their
+        # own self-contained build context.
+        # KEEP THE SERVICE LIST BELOW IN SYNC with the `service` input's
+        # `options:` above — workflow_dispatch requires STATIC choice options,
+        # so the enumeration can't be derived from a single source here.
+        run: |
+          set -euo pipefail
+          case "${{ inputs.service }}" in
+            search|leads|mcp|mail|jobs|agents)
+              echo "context=." >> "$GITHUB_OUTPUT" ;;
+            frontend|mailui|agentsui)
+              echo "context=./${{ inputs.service }}" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "Unknown service '${{ inputs.service }}'." >&2; exit 1 ;;
+          esac
+          echo "dockerfile=${{ inputs.service }}/Dockerfile" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -58,12 +123,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
-          # SPA images keep their own self-contained build context.
-          context: ./${{ inputs.service }}
-          file: ${{ inputs.service }}/Dockerfile
+          context: ${{ steps.ctx.outputs.context }}
+          file: ${{ steps.ctx.outputs.dockerfile }}
           push: true
-          # VITE_TELEMETRY=1 bakes the Faro RUM bootstrap into the bundle;
+          # VITE_TELEMETRY=1 bakes the Faro RUM bootstrap into an SPA bundle;
           # APP_VERSION stamps the exact canary tag so RUM version == image tag.
+          # Passed UNIFORMLY to every service — backends don't declare these
+          # ARGs and just emit a harmless "unconsumed ARG" warning (identical to
+          # build-images.yml's APP_VERSION handling).
           build-args: |
             VITE_TELEMETRY=1
             APP_VERSION=canary-${{ steps.rev.outputs.shortsha }}
@@ -90,18 +157,48 @@ jobs:
           SVC="${{ inputs.service }}"
           overlay="deploy/apps/overlays/prod/kustomization.yaml"
           dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
+          # Guard BOTH legs of the canary contract (preflight already asserted
+          # this on main; re-assert here — this is the job that actually WRITES).
           if [ ! -f "$dep" ]; then
-            echo "No canary manifests for '$SVC' (expected $dep)." >&2
-            echo "Only 'frontend' has canary manifests today — see build-canary.yml header." >&2
+            echo "No canary base manifest for '$SVC' (expected $dep)." >&2
+            echo "Add its <svc>-canary base + overlay images entry first — see build-canary.yml header." >&2
             exit 1
           fi
-          # Rewrite ONLY the canary image entry (newTag currently canary-*);
-          # the stable prod pin job seds only newTag: sha-*, so they never
-          # collide. (Single canary entry today; scope by service when more
-          # canaries are added.)
-          sed -i -E "s/(^[[:space:]]*newTag:[[:space:]]*)canary-.*/\1$TAG/" "$overlay"
-          # Activate: the committed default is replicas: 0 (idle so the PINME
-          # placeholder is never pulled). Scale to 1 to make the canary live.
+          if ! grep -q "funnelmanager/${SVC}-canary" "$overlay"; then
+            echo "No '${SVC}-canary' images entry in $overlay." >&2
+            echo "Add its <svc>-canary base + overlay images entry first — see build-canary.yml header." >&2
+            exit 1
+          fi
+          # Rewrite ONLY this service's canary image entry — the `images:` block
+          # whose name is `.../${SVC}-canary`. A blanket `s/newTag: canary-.*/`
+          # would clobber EVERY canary once more than one is live, so scope to
+          # the name block. Done with awk (not yq) to preserve the overlay's
+          # extensive explanatory comments, which yq would strip on rewrite.
+          # awk exits 3 if it never matched a newTag inside the block, so a
+          # silent no-op (entry missing, or a differently-quoted `name:` the
+          # block regex can't hit) FAILS CLOSED here — BEFORE activation —
+          # instead of flipping replicas onto an unrewritten `canary-PINME`
+          # placeholder and ImagePullBackOff'ing in prod while CI says success.
+          if awk -v svc="$SVC" -v tag="$TAG" '
+            /^[[:space:]]*- name:/ {
+              inblock = ($0 ~ ("funnelmanager/" svc "-canary$")) ? 1 : 0
+            }
+            inblock && /^[[:space:]]*newTag:/ {
+              sub(/newTag:.*/, "newTag: " tag); inblock = 0; matched = 1
+            }
+            { print }
+            END { if (!matched) exit 3 }
+          ' "$overlay" > "$overlay.tmp"; then
+            mv "$overlay.tmp" "$overlay"
+          else
+            rm -f "$overlay.tmp"
+            echo "Pin no-op: awk matched no '${SVC}-canary' newTag in $overlay." >&2
+            echo "The images entry's name: line isn't in the expected form — NOT activating." >&2
+            exit 1
+          fi
+          # Activate ONLY after a confirmed-successful pin: the committed default
+          # is replicas: 0 (idle so the PINME placeholder is never pulled). Scale
+          # to 1 to make the canary live.
           sed -i -E "s/(^[[:space:]]*replicas:[[:space:]]*)[0-9]+/\11/" "$dep"
           git diff --stat
       - name: Commit the pin + activation

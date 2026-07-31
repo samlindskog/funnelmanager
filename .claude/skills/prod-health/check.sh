@@ -68,7 +68,31 @@ drift() {
   local mismatch=0
   while IFS= read -r line; do
     [ -z "$line" ] && continue
+    local name=${line%%=*}
     local img=${line#*=}
+    # Canary workloads run their OWN `canary-*` tag (pinned separately by
+    # build-canary.yml), never the stable `sha-*` pin — so don't compare them to
+    # $pinned. But DO still check them: extract this workload's canary pin from
+    # the overlay (the `newTag:` of the images entry whose `name:` ends in the
+    # workload name) and compare the RUNNING tag to it. Match = OK; mismatch =
+    # WARN (Flux stuck / stale tag / out-of-band swap).
+    case "$name" in
+      *-canary)
+        local cpin ctag
+        cpin=$(awk -v w="$name" '
+          /^[[:space:]]*- name:/ { inblock = ($0 ~ (w "$")) ? 1 : 0 }
+          inblock && /^[[:space:]]*newTag:/ { print $2; exit }
+        ' "$OVERLAY")
+        ctag=${img##*:}
+        if [ -z "$cpin" ]; then
+          echo "$WARN $name: no canary pin found in $OVERLAY (running $ctag)"
+        elif [ "$ctag" = "$cpin" ]; then
+          echo "$OK $name (canary): running == pin ($cpin)"
+        else
+          echo "$WARN $name canary running != pin: running $ctag, pinned $cpin"
+        fi
+        continue ;;
+    esac
     case "$img" in
       *":$pinned") ;;                       # matches the overlay pin
       *) echo "$WARN running != pin: $line"; mismatch=1 ;;
