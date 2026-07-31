@@ -3,9 +3,11 @@
 # pin+activate it in that service's prod canary Deployment on main. Flux
 # reconciles the commit and the canary goes live for browsers that set the
 # host-only `fm_canary=<secret>` cookie on x9bc433.win — the canary-cookie-gate
-# EnvoyFilter validates it and injects the secret `x-fm-canary` token the
-# app-prod HTTPRoute matches (see deploy/infrastructure/gateway/httproutes.yaml
-# and deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml).
+# EnvoyFilter validates it and injects the secret `x-fm-canary` token that the
+# active canary's dedicated route matches (see
+# deploy/infrastructure/gateway/canary/<svc>-canary.yaml — the per-service route,
+# present only while the canary is scaled up — and
+# deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml).
 # Mirrors build-images.yml's auth/login/buildx + commit-pin pattern.
 #
 # General over every deployed service (NOT `backup` — it's a batch job, not a
@@ -75,6 +77,7 @@ jobs:
           SVC="${{ inputs.service }}"
           dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
           overlay="deploy/apps/overlays/prod/kustomization.yaml"
+          route="deploy/infrastructure/gateway/canary/${SVC}-canary.yaml"
           if [ ! -f "$dep" ]; then
             echo "::error::No canary base manifest for '$SVC' (expected $dep) — arm it on main first."
             exit 1
@@ -83,7 +86,30 @@ jobs:
             echo "::error::No '${SVC}-canary' images entry in $overlay — arm it on main first."
             exit 1
           fi
-          echo "Preflight OK: '$SVC' is armed (base manifest + overlay entry present on main)."
+          # Complete the canary contract: the cookie-marked route lives in its own
+          # toggled HTTPRoute (canary-if-exists-else-stable). Without it the canary
+          # would activate but be UNREACHABLE via the fm_canary cookie (fail-safe,
+          # but not what the operator asked for) — so require it at arming time.
+          if [ ! -f "$route" ]; then
+            echo "::error::No canary route for '$SVC' (expected $route) — arm it on main first (see deploy/infrastructure/gateway/canary/)."
+            exit 1
+          fi
+          # CORRECTNESS (not just presence): the route must Exact-match the
+          # x-fm-canary header AND carry the SAME secret the EnvoyFilter injects, or
+          # it would serve the canary to unmarked traffic (fail-open). Derive the
+          # secret from its canonical source (the EnvoyFilter Lua) — never hardcode
+          # a 5th copy here. Fail closed before any build/activation.
+          cookie_gate="deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml"
+          secret="$(grep -oE 'secret = "[0-9a-fA-F]+"' "$cookie_gate" | grep -oE '[0-9a-fA-F]{8,}' | head -1)"
+          if [ -z "$secret" ]; then
+            echo "::error::could not read the canary secret from $cookie_gate — cannot verify the route gate."
+            exit 1
+          fi
+          if ! grep -q 'x-fm-canary' "$route" || ! grep -q 'Exact' "$route" || ! grep -qF "$secret" "$route"; then
+            echo "::error::Canary route $route lacks the Exact x-fm-canary secret header gate — refusing (a widened/missing gate would serve the canary to unmarked traffic)."
+            exit 1
+          fi
+          echo "Preflight OK: '$SVC' is armed (base manifest + overlay entry + canary route with a valid x-fm-canary Exact gate)."
 
   build:
     needs: preflight
@@ -160,7 +186,10 @@ jobs:
           SVC="${{ inputs.service }}"
           overlay="deploy/apps/overlays/prod/kustomization.yaml"
           dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
-          # Guard BOTH legs of the canary contract (preflight already asserted
+          gw_kustomization="deploy/infrastructure/gateway/kustomization.yaml"
+          route_entry="canary/${SVC}-canary.yaml"
+          route_file="deploy/infrastructure/gateway/${route_entry}"
+          # Guard ALL legs of the canary contract (preflight already asserted
           # this on main; re-assert here — this is the job that actually WRITES).
           if [ ! -f "$dep" ]; then
             echo "No canary base manifest for '$SVC' (expected $dep)." >&2
@@ -170,6 +199,20 @@ jobs:
           if ! grep -q "funnelmanager/${SVC}-canary" "$overlay"; then
             echo "No '${SVC}-canary' images entry in $overlay." >&2
             echo "Add its <svc>-canary base + overlay images entry first — see build-canary.yml header." >&2
+            exit 1
+          fi
+          if [ ! -f "$route_file" ]; then
+            echo "No canary route for '$SVC' (expected $route_file)." >&2
+            echo "Arm its toggled HTTPRoute first — see deploy/infrastructure/gateway/canary/." >&2
+            exit 1
+          fi
+          # Re-assert the route gate correctness (preflight already checked this on
+          # main; this is the job that ACTIVATES, so re-verify before flipping
+          # replicas). Secret derived from the EnvoyFilter — no hardcoded copy.
+          cookie_gate="deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml"
+          secret="$(grep -oE 'secret = "[0-9a-fA-F]+"' "$cookie_gate" | grep -oE '[0-9a-fA-F]{8,}' | head -1)"
+          if [ -z "$secret" ] || ! grep -q 'x-fm-canary' "$route_file" || ! grep -q 'Exact' "$route_file" || ! grep -qF "$secret" "$route_file"; then
+            echo "Canary route $route_file lacks the Exact x-fm-canary secret header gate — refusing to activate." >&2
             exit 1
           fi
           # Rewrite ONLY this service's canary image entry — the `images:` block
@@ -203,15 +246,38 @@ jobs:
           # is replicas: 0 (idle so the PINME placeholder is never pulled). Scale
           # to 1 to make the canary live.
           sed -i -E "s/(^[[:space:]]*replicas:[[:space:]]*)[0-9]+/\11/" "$dep"
+          # canary-if-exists-else-stable: add the <svc>-canary route to the gateway
+          # kustomization in the SAME commit that activates (replicas 0->1). The
+          # route exists ONLY while the canary is up, so an idle canary can never
+          # 503 the x-fm-canary cookie — a marked request falls through to stable.
+          # `canary.sh retire` removes this line when it scales back to 0. Anchor
+          # the insert to the STRUCTURAL `- referencegrants.yaml` resource line (a
+          # stable YAML token, like build-images.yml/canary.sh anchor on field
+          # names) — NOT the prose comment, so a comment edit can't break it.
+          # Idempotent: skip if already present.
+          if grep -qF -- "- ${route_entry}" "$gw_kustomization"; then
+            echo "Canary route ${route_entry} already listed in $gw_kustomization."
+          else
+            sed -i "/^[[:space:]]*- referencegrants\.yaml[[:space:]]*$/a\\  - ${route_entry}" "$gw_kustomization"
+            grep -qF -- "- ${route_entry}" "$gw_kustomization" || {
+              echo "::error::failed to add ${route_entry} to $gw_kustomization (- referencegrants.yaml anchor missing?)" >&2
+              exit 1
+            }
+            echo "Activated canary route ${route_entry} in $gw_kustomization."
+          fi
           git diff --stat
       - name: Commit the pin + activation
         run: |
           set -euo pipefail
           git config user.name  "funnelmanager-ci[bot]"
           git config user.email "ci@users.noreply.github.com"
+          # Stage the overlay pin, the replicas activation, AND the gateway
+          # kustomization route toggle (a no-op add if the route line was already
+          # present — the --cached guard below then reports nothing new there).
           git add \
             "deploy/apps/overlays/prod/kustomization.yaml" \
-            "deploy/apps/base/${{ inputs.service }}-canary/deployment.yaml"
+            "deploy/apps/base/${{ inputs.service }}-canary/deployment.yaml" \
+            "deploy/infrastructure/gateway/kustomization.yaml"
           if git diff --cached --quiet; then
             echo "Nothing to pin (same tag already live)."; exit 0
           fi

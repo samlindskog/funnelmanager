@@ -1,28 +1,32 @@
 # Canary cookie gate (Step 3a of the full-stack canary program).
 #
-# WHAT THIS DOES. The app-prod HTTPRoute (gateway/httproutes.yaml) routes `/` to
-# the `frontend-canary` workload when the request carries the SECRET `x-fm-canary`
-# token. The browser must be able to reach the canary WITHOUT sending that header
+# WHAT THIS DOES. Each active canary has a dedicated HTTPRoute
+# (gateway/canary/<svc>-canary.yaml — present only while that canary is scaled up)
+# that routes its path (`/` for frontend, `/api/search/` for search, …) to the
+# `<svc>-canary` workload when the request carries the SECRET `x-fm-canary` token.
+# The browser must be able to reach the canary WITHOUT sending that header
 # itself: a header on `/api/*` rides cross-origin to Keycloak, triggering a CORS
 # preflight that breaks browser token refresh — and a client-set header is
 # forgeable. This Lua HTTP filter changes the header into a gateway-managed signal:
 #   - It ALWAYS removes any inbound (client-supplied) `x-fm-canary` request header,
 #     so the header is never client-forgeable on ANY route (`/`, `/api/*`, SPAs).
-#   - It re-injects `x-fm-canary: <secret>` (the SAME token the HTTPRoute matches)
+#   - It re-injects `x-fm-canary: <secret>` (the SAME token the canary routes match)
 #     ONLY when the request carries a host-only cookie `fm_canary=<secret>`. A
 #     cookie triggers no preflight and is host-scoped (no Domain attribute -> not
 #     sent to kc./grafana. subdomains).
-# The SECRET capability token lives in BOTH this filter and the HTTPRoute match
-# (they must be identical), same in-manifest-secret class as the Apollo webhook
+# The SECRET capability token lives in this filter AND every canary route match
+# (all must be identical), same in-manifest-secret class as the Apollo webhook
 # secret-in-path.
 #
-# NOT THE SOLE GATE (fail-safe). The HTTPRoute still matches the secret header
+# NOT THE SOLE GATE (fail-safe). Each canary route still matches the secret header
 # value, so this filter is PURELY ADDITIVE: it adds the cookie path + strips
 # forgeable client headers. If it ever silently detaches (Istio upgrade renames
 # the jwt_authn anchor, gateway redeploy, reconcile lag, workloadSelector drift),
 # the route STILL requires the secret header -> an external caller without the
 # secret fails safe to stable (pre-3a model), never fail-open. Rotate by editing
-# the token below AND the HTTPRoute match value AND PLACEHOLDERS.md (all three).
+# the token below AND every gateway/canary/<svc>-canary.yaml match value AND
+# PLACEHOLDERS.md (all must stay byte-identical — see PLACEHOLDERS "Canary access"
+# for the full file list).
 #
 # The secret now rides `x-fm-canary` internally (it is in fm_runtime TRACE_HEADERS,
 # propagated east-west). Acceptable: mTLS mesh, never logged (context.py repr=False,

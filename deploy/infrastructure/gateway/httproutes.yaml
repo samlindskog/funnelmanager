@@ -37,35 +37,12 @@ spec:
         - name: leads
           namespace: prod
           port: 8001
-    # Cookie-gated BACKEND search canary (Step 3b) — the browser->search hop.
-    # Same secret `x-fm-canary` token + gate model as the frontend-canary "/"
-    # rule below: the canary-cookie-gate EnvoyFilter always STRIPS any
-    # client-supplied `x-fm-canary` header and re-injects it — set to this SAME
-    # secret — ONLY when the request carries a valid `fm_canary=<secret>` cookie.
-    # At the gateway the injected value IS the secret, so an Exact-secret match
-    # is correct and consistent with the frontend-canary rule (and fails safe to
-    # stable if the filter ever detaches — an external caller without the secret
-    # cannot forge it).
-    #
-    # PRECEDENCE: this rule and the plain /api/search/ rule below both match the
-    # same PathPrefix; the Gateway API tie-break — after (1) path length and
-    # (2) method (both tie) — is (3) the number of HEADER matches: this rule has
-    # one, the plain rule has zero, so this rule ALWAYS wins for correctly-marked
-    # requests REGARDLESS of list order (placed first only for readability).
-    # Everyone without the secret cookie falls through to stable `search`.
-    # Carries the SAME 300s request timeout as the stable rule (NDJSON streams).
-    - matches:
-        - path: { type: PathPrefix, value: /api/search/ }
-          headers:
-            - name: x-fm-canary
-              type: Exact
-              value: "8640c2f1285bf39d0323bbe540e51694"
-      backendRefs:
-        - name: search-canary
-          namespace: prod
-          port: 8000
-      timeouts:
-        request: 300s # NDJSON streams
+    # BACKEND search canary route (Step 3b) LIVES IN canary/search-canary.yaml,
+    # NOT here. It is a SEPARATE HTTPRoute added to the gateway kustomization only
+    # while `search-canary` is scaled up (route presence ⇔ canary activation), so
+    # an idle canary can never 503 the `x-fm-canary` cookie — the marked request
+    # simply falls through to this stable rule. See that file's header + the
+    # "canary-if-exists-else-stable" note in kustomization.yaml.
     - matches:
         - path: { type: PathPrefix, value: /api/search/ }
       backendRefs:
@@ -123,57 +100,14 @@ spec:
         - name: alloy
           namespace: monitoring
           port: 12347
-    # Cookie-gated canary (Step 3a): the hub/search SPA served from the
-    # `frontend-canary` workload for requests carrying the SECRET `x-fm-canary`
-    # token below. Step 3a changes HOW that header is set, NOT the matched value:
-    # the canary-cookie-gate EnvoyFilter (mesh-policies/canary-cookie-gate.yaml)
-    # runs first on the app-host chain, always STRIPS any client-supplied
-    # `x-fm-canary` header, and re-injects it — set to this SAME secret — ONLY when
-    # the request carries a valid `fm_canary=<secret>` cookie. So the browser reaches
-    # the canary via a host-only cookie (no CORS preflight; not sent to kc./grafana.
-    # subdomains), and a client can no longer forge the header on ANY route.
-    #
-    # FAIL-SAFE (why the secret stays in the ROUTE, not a guessable `1`): the
-    # route-match value == the EnvoyFilter-injected value == the in-manifest secret.
-    # The EnvoyFilter ADDS the cookie path + strips forgeable client headers, but it
-    # is NOT the sole gate. If the filter ever silently detaches (Istio upgrade
-    # renames the jwt_authn anchor, gateway redeploy, reconcile lag, workloadSelector
-    # drift), the route STILL requires the secret header, so an external caller
-    # without the secret fails safe to stable (the pre-3a model) — never fail-open.
-    # Because the matched value is unchanged from pre-3a, the EnvoyFilter is purely
-    # additive: there is NO deploy-ordering hazard and no Flux dependsOn is needed.
-    #
-    # This rule and the `/` catch-all below both match a 1-char path ("/"), so the
-    # Gateway API precedence tie-break decides between them: after (1) path length
-    # and (2) method (both tie), (3) is the number of HEADER matches — this rule has
-    # one, the catch-all has zero, so this rule ALWAYS wins for correctly-marked
-    # requests REGARDLESS of list order (it is placed first only for readability).
-    # Everyone without the secret (no valid `fm_canary` cookie) falls through to
-    # stable frontend. Only the SPA-serving `/` route is duplicated; /api/* and the
-    # other SPA routes are untouched, so a canary SPA's /api/* calls hit the
-    # already-traced STABLE backends (the point of a frontend-only canary).
-    #
-    # SECURITY: reaching the canary requires the host-only `fm_canary` cookie whose
-    # value is this random capability token — an unaware/induced user cannot land on
-    # the canary and be served unreviewed feature-branch JS same-origin (see the
-    # frontend-canary deployment.yaml trust-boundary note). To reach the canary, set
-    # the cookie on x9bc433.win (no Domain attribute):
-    #   document.cookie = 'fm_canary=<token>; path=/; secure; samesite=lax'
-    # Rotatable by editing this value + the EnvoyFilter Lua + PLACEHOLDERS.md (all
-    # three must match). See PLACEHOLDERS.md (Canary access).
-    # NOTE: verify at GATE-4 that this Istio build honours the header-count
-    # tie-break (Gateway API standard; Istio implements it) and that a valid cookie
-    # resolves to a canary pod while an absent/wrong cookie stays stable.
-    - matches:
-        - path: { type: PathPrefix, value: / }
-          headers:
-            - name: x-fm-canary
-              type: Exact
-              value: "8640c2f1285bf39d0323bbe540e51694"
-      backendRefs:
-        - name: frontend-canary
-          namespace: prod
-          port: 8080
+    # FRONTEND (SPA) canary route (Step 3a) LIVES IN canary/frontend-canary.yaml,
+    # NOT here — same "canary-if-exists-else-stable" model as the search canary
+    # above: a SEPARATE HTTPRoute added to the gateway kustomization only while
+    # `frontend-canary` is scaled up. When the canary is idle the marked `/`
+    # request falls through to this stable catch-all, so the `fm_canary` cookie is
+    # always safe. The canary-cookie-gate EnvoyFilter (unchanged) still strips any
+    # client-supplied `x-fm-canary` and re-injects the secret only for a valid
+    # host-only `fm_canary` cookie. See canary/frontend-canary.yaml + kustomization.
     # Hub/search SPA — catch-all last (its nginx does try_files fallback).
     - matches:
         - path: { type: PathPrefix, value: / }

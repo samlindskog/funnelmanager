@@ -4,3 +4,16 @@ resources:
   - gateway.yaml
   - httproutes.yaml
   - referencegrants.yaml
+  # CANARY ROUTES — "canary-if-exists-else-stable" (the idle-canary 503 fix).
+  # Each `canary/<svc>-canary.yaml` is a SEPARATE HTTPRoute for the cookie-marked
+  # canary path. It is listed here ⇔ that `<svc>-canary` Deployment is scaled up
+  # (route presence == canary activation), so a canary that is idle (replicas: 0)
+  # has NO route and the `x-fm-canary` cookie safely falls through to stable.
+  # These lines are MANAGED, not hand-edited in normal operation:
+  #   * build-canary.yml `pin` job ADDs the line when it activates (replicas 0→1);
+  #   * `.claude/skills/canary/canary.sh retire` REMOVEs it when it scales to 0.
+  # Both canaries are activated (replicas: 1) in git today, so both are listed.
+  # To add a new canaried service, drop `canary/<svc>-canary.yaml` and the toggle
+  # tooling manages its line here automatically.
+  - canary/search-canary.yaml
+  - canary/frontend-canary.yaml

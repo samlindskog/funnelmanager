@@ -29,6 +29,13 @@ set -uo pipefail   # NOT -e: a failed remote read must not abort list/status
 CP=usfr4
 BASE=deploy/apps/base
 OVERLAY=deploy/apps/overlays/prod/kustomization.yaml
+GW_KUSTOMIZATION=deploy/infrastructure/gateway/kustomization.yaml
+GW_CANARY_DIR=deploy/infrastructure/gateway/canary
+# The canary-cookie secret every canary route must carry lives in exactly the
+# four files listed in PLACEHOLDERS.md "Canary access". To avoid a stray 5th copy
+# here, DERIVE it from its canonical source (the EnvoyFilter Lua) rather than
+# hardcoding it, and assert each route file matches that same value.
+COOKIE_GATE=deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml
 DEPLOY=.claude/skills/deploy-funnelmanager/deploy.sh
 HEALTH=.claude/skills/prod-health/check.sh
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $CP"
@@ -53,13 +60,34 @@ svc_class() {
   esac
 }
 
-# Armed = BOTH legs of the canary contract present on main (mirrors the
+# The toggled canary HTTPRoute file for a service (single source of the path,
+# used by armed() and retire()).
+canary_route_file() { echo "$GW_CANARY_DIR/${1}-canary.yaml"; }
+
+# The canary secret, read from its canonical source (the EnvoyFilter Lua) so it
+# is never re-hardcoded here. Empty if the filter/token can't be found.
+canary_secret() { grep -oE 'secret = "[0-9a-fA-F]+"' "$COOKIE_GATE" 2>/dev/null | grep -oE '[0-9a-fA-F]{8,}' | head -1; }
+
+# Armed = ALL legs of the canary contract present on main (mirrors the
 # build-canary.yml preflight guard): the base Deployment + the overlay images
-# entry. Fail closed if either is missing.
+# entry + the toggled canary HTTPRoute, and that route must actually GATE on the
+# secret `x-fm-canary` header (presence + correctness). Fail closed if any is
+# missing or the route's header gate is absent/widened — a route without the
+# Exact secret match would serve the canary to unmarked traffic (fail-open). The
+# route leg is what makes "canary-if-exists-else-stable" work — without it an
+# activated canary would be unreachable via the fm_canary cookie.
 armed() {
-  local svc=$1
+  local svc=$1 rf secret; rf=$(canary_route_file "$svc")
   [ -f "$BASE/${svc}-canary/deployment.yaml" ] || return 1
   grep -q "funnelmanager/${svc}-canary" "$OVERLAY" || return 1
+  [ -f "$rf" ] || return 1
+  # Correctness: the route must Exact-match the x-fm-canary header, and its value
+  # must equal the EnvoyFilter's injected secret (no missing/widened gate).
+  grep -q 'x-fm-canary' "$rf" || return 1
+  grep -q 'Exact' "$rf" || return 1
+  secret=$(canary_secret)
+  [ -n "$secret" ] || return 1
+  grep -qF "$secret" "$rf" || return 1
   return 0
 }
 
@@ -175,9 +203,9 @@ case "$cmd" in
     #    trust decision: feature-branch code under stable's prod identity).
     if ! armed "$svc"; then
       tmpl=$([ "$class" = backend ] && echo "search-canary (backend)" || echo "frontend-canary (SPA)")
-      die "'$svc' is NOT armed. Missing $BASE/${svc}-canary/ manifests and/or the '${svc}-canary' overlay images entry.
+      die "'$svc' is NOT armed. Missing one of: $BASE/${svc}-canary/ manifests, the '${svc}-canary' overlay images entry, or deploy/infrastructure/gateway/canary/${svc}-canary.yaml (the toggled route).
        Arming a canary is a deliberate, reviewed trust decision — copy the $tmpl template
-       ($BASE/${svc}-canary + $BASE/netpol + the overlay images entry), get it reviewed, land it on main, THEN retry.
+       ($BASE/${svc}-canary + $BASE/netpol + the overlay images entry + the canary/${svc}-canary.yaml route), get it reviewed, land it on main, THEN retry.
        This driver will not scaffold one."
     fi
 
@@ -222,24 +250,53 @@ case "$cmd" in
     [ "$(svc_class "$svc")" = unknown ] && die "unknown service '$svc'"
     armed "$svc" || die "'$svc' is not armed — nothing to retire ($BASE/${svc}-canary missing)"
     dep="$BASE/${svc}-canary/deployment.yaml"
-    if ! grep -qE '^[[:space:]]*replicas:[[:space:]]*[1-9]' "$dep"; then
-      echo "$OK ${svc}-canary is already idle (replicas: 0) in git — nothing to retire."
+    route_entry="canary/${svc}-canary.yaml"
+    # State of BOTH legs. Retire is fully done only when replicas==0 AND the route
+    # line is gone; short-circuit only then. If replicas==0 but a stale route line
+    # remains (drift / bad merge), we must NOT report "already idle" — that stale
+    # zero-endpoint route is exactly the 503 bug — so fall through and self-heal it.
+    replicas_active=0; grep -qE '^[[:space:]]*replicas:[[:space:]]*[1-9]' "$dep" && replicas_active=1
+    route_present=0;   grep -qF -- "- ${route_entry}" "$GW_KUSTOMIZATION" && route_present=1
+    if [ "$replicas_active" = 0 ] && [ "$route_present" = 0 ]; then
+      echo "$OK ${svc}-canary is already idle (replicas: 0, no route) in git — nothing to retire."
       exit 0
+    fi
+    if [ "$replicas_active" = 0 ] && [ "$route_present" = 1 ]; then
+      echo "$WARN DRIFT: ${svc}-canary replicas already 0 but its route line is still present — self-healing (removing the stale route)."
     fi
 
     # 1. IDLE-CHECK (fail-safe; delegates the actual query to observe-grafana).
-    idle_gate "$svc" "$FORCE"
+    #    Only meaningful while a workload is up; a pure stale-route cleanup
+    #    (replicas already 0) has no live canary to protect, so skip the gate.
+    [ "$replicas_active" = 1 ] && idle_gate "$svc" "$FORCE"
 
-    # 2. Scale down via a GitOps commit (replicas 1->0), then reconcile.
-    echo "--- retiring ${svc}-canary (replicas -> 0 via GitOps) ---"
+    # 2. Scale down (replicas 1->0) AND remove the canary route in the SAME commit
+    #    (canary-if-exists-else-stable): once the canary is idle its route must be
+    #    gone so the x-fm-canary cookie falls through to stable instead of 503'ing
+    #    on a zero-endpoint Service. build-canary re-adds the route line on the
+    #    next activation. Stage only what actually changes; commit only if staged.
+    echo "--- retiring ${svc}-canary (replicas -> 0 + route removed, via GitOps) ---"
     [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || die "not on main — retire commits to main"
     git fetch -q origin main
-    sed -i.bak -E 's/(^[[:space:]]*replicas:[[:space:]]*)[1-9][0-9]*/\10/' "$dep" && rm -f "$dep.bak"
-    git add "$dep"
-    git commit -q -m "ci(canary): retire ${svc}-canary (replicas -> 0) [skip ci]"
+    if [ "$replicas_active" = 1 ]; then
+      sed -i.bak -E 's/(^[[:space:]]*replicas:[[:space:]]*)[1-9][0-9]*/\10/' "$dep" && rm -f "$dep.bak"
+      git add "$dep"
+      echo "$OK ${svc}-canary replicas -> 0"
+    fi
+    if [ "$route_present" = 1 ]; then
+      # Delete the exact resource line (# delimiter; the entry has no #, $ anchors EOL).
+      sed -i.bak "\\#[[:space:]]*- ${route_entry}\$#d" "$GW_KUSTOMIZATION" && rm -f "$GW_KUSTOMIZATION.bak"
+      grep -qF -- "- ${route_entry}" "$GW_KUSTOMIZATION" && die "failed to remove ${route_entry} from $GW_KUSTOMIZATION"
+      git add "$GW_KUSTOMIZATION"
+      echo "$OK removed canary route ${route_entry} from the gateway kustomization"
+    fi
+    if git diff --cached --quiet; then
+      echo "$OK nothing to commit (state already consistent)."; exit 0
+    fi
+    git commit -q -m "ci(canary): retire ${svc}-canary (replicas -> 0, route removed) [skip ci]"
     git push origin main || die "push failed — resolve and re-run (or 'git pull' if the CI pin commit landed)"
     reconcile
-    echo "$OK ${svc}-canary retired (replicas: 0). Its canary-<sha> pin stays in the overlay but is never pulled while idle."
+    echo "$OK ${svc}-canary retired (replicas: 0, route removed). Its canary-<sha> pin stays in the overlay but is never pulled while idle."
     ;;
 
   list|status)

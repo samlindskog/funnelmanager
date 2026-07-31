@@ -32,10 +32,11 @@ The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
 - Sibling skills present: `deploy-funnelmanager`, `prod-health`. The idle/traffic
   query is run by the agent via **observe-grafana** (Grafana MCP).
 - The service must already be **ARMED**: its `deploy/apps/base/<svc>-canary/`
-  manifests **and** a `<svc>-canary` entry in
-  `deploy/apps/overlays/prod/kustomization.yaml`. Only `frontend` (SPA) and
-  `search` (backend) are armed today. This driver never scaffolds one — arming a
-  canary is a reviewed trust decision.
+  manifests, a `<svc>-canary` entry in
+  `deploy/apps/overlays/prod/kustomization.yaml`, **and** the toggled route
+  `deploy/infrastructure/gateway/canary/<svc>-canary.yaml`. Only `frontend` (SPA)
+  and `search` (backend) are armed today. This driver never scaffolds one — arming
+  a canary is a reviewed trust decision.
 
 ## Verbs
 
@@ -79,9 +80,14 @@ The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
    `fm_http_*` series by variant) and **refuses without `--force`**. Run the
    observe-grafana query first; if idle, re-run with `--force`.
 2. Scales down via a **GitOps commit** — seds `replicas: 1→0` in
-   `deploy/apps/base/<svc>-canary/deployment.yaml`, commits `[skip ci]`, pushes
-   `main`, and delegates the reconcile to deploy-funnelmanager. The
-   `canary-<sha>` pin stays in the overlay but is never pulled while idle.
+   `deploy/apps/base/<svc>-canary/deployment.yaml` **and removes the
+   `canary/<svc>-canary.yaml` line from the gateway kustomization** (the
+   canary-if-exists-else-stable route toggle: no active canary ⇒ no route ⇒ the
+   `x-fm-canary` cookie falls through to stable instead of 503'ing a zero-endpoint
+   canary Service), commits `[skip ci]`, pushes `main`, and delegates the
+   reconcile to deploy-funnelmanager. `build-canary` re-adds the route line on the
+   next activation. The `canary-<sha>` pin stays in the overlay but is never
+   pulled while idle.
 
 ### `list` / `status`
 Shows every `<svc>-canary` workload: current replicas (ACTIVE vs idle), the
@@ -90,10 +96,23 @@ should run for last-seen canary traffic.
 
 ## Ground truth / gotchas
 
+- **canary-if-exists-else-stable (route toggle).** A canary-marked request routes
+  to `<svc>-canary` **only while that canary is active**; when idle it falls
+  through to stable `<svc>`. This is enforced by tying ROUTE PRESENCE to
+  activation: each `deploy/infrastructure/gateway/canary/<svc>-canary.yaml` is a
+  separate HTTPRoute listed in the gateway kustomization **iff** `replicas > 0`.
+  `build-canary` adds the line on activate; `retire` removes it. This is why an
+  idle canary (`replicas: 0`) no longer 503s the `x-fm-canary` cookie. The gateway
+  routes live in the `infra-gateway` Flux Kustomization (`prune: true`, so removing
+  the line deletes the HTTPRoute); the Deployment lives in `apps-prod`, which
+  `dependsOn: infra-gateway` — so on retire the route is pruned before the pods
+  scale down (no 503 window), and on activate the route may briefly precede ready
+  endpoints (transient, cookie holders only).
 - **Armed today:** `frontend-canary` (SPA, static, egress-less — no `--confirm-backend`)
   and `search-canary` (the first backend canary — full prod-search identity, real
   prod Postgres + Apollo path via leads; treat activation as running unreleased
-  code AS prod search).
+  code AS prod search). Both ship all four arming legs: base Deployment, overlay
+  images entry, netpol, and the `canary/<svc>-canary.yaml` route.
 - **The cookie is the only way in.** Reaching a canary needs the host-only
   `fm_canary=<secret>` cookie on `x9bc433.win`; the EnvoyFilter strips any
   client-supplied `x-fm-canary` header, so it isn't forgeable. Rotating the token

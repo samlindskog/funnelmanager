@@ -1,0 +1,51 @@
+# FRONTEND (SPA) canary route (Step 3a target) — "canary-if-exists-else-stable".
+#
+# Same idle-canary 503 fix as canary/search-canary.yaml (read that file's header
+# for the full rationale): a canary-marked `/` request routes to `frontend-canary`
+# ONLY while it has healthy endpoints, else to stable `frontend`. Route PRESENCE is
+# tied to canary ACTIVATION — this file is in the gateway kustomization
+# `resources:` list ⇔ `frontend-canary` is scaled up. When idle, the only `/`
+# route left is the stable catch-all in httproutes.yaml, so the `fm_canary` cookie
+# is always safe.
+#
+# WHO TOGGLES IT: build-canary.yml `pin` job adds `- canary/frontend-canary.yaml`
+# on activate (replicas 0→1); the canary skill removes it on retire (replicas 1→0).
+#
+# PRECEDENCE: the `x-fm-canary` header match makes this route strictly more
+# specific than the stable `/` catch-all (0 headers); Gateway API specificity
+# ordering (verified live) puts it first across HTTPRoutes, and it fails SAFE to
+# stable `frontend` if that ever regressed. Only the SPA-serving `/` route is
+# duplicated for the canary — /api/* and the other SPA routes stay on the stable
+# backends (the point of a frontend-only canary). The secret token is the
+# gateway-managed, non-forgeable `x-fm-canary` from canary-cookie-gate.yaml.
+#
+# SECURITY (carried over from the old inline rule): reaching the canary requires
+# the host-only `fm_canary` cookie whose value is this capability token, so an
+# unaware/induced user cannot be served unreviewed feature-branch JS same-origin.
+#
+# ROTATE the token in ALL FOUR files that must stay byte-identical (one route file
+# per canaried service, so this list grows as canaries are armed):
+#   1. deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml (EnvoyFilter Lua)
+#   2. deploy/infrastructure/gateway/canary/search-canary.yaml    (sibling route)
+#   3. deploy/infrastructure/gateway/canary/frontend-canary.yaml  (this file)
+#   4. PLACEHOLDERS.md (Canary access)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: frontend-canary
+  namespace: istio-ingress
+spec:
+  parentRefs:
+    - name: fm-gateway
+      sectionName: https-app
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+          headers:
+            - name: x-fm-canary
+              type: Exact
+              value: "8640c2f1285bf39d0323bbe540e51694"
+      backendRefs:
+        - name: frontend-canary
+          namespace: prod
+          port: 8080
