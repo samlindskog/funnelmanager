@@ -15,33 +15,61 @@ and bound every query to a window (`now-15m` default; UTC).
   - Canary-request lines additionally carry `canary: true` (presence-only marker,
     propagated across every internal hop via the `x-fm-canary` trace header).
   - Every request-scoped line carries the `traceparent` (hence a `trace_id`).
-- **Faro RUM** (browser, canary-only) lands under `{service_name="faro"}`:
+- **Faro RUM** (browser, canary-only). **Don't hard-code the stream selector** —
+  Faro lands under `{job="faro"}` (Alloy's default), *not* the suspect
+  `{service_name="faro"}` earlier drafts assumed. **Discover it live** with
+  `mcp__grafana__list_loki_label_names` then `...list_loki_label_values` for the
+  candidate label (`job`, `service_name`) before querying; the value is `faro`.
+  - `app.name` — **which SPA** emitted the event: one of `frontend` (hub),
+    `searchui`, `mailui`, `agentsui`. Faro sets it as an event field (surfaces after
+    `| logfmt` as `app_name`, or a Loki label like `app` — confirm the exact key via
+    `list_loki_label_values`, don't assume). Filter on it to scope RUM to one app.
   - `event_data_userActionName=<testid>` — the Phase-3 `data-testid` of the clicked
     control (= Faro user-action name = Playwright selector).
   - `app_version=canary-<sha>` — canary bundle version (stable prod ships no Faro).
 - **Tempo** — mesh spans (1% baseline) + Faro-originated `sampled=1` canary traces,
   keyed by `trace_id`. Loki `derivedFields` link `trace_id` → Tempo;
   `tracesToLogs` links a span back to its Loki lines.
-- **Prometheus** — `fm_http_*` request series; split by `variant` where present.
+- **Prometheus** — `fm_http_*` request series, labeled
+  `{service, method, route, status, variant}`. The `variant` label (`stable` |
+  `canary`) was **added to the metrics** to match the Loki `variant` log label, so
+  canary-vs-stable metric splits work — but it only appears on series emitted by a
+  backend **redeployed** with that fm_runtime change (a pod must roll to emit it).
+  The Loki `variant` field works immediately (already stamped); the metric split
+  lags until the fleet rolls. Note the status label is `status` (string HTTP code,
+  e.g. `"200"`), **not** `code`.
 
 ---
 
 ## Loki (LogQL)
 
+> **Faro stream selector:** the examples below use `{job="faro"}` (Alloy's default).
+> **Confirm it first** — run `mcp__grafana__list_loki_label_values` for `job` (and, if
+> empty, `service_name`) and use whichever label actually carries the value `faro`.
+> Don't assume `{service_name="faro"}`.
+
 ### Faro user-action by testid
 Find the RUM event a specific labeled control emitted:
 ```logql
-{service_name="faro"} |= "<testid>"
+{job="faro"} |= "<testid>"
 ```
 Narrower (parse then match the action-name field):
 ```logql
-{service_name="faro"} | logfmt | event_data_userActionName="<testid>"
+{job="faro"} | logfmt | event_data_userActionName="<testid>"
+```
+
+### Faro RUM for one SPA (app.name)
+Scope browser telemetry to a single app — `frontend` (hub), `searchui`, `mailui`,
+`agentsui` (confirm the exact parsed key via `list_loki_label_values`; `app_name` here
+is the `| logfmt` rendering of Faro's `app.name`):
+```logql
+{job="faro"} | logfmt | app_name="searchui"
 ```
 
 ### Canary RUM only
 All browser telemetry from a canary bundle (excludes any stray stable data):
 ```logql
-{service_name="faro"} | logfmt | app_version=~"canary-.*"
+{job="faro"} | logfmt | app_version=~"canary-.*"
 ```
 
 ### Backend logs for a canary request
@@ -100,10 +128,16 @@ Expected canary shape: a single trace spanning browser (Faro) → istio-ingress 
 
 ## Prometheus (PromQL)
 
+> **`variant` is a real metric label now** (added to `fm_http_requests_total` /
+> `fm_http_request_duration_seconds` in `fm_runtime`). The split below only populates
+> on series from a backend **redeployed** with that change — pods must roll to emit
+> it. Until the fleet rolls, use the Loki `variant` field (stamped immediately) for
+> canary-vs-stable. The status label is **`status`** (string HTTP code), not `code`.
+
 ### Success-rate by variant (promotion gate)
-Split the `fm_http_*` request counter by `variant` where the label exists:
+Split the `fm_http_*` request counter by `variant`:
 ```promql
-sum by (variant) (rate(fm_http_requests_total{code!~"5.."}[5m]))
+sum by (variant) (rate(fm_http_requests_total{status!~"5.."}[5m]))
   / sum by (variant) (rate(fm_http_requests_total[5m]))
 ```
 
@@ -120,5 +154,7 @@ sum by (variant) (rate(fm_http_requests_total{service="search"}[5m]))
 
 Confirm the exact metric names with `mcp__grafana__list_prometheus_metric_names` /
 `...metric_metadata` (the `fm_http_*` family) and the available label values with
-`...label_values` before charting — `variant` is only present where step-1 emitted
-it, so a missing split means the series predates the label or the pod isn't a canary.
+`...label_values` before charting — an empty `variant=canary` series means either no
+canary is taking traffic, or the pods serving it **predate** the fm_runtime change
+that added the label (roll them, then re-query; the Loki `variant` field is the
+interim source of truth).

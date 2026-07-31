@@ -39,15 +39,19 @@ from fm_runtime.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger("fm.access")
 
+# `variant` (stable|canary, from the per-pod FM_DEPLOYMENT_VARIANT) is a
+# fixed-cardinality label (2 values) mirroring the Loki `variant` log label, so
+# canary-vs-stable success-rate / P99 splits work on the metrics too. It is
+# additive: pre-existing queries that don't select on it are unaffected.
 HTTP_REQUESTS = Counter(
     "fm_http_requests_total",
     "HTTP requests handled",
-    ["service", "method", "route", "status"],
+    ["service", "method", "route", "status", "variant"],
 )
 HTTP_DURATION = Histogram(
     "fm_http_request_duration_seconds",
     "HTTP request duration",
-    ["service", "method", "route"],
+    ["service", "method", "route", "variant"],
     buckets=(0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
 )
 
@@ -74,6 +78,10 @@ class PrincipalMiddleware:
         self.app = app
         self.service = service
         self.settings = settings or get_runtime_settings()
+        # Read the per-pod deployment variant ONCE (not per request) — same
+        # source that stamps the Loki `variant` log label. Fixed 2-value
+        # cardinality (stable|canary), defaulting to "stable".
+        self._variant = self.settings.deployment_variant
         self.settings.validate()
         if self.settings.enforce_grants:
             role_grants()  # parse grant config at startup — fail fast, not per-request
@@ -206,8 +214,8 @@ class PrincipalMiddleware:
         # from ASGI scope["path"] entirely, so they never reach here.
         route = getattr(scope.get("route"), "path_format", None) or scope.get("path", "")
         method = scope.get("method", "GET")
-        HTTP_REQUESTS.labels(self.service, method, route, str(status or 0)).inc()
-        HTTP_DURATION.labels(self.service, method, route).observe(elapsed)
+        HTTP_REQUESTS.labels(self.service, method, route, str(status or 0), self._variant).inc()
+        HTTP_DURATION.labels(self.service, method, route, self._variant).observe(elapsed)
         logger.info(
             "%s %s %s",
             method,

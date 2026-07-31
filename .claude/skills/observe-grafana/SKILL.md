@@ -21,7 +21,9 @@ chase) and **prod-health** (cluster-side status). Full query reference:
 - **Verify canary telemetry** — confirm a canary request actually rode the canary
   pods and was fully traced (`variant="canary"`, `app_version=~"canary-.*"`).
 - **Gate a promotion** — compare `fm_http_*` success-rate / P99 latency for
-  `variant="canary"` vs stable before promoting.
+  `variant="canary"` vs stable before promoting (the `variant` metric label only
+  populates once backends redeploy with the fm_runtime change that added it; until
+  then gate on the Loki `variant` field, which is stamped immediately).
 - **Find a user-action by testid** — a Phase-3 `data-testid` is both the Faro event
   name and the Playwright selector; look up what a click did.
 
@@ -37,8 +39,12 @@ hard-coding, because uids can differ from the type name:
 - **Tempo** (traces) — spans from the Istio mesh (1% forensic baseline) plus every
   Faro-originated `sampled=1` canary trace. Loki `derivedFields` link a `trace_id`
   straight to it.
-- **Prometheus** (metrics) — the `fm_http_*` request series, split by `variant`
-  where the label exists.
+- **Prometheus** (metrics) — the `fm_http_*` request series, labeled
+  `{service, method, route, status, variant}`. `variant` (`stable` | `canary`) was
+  added to the metrics to mirror the Loki `variant` log label; it appears only on
+  series from a redeployed backend (pods must roll), so a missing split means the
+  fleet hasn't rolled yet, not that the canary is idle. Note the code label is
+  `status`, not `code`.
 
 ## Discipline (do this every time)
 
