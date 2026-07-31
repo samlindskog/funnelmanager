@@ -21,5 +21,8 @@ spec:
     - { apiVersion: apps/v1, kind: Deployment, name: mail, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: mcp, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: jobs, namespace: prod }
+    - { apiVersion: apps/v1, kind: Deployment, name: agents, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: frontend, namespace: prod }
+    - { apiVersion: apps/v1, kind: Deployment, name: searchui, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: mailui, namespace: prod }
+    - { apiVersion: apps/v1, kind: Deployment, name: agentsui, namespace: prod }

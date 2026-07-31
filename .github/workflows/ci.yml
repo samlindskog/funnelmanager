@@ -1,6 +1,6 @@
 name: CI
 
-# Fast feedback on every PR and on main. Does NOT deploy (see deploy-prod.yml).
+# Fast feedback on every PR and on main. Does NOT deploy (see release-prod.yml).
 on:
   pull_request:
   push:
@@ -56,8 +56,9 @@ jobs:
         run: |
           python -m pip install -q ./libs/fm_runtime
           python -m pip install -q -r search/requirements.txt -r leads/requirements.txt \
-            -r mail/requirements.txt -r mcp/requirements.txt
-          for svc in search leads mail mcp; do
+            -r mail/requirements.txt -r mcp/requirements.txt \
+            -r jobs/requirements.txt -r agents/requirements.txt
+          for svc in search leads mail mcp jobs agents; do
             (cd "$svc" && python -c "import app.main" && echo "$svc imports OK")
           done
 
@@ -65,12 +66,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - name: opa check + test
         run: |
           curl -sL -o opa https://openpolicyagent.org/downloads/v1.6.0/opa_linux_amd64_static
           chmod +x opa
           ./opa check --strict deploy/policy
           ./opa test deploy/policy -v
+      # Blocking lockstep gate (P7): code (fm_runtime grants + exchange scopes)
+      # ⇔ deploy/policy/data.json (roles + azp_allow) ⇔ the Keycloak realms
+      # (role/composite defs, svc-* over/under-grant, fm-origin passthrough
+      # defaults). A hand-edited realm or a leftover svc-* over-grant fails the
+      # build here. Runs against BOTH the dev realm and the prod example realm.
+      - name: Install fm_runtime for the lockstep check
+        run: python -m pip install -q ./libs/fm_runtime
+      - name: grants ⇔ data.json ⇔ realm lockstep (dev + prod realms)
+        run: |
+          python -m fm_runtime.export --check deploy/policy/data.json \
+            --realm deploy/keycloak/realm-funnelmanager-dev.json
+          python -m fm_runtime.export --check deploy/policy/data.json \
+            --realm deploy/keycloak/realm-funnelmanager-prod.example.json
+      # The mesh require-principal notPaths is a 3rd hand-kept copy of the
+      # data.json anonymous prefixes; fail if it no longer covers them.
+      - name: mesh anonymous notPaths ⊇ data.json anonymous prefixes
+        run: python deploy/policy/check_mesh_anonymous.py
 
   manifests:
     runs-on: ubuntu-latest

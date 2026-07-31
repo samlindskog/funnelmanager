@@ -122,6 +122,19 @@ SVC_EXCHANGE_SCOPES: tuple[tuple[str, str], ...] = (
 # reconciles azp_allow / realm scopes against SVC_EXCHANGE_SCOPES.
 NON_EXCHANGE_AZP: frozenset[str] = frozenset({"frontend", "mailui", "agentsui"})
 
+# The Keycloak client scope (carried by the `fm-origin-passthrough` script
+# mapper) that propagates the inbound subject_token's `fm_origin` onto each
+# exchanged token (P3). Every token-exchanging client must carry it as a
+# DEFAULT scope, or the exchange it performs silently resets `fm_origin` to the
+# default `user` downstream — agent attribution is lost.
+FM_ORIGIN_SCOPE: str = "fm-origin"
+
+# The sole exchanging client that must NOT rely on the passthrough scope: the
+# `agents` client MINTS `fm_origin=agent` on the first hop via its own hardcoded
+# claim mapper. It is deliberately the only `from`-node of SVC_EXCHANGE_SCOPES
+# without `fm-origin` as a default scope; every OTHER from-node must have it.
+ORIGIN_MINTING_CLIENTS: frozenset[str] = frozenset({"agents"})
+
 
 def _normalize(raw: object) -> dict[str, list[dict[str, Any]]]:
     if isinstance(raw, dict) and isinstance(raw.get("funnelmanager"), dict):
@@ -183,6 +196,13 @@ def _scope_audience(scope: str) -> str | None:
     return audience or None
 
 
+def _audience_scope(audience: str) -> str:
+    """The `svc-<audience>` client scope name a client must hold to exchange
+    toward ``audience`` — the forward of :func:`_scope_audience`. Uses the
+    configured template so a customized naming scheme is respected."""
+    return get_runtime_settings().exchange_scope_template.replace("{audience}", audience)
+
+
 def verify_policy(
     data: dict[str, Any], realm: dict[str, Any] | None = None
 ) -> list[str]:
@@ -205,6 +225,19 @@ def verify_policy(
       (e.g. a superseded example client that still holds ``svc-mcp``) that
       Keycloak would otherwise still honor even though the one-hop allowlist no
       longer includes it.
+    - **Realm exchange completeness (when a realm is supplied):** the inverse of
+      the over-grant check — for **every** SVC_EXCHANGE_SCOPES edge ``src->dst``
+      the realm's ``src`` client must actually hold the ``svc-<dst>`` optional
+      client scope, else Keycloak REFUSES the one-hop exchange the code expects
+      to work (a silent *under-grant* that only surfaces at runtime).
+    - **Realm origin passthrough (when a realm is supplied):** every
+      token-exchanging client (a ``from``-node of SVC_EXCHANGE_SCOPES) must carry
+      the ``fm-origin`` client scope as a **default** scope so ``fm_origin``
+      survives its exchange hop — EXCEPT ``agents`` (:data:`ORIGIN_MINTING_CLIENTS`),
+      which mints ``fm_origin=agent`` via its own hardcoded mapper. A from-node
+      missing the default scope silently resets origin to ``user`` downstream
+      (agent attribution lost) — this catches a new exchanging client added
+      without wiring the passthrough scope.
     - **Realm role definitions (when a realm is supplied):** the realm must
       define **every** role in ``_DEFAULT_ROLE_GRANTS`` (else a grant the code
       enforces names a role Keycloak can never issue — dead policy), and the
@@ -243,8 +276,14 @@ def verify_policy(
 
     if realm is not None:
         errors.extend(_verify_realm_roles(realm))
-        for client in realm.get("clients", []) or []:
-            cid = str(client.get("clientId") or "")
+        realm_clients: dict[str, dict[str, Any]] = {
+            str(client.get("clientId") or ""): client
+            for client in realm.get("clients", []) or []
+            if isinstance(client, dict)
+        }
+
+        # Over-grant: a client holding a svc-<x> scope with no matching edge.
+        for cid, client in realm_clients.items():
             for scope in client.get("optionalClientScopes", []) or []:
                 dst = _scope_audience(str(scope))
                 if dst is None:
@@ -256,6 +295,43 @@ def verify_policy(
                         "— least-privilege over-grant; remove the scope or add "
                         "the edge (and its azp_allow entry)"
                     )
+
+        # Under-grant: an edge the code expects but the realm client lacks the
+        # svc-<dst> optional scope for — Keycloak would REFUSE that exchange.
+        for src, dst in SVC_EXCHANGE_SCOPES:
+            want = _audience_scope(dst)
+            client = realm_clients.get(src)
+            if client is None:
+                errors.append(
+                    f"realm does not define token-exchanging client {src!r} that "
+                    f"SVC_EXCHANGE_SCOPES uses as a from-node ({src}->{dst})"
+                )
+                continue
+            if want not in (client.get("optionalClientScopes") or []):
+                errors.append(
+                    f"realm client {src!r} is MISSING required optional scope "
+                    f"{want!r} for the {src}->{dst} exchange edge — Keycloak would "
+                    "refuse this one-hop exchange (under-grant); add the scope to "
+                    "the client's optionalClientScopes"
+                )
+
+        # Origin passthrough: every exchanging client (from-node) must carry the
+        # fm-origin scope as a DEFAULT scope, except the origin-minting client(s).
+        for cid in sorted({src for src, _ in SVC_EXCHANGE_SCOPES}):
+            if cid in ORIGIN_MINTING_CLIENTS:
+                continue
+            client = realm_clients.get(cid)
+            if client is None:
+                continue  # already reported by the under-grant loop
+            if FM_ORIGIN_SCOPE not in (client.get("defaultClientScopes") or []):
+                errors.append(
+                    f"realm client {cid!r} is a token-exchanging client (from-node "
+                    f"of SVC_EXCHANGE_SCOPES) but does NOT carry {FM_ORIGIN_SCOPE!r} "
+                    "as a DEFAULT client scope — fm_origin will silently reset to "
+                    "'user' on its exchange hop (agent attribution lost). Add "
+                    f"{FM_ORIGIN_SCOPE!r} to defaultClientScopes, or add the client "
+                    "to ORIGIN_MINTING_CLIENTS if it mints fm_origin itself"
+                )
     return errors
 
 
