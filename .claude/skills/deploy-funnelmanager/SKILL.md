@@ -12,6 +12,12 @@ The **release/rollback engine** for funnelmanager production. Its one job is to
 than re-implementing curl/flux checks. Use **prod-health** to look, this to act,
 and **ship-branch** for the full review→ship→verify arc.
 
+This skill releases the **stable** prod track only — it never touches the
+`*-canary` workloads. Building, activating, and retiring a telemetry-enabled
+canary is owned by the separate **`canary`** skill (which delegates its rollout
+back to this skill's `reconcile`/health path). A normal release here leaves any
+active canary untouched.
+
 All paths are relative to the repo root. The driver is
 `.claude/skills/deploy-funnelmanager/deploy.sh`.
 

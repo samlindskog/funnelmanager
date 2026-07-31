@@ -88,8 +88,21 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
       secret) on a match; each active canary's dedicated route (see below) still
       matches that secret header value and routes it to `<svc>-canary`. To reach
       the canary, set the cookie (no `Domain` attribute, so it is host-only and is
-      NOT sent to `kc.`/`grafana.` subdomains) — e.g. in the browser console on
-      `https://x9bc433.win/`:
+      NOT sent to `kc.`/`grafana.` subdomains).
+
+      **Easy toggle (preferred).** The same EnvoyFilter now answers two
+      server-side cookie-setter endpoints entirely at the gateway (INSERT_BEFORE
+      jwt_authn, so they never hit OPA or the app):
+      - `https://x9bc433.win/canary/on?t=8640c2f1285bf39d0323bbe540e51694`
+        sets the cookie and 302-redirects to `/` (a wrong/absent `t` fails closed:
+        redirects with NO cookie set).
+      - `https://x9bc433.win/canary/off` clears the cookie and redirects to `/`.
+      The cookie is set SERVER-SIDE, so it is **HttpOnly** (JS cannot read it,
+      closing the XSS-harvest exposure of the `document.cookie` approach); it stays
+      `Secure` + `SameSite=Lax`.
+
+      The manual way still works but the endpoint is preferred — e.g. in the
+      browser console on `https://x9bc433.win/`:
       `document.cookie = 'fm_canary=8640c2f1285bf39d0323bbe540e51694; path=/; secure; samesite=lax'`
       then reload; anyone without the cookie stays on stable.
 

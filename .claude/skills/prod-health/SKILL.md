@@ -58,7 +58,11 @@ smoke → pods → drift → flux → ci → logs.
 3. **drift** — three-way: running image sha **vs** the overlay pin **vs**
    `origin/main`. Flags mid-roll (running≠pin) and **deploy lag** (code commits
    merged to main but not yet released — the `[skip ci]` pin commit is excluded
-   from the count).
+   from the count). Any **`*-canary`** workload is compared against **its own
+   `canary-*` overlay pin** (not the stable `sha-*`), so an active canary running
+   a different feature tag is **not** a drift error — a `*-canary` running ≠ its
+   `canary-*` pin is. Canary lifecycle itself (build/activate/retire) is owned by
+   the separate **`canary`** skill, not this one.
 4. **flux** — `apps-prod` revision / READY / SUSPENDED. Healthy = `READY=True`,
    `SUSPENDED=False`, revision == `origin/main` HEAD short-sha.
 5. **ci** — last 3 `release-prod` runs + whether the newest `v*` tag's pin is on

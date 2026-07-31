@@ -78,13 +78,106 @@ spec:
             "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
             default_source_code:
               inline_string: |
-                -- Make `x-fm-canary` a gateway-managed, non-forgeable marker.
+                -- Make `x-fm-canary` a gateway-managed, non-forgeable marker,
+                -- PLUS expose server-side cookie toggle endpoints /canary/on|off.
                 -- Fails SAFE: no cookie / absent / wrong value -> no header set
                 -- -> request stays on stable frontend. The secret is never
                 -- logged. On a valid cookie the SAME secret the HTTPRoute matches
                 -- is injected (route-value == injected-value == the secret).
+
+                -- Extract query param `key` from a raw query string (the text
+                -- AFTER "?"), exact-matching the param NAME. This is why `t` is
+                -- never confused with `foot`, nor with some OTHER param whose
+                -- VALUE merely contains the token as a substring. nil if absent.
+                function fm_query_param(query, key)
+                  for pair in string.gmatch(query, "([^&]+)") do
+                    local eq = string.find(pair, "=", 1, true)
+                    if eq ~= nil then
+                      local name = string.sub(pair, 1, eq - 1)
+                      if name == key then
+                        return string.sub(pair, eq + 1)
+                      end
+                    end
+                  end
+                  return nil
+                end
+
                 function envoy_on_request(request_handle)
                   local headers = request_handle:headers()
+                  -- The ONE secret local, reused by both the toggle endpoints
+                  -- and the strip/inject below (no second copy of the token).
+                  local secret = "8640c2f1285bf39d0323bbe540e51694"
+
+                  -- ===== Server-side cookie toggle endpoints (short-circuit) ====
+                  -- These run at the TOP of the request phase, BEFORE the
+                  -- strip/inject below and BEFORE jwt_authn/OPA/routing (this
+                  -- filter is INSERT_BEFORE jwt_authn). /canary/on|off are answered
+                  -- ENTIRELY by this Lua local reply and never reach jwt_authn,
+                  -- OPA/ext_authz, or the app -- they are pure cookie-setters, so
+                  -- bypassing authz for exactly these two paths is correct and
+                  -- intended. The cookie is set SERVER-SIDE here, hence HttpOnly:
+                  -- JS cannot read it, closing the XSS-harvest exposure the earlier
+                  -- document.cookie approach had. Secure + SameSite=Lax retained.
+                  local method = headers:get(":method")
+                  local path = headers:get(":path")
+                  if method == "GET" and path ~= nil then
+                    -- Split off any query string, then EXACT-match the path so
+                    -- `/canary/onx` does NOT match `/canary/on`.
+                    local base = path
+                    local query = ""
+                    local qpos = string.find(path, "?", 1, true)
+                    if qpos ~= nil then
+                      base = string.sub(path, 1, qpos - 1)
+                      query = string.sub(path, qpos + 1)
+                    end
+                    if base == "/canary/on" then
+                      -- Fail CLOSED: set the cookie ONLY when `t` EXACTLY equals
+                      -- the secret AND the request is a top-level navigation; a
+                      -- missing/wrong `t` OR a non-navigation still redirects to
+                      -- `/` but sends NO Set-Cookie (never sets the cookie).
+                      --
+                      -- Navigation guard: `/canary/on` is a state-changing GET, so
+                      -- someone WITH the secret could try a drive-by plant of the
+                      -- cookie on a victim via `<img src=".../canary/on?t=...">`
+                      -- (SameSite=Lax stops the cookie being SENT cross-site, not
+                      -- being SET by such a subresource load). A subresource carries
+                      -- `Sec-Fetch-Dest: image`/`script`/`empty`/`iframe`; a real
+                      -- top-level navigation (the launcher's 302 or clicking the
+                      -- link) carries `Sec-Fetch-Dest: document`. Sec-Fetch-* are
+                      -- browser-set FORBIDDEN headers -> page JS / cross-origin
+                      -- fetch cannot forge them. Absent => older browser that omits
+                      -- Sec-Fetch-* entirely -> allow (the exact-`t` + SameSite=Lax
+                      -- still gate it). Present-and-not-"document" => refuse, closing
+                      -- the forced-canary CSRF-style vector.
+                      local dest = headers:get("sec-fetch-dest")
+                      local nav = (dest == nil) or (dest == "document")
+                      local t = fm_query_param(query, "t")
+                      if nav and t == secret then
+                        request_handle:respond(
+                          {[":status"] = "302",
+                           ["location"] = "/",
+                           ["set-cookie"] = "fm_canary=" .. secret ..
+                             "; Path=/; Max-Age=604800; Secure; HttpOnly; SameSite=Lax"},
+                          "")
+                      else
+                        request_handle:respond(
+                          {[":status"] = "302", ["location"] = "/"},
+                          "")
+                      end
+                      return
+                    end
+                    if base == "/canary/off" then
+                      -- Clear the cookie (Max-Age=0) and redirect home.
+                      request_handle:respond(
+                        {[":status"] = "302",
+                         ["location"] = "/",
+                         ["set-cookie"] = "fm_canary=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"},
+                        "")
+                      return
+                    end
+                  end
+
+                  -- ===== Existing strip + conditional inject (unchanged) =======
                   -- Untrusted: strip any client-supplied marker from the request
                   -- HEADERS (header phase; routing resolves from the header block).
                   headers:remove("x-fm-canary")
@@ -92,7 +185,6 @@ spec:
                   if cookie == nil then
                     return
                   end
-                  local secret = "8640c2f1285bf39d0323bbe540e51694"
                   -- Split the Cookie header on ";" and exact-match the cookie
                   -- NAME `fm_canary` (not a substring of another cookie).
                   for pair in string.gmatch(cookie, "([^;]+)") do
