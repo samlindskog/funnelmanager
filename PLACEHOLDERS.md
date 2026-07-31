@@ -79,16 +79,30 @@ the object-storage bucket names + region (`grep -rn REPLACE_ deploy`).
 
 ## Canary access
 
-- [x] **Frontend canary header token** — the header-routed canary
-      (`deploy/infrastructure/gateway/httproutes.yaml`, app-prod) is gated by a
-      secret `x-fm-canary` value: `8640c2f1285bf39d0323bbe540e51694`. Send
-      `x-fm-canary: <token>` to reach the canary; anyone else stays on stable
-      frontend. It is a capability/obscurity token (same class as the Apollo
-      webhook secret-in-path), committed in-manifest and **rotatable** by
-      editing the `value:` in that HTTPRoute and re-deploying. Only ever build
-      the canary from a TRUSTED branch — the canary serves feature-branch JS
-      same-origin and can read the prod Keycloak session of anyone who reaches
-      it (see the frontend-canary deployment trust-boundary note).
+- [x] **Frontend canary cookie token** — `8640c2f1285bf39d0323bbe540e51694`.
+      The canary is gated by a **host-only cookie** `fm_canary=<token>` on
+      `x9bc433.win`, NOT a client-sent header. The `canary-cookie-gate`
+      EnvoyFilter (`deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml`)
+      validates the cookie at the gateway, strips any client-supplied
+      `x-fm-canary` header, and re-injects `x-fm-canary: <token>` (the SAME
+      secret) on a match; the app-prod HTTPRoute
+      (`deploy/infrastructure/gateway/httproutes.yaml`) still matches that secret
+      header value and routes it to `frontend-canary`. To reach the canary, set
+      the cookie (no `Domain` attribute, so it is host-only and is NOT sent to
+      `kc.`/`grafana.` subdomains) — e.g. in the browser console on
+      `https://x9bc433.win/`:
+      `document.cookie = 'fm_canary=8640c2f1285bf39d0323bbe540e51694; path=/; secure; samesite=lax'`
+      then reload; anyone without the cookie stays on stable frontend. The secret
+      value appears in **three places that must stay identical** — the EnvoyFilter
+      Lua, the HTTPRoute match, and this doc. Keeping it in the route is the
+      fail-safe floor: if the EnvoyFilter detaches, the route still requires the
+      secret header, so external callers fail safe to stable (never fail-open).
+      It is a capability/obscurity token (same class as the Apollo webhook
+      secret-in-path), committed in-manifest and **rotatable** by editing all
+      three, then re-deploying. Only ever build the canary from a TRUSTED branch —
+      the canary serves feature-branch JS same-origin and can read the prod
+      Keycloak session of anyone who reaches it (see the frontend-canary
+      deployment trust-boundary note).
 
 ## Deferred hardening
 

@@ -1,8 +1,11 @@
 # Build a TELEMETRY-ENABLED canary image of ANY deployable service from an
 # arbitrary feature branch, push it as `<service>:canary-<shortsha>`, then
 # pin+activate it in that service's prod canary Deployment on main. Flux
-# reconciles the commit and the canary goes live for requests carrying the
-# secret `x-fm-canary` token (see deploy/infrastructure/gateway/httproutes.yaml).
+# reconciles the commit and the canary goes live for browsers that set the
+# host-only `fm_canary=<secret>` cookie on x9bc433.win — the canary-cookie-gate
+# EnvoyFilter validates it and injects the secret `x-fm-canary` token the
+# app-prod HTTPRoute matches (see deploy/infrastructure/gateway/httproutes.yaml
+# and deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml).
 # Mirrors build-images.yml's auth/login/buildx + commit-pin pattern.
 #
 # General over every deployed service (NOT `backup` — it's a batch job, not a

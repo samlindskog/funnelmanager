@@ -124,11 +124,11 @@ class PrincipalMiddleware:
         trace_headers.setdefault("x-request-id", request_id)
 
         # Presence only, best-effort telemetry hint — NEVER an authorization
-        # input. This is trivially spoofable today: the gateway header-matches
-        # x-fm-canary only on the frontend "/" route, so any external caller can
-        # set it on an /api/* request. It becomes trustworthy only once the
-        # gateway strips client-supplied x-fm-canary on all routes and re-injects
-        # it from the validated fm_canary cookie. Used solely for log labeling.
+        # input. The gateway canary-cookie-gate EnvoyFilter now strips any
+        # client-supplied x-fm-canary and re-injects it only from the validated
+        # fm_canary cookie, so gateway-routed traffic can't forge it. East-west /
+        # direct-to-backend calls remain spoofable (a mesh peer could set it) —
+        # this stays telemetry/log-labeling only, never authz.
         is_canary = "x-fm-canary" in trace_headers
 
         ctx = fm_context.RequestContext(

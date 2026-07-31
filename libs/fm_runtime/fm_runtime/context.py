@@ -26,12 +26,12 @@ TRACE_HEADERS = (
     "x-b3-flags",
     # Canary routing marker, forwarded verbatim internally so canary requests
     # route to <svc>-canary workloads where they exist and fall back to stable
-    # otherwise. NOT trusted for authz: today the gateway only header-matches
-    # x-fm-canary on the frontend "/" route — no /api/* backend route matches or
-    # strips it, so any external caller can set it. Trustworthiness awaits a
-    # gateway ingress-strip (drop any client-supplied x-fm-canary on ALL routes,
-    # re-inject only from the validated fm_canary cookie); until then treat it as
-    # spoofable and use it only as a telemetry hint.
+    # otherwise. NOT trusted for authz. At the gateway the canary-cookie-gate
+    # EnvoyFilter (deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml)
+    # now strips any client-supplied x-fm-canary and re-injects it only from the
+    # validated fm_canary cookie, so gateway-routed traffic can't forge it.
+    # East-west / direct-to-backend calls are still presence-only telemetry
+    # (a peer inside the mesh could set it) — never authz.
     "x-fm-canary",
 )
 
@@ -45,7 +45,9 @@ class RequestContext:
     trace_headers: dict[str, str] = field(default_factory=dict, repr=False)
     request_id: str = ""
     # Best-effort telemetry hint set from x-fm-canary PRESENCE only (never the
-    # raw value); spoofable until the gateway ingress-strip lands. Never authz.
+    # raw value). The gateway strips+re-injects it (canary-cookie-gate.yaml), so
+    # gateway-routed traffic can't forge it; east-west remains spoofable and this
+    # is telemetry-only, never authz.
     is_canary: bool = False
 
 

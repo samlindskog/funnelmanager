@@ -1,0 +1,106 @@
+# Canary cookie gate (Step 3a of the full-stack canary program).
+#
+# WHAT THIS DOES. The app-prod HTTPRoute (gateway/httproutes.yaml) routes `/` to
+# the `frontend-canary` workload when the request carries the SECRET `x-fm-canary`
+# token. The browser must be able to reach the canary WITHOUT sending that header
+# itself: a header on `/api/*` rides cross-origin to Keycloak, triggering a CORS
+# preflight that breaks browser token refresh — and a client-set header is
+# forgeable. This Lua HTTP filter changes the header into a gateway-managed signal:
+#   - It ALWAYS removes any inbound (client-supplied) `x-fm-canary` request header,
+#     so the header is never client-forgeable on ANY route (`/`, `/api/*`, SPAs).
+#   - It re-injects `x-fm-canary: <secret>` (the SAME token the HTTPRoute matches)
+#     ONLY when the request carries a host-only cookie `fm_canary=<secret>`. A
+#     cookie triggers no preflight and is host-scoped (no Domain attribute -> not
+#     sent to kc./grafana. subdomains).
+# The SECRET capability token lives in BOTH this filter and the HTTPRoute match
+# (they must be identical), same in-manifest-secret class as the Apollo webhook
+# secret-in-path.
+#
+# NOT THE SOLE GATE (fail-safe). The HTTPRoute still matches the secret header
+# value, so this filter is PURELY ADDITIVE: it adds the cookie path + strips
+# forgeable client headers. If it ever silently detaches (Istio upgrade renames
+# the jwt_authn anchor, gateway redeploy, reconcile lag, workloadSelector drift),
+# the route STILL requires the secret header -> an external caller without the
+# secret fails safe to stable (pre-3a model), never fail-open. Rotate by editing
+# the token below AND the HTTPRoute match value AND PLACEHOLDERS.md (all three).
+#
+# The secret now rides `x-fm-canary` internally (it is in fm_runtime TRACE_HEADERS,
+# propagated east-west). Acceptable: mTLS mesh, never logged (context.py repr=False,
+# step-1 presence-only telemetry), same containment class as a Bearer token.
+#
+# WHY EARLY (INSERT_BEFORE jwt_authn). Inserting ahead of `jwt_authn` guarantees
+# the header is canonicalized (stripped, then conditionally re-added) BEFORE auth
+# and BEFORE route matching, so route selection sees only the gateway-set value
+# and the client can never influence it. It runs before ext_authz too, so this is
+# NOT an authz decision (OPA does not inspect `x-fm-canary`) — canary routing is
+# a pure traffic-splitting concern.
+#
+# WHY AN ENVOYFILTER + SNI SCOPE. Mirrors grafana-jwt-exemption.yaml: match key is
+# our OWN stable SNI hostname (`x9bc433.win`, the app host) plus Envoy's stable
+# filter constants — no Gateway-API-generated route/vhost name is referenced.
+# Scope is one workload (the edge gateway) and one filter chain (the app host);
+# the kc./dev./grafana. chains and the :80 redirect are untouched.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: canary-cookie-gate
+  namespace: istio-ingress
+spec:
+  workloadSelector:
+    # The istio-ingress gateway pod (chart selector `istio: <name trimPrefix
+    # "istio-">` -> `istio: ingress`), same as grafana-jwt-exemption.yaml.
+    labels:
+      istio: ingress
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          portNumber: 443
+          filterChain:
+            # ONLY the app host's TLS filter chain (its own x9bc433.win cert).
+            sni: x9bc433.win # PLACEHOLDERS.md (App host)
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                # Insert immediately before the RequestAuthentication's jwt_authn
+                # so the marker is fixed before auth + routing.
+                name: envoy.filters.http.jwt_authn
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: canary-cookie-gate
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            default_source_code:
+              inline_string: |
+                -- Make `x-fm-canary` a gateway-managed, non-forgeable marker.
+                -- Fails SAFE: no cookie / absent / wrong value -> no header set
+                -- -> request stays on stable frontend. The secret is never
+                -- logged. On a valid cookie the SAME secret the HTTPRoute matches
+                -- is injected (route-value == injected-value == the secret).
+                function envoy_on_request(request_handle)
+                  local headers = request_handle:headers()
+                  -- Untrusted: strip any client-supplied marker from the request
+                  -- HEADERS (header phase; routing resolves from the header block).
+                  headers:remove("x-fm-canary")
+                  local cookie = headers:get("cookie")
+                  if cookie == nil then
+                    return
+                  end
+                  local secret = "8640c2f1285bf39d0323bbe540e51694"
+                  -- Split the Cookie header on ";" and exact-match the cookie
+                  -- NAME `fm_canary` (not a substring of another cookie).
+                  for pair in string.gmatch(cookie, "([^;]+)") do
+                    local kv = string.gsub(pair, "^%s*(.-)%s*$", "%1")
+                    local eq = string.find(kv, "=", 1, true)
+                    if eq ~= nil then
+                      local name = string.sub(kv, 1, eq - 1)
+                      local value = string.sub(kv, eq + 1)
+                      if name == "fm_canary" and value == secret then
+                        headers:add("x-fm-canary", secret)
+                        return
+                      end
+                    end
+                  end
+                end

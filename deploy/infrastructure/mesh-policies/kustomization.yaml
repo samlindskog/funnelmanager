@@ -5,3 +5,8 @@ resources:
   - request-authentication.yaml
   - authorization-policies.yaml
   - grafana-jwt-exemption.yaml
+  # App-host gateway Lua filter: strips client-supplied `x-fm-canary` and re-adds
+  # `x-fm-canary: 1` only for a valid `fm_canary` cookie (SNI-scoped like the
+  # grafana filter above). Makes the canary marker trustworthy for the app-prod
+  # HTTPRoute (gateway/httproutes.yaml).
+  - canary-cookie-gate.yaml
