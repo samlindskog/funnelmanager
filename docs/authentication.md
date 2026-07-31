@@ -170,15 +170,44 @@ header).
 The MCP server exchanges it toward leads, so the agent acts as its own
 principal with `azp: mcp`, and OPA can constrain the delegation.
 
-**Admin/user management:** the Keycloak console (linked from the hub for
-admin-role users). The bundled dev realm ships one human principal (`admin`,
-realm role `admin` — a composite of every `-access` role, so it reaches all
-services). To grant a non-admin human access to specific services, assign the
-per-service `-access` realm roles (`search-access`, `mail-access`,
-`jobs-access`, `agents-access`) in the console — a user with only
-`search-access` may call `/api/search` and gets 403 elsewhere. Adding
-users/roles is a realm change (mirrored in `deploy/policy/data.json` +
-`fm_runtime/grants.py`), not a code change.
+**Admin/user management — provision via GROUPS (role bundles).** Access is
+granted by dropping a human into a **group**, not by hand-picking per-service
+roles each time. Keycloak groups are the recommended provisioning unit: realm
+roles are assigned to a group once, and every member inherits them. The realm
+ships three default bundles (`deploy/keycloak/realm-funnelmanager-*.json`,
+`groups` block):
+
+| Group | Realm roles conferred | For |
+|---|---|---|
+| `/standard` | `search-access`, `mail-access` | day-to-day users |
+| `/power` | `search-access`, `mail-access`, `jobs-access`, `agents-access` | full product surface |
+| `/admins` | `admin` (composite of the four `-access` roles) | administrators |
+
+Groups map **only** the human-facing `-access` roles or `admin` — **never** the
+machine roles `internal-service`/`jobs-internal` (those belong to service
+accounts via client credentials; a human in such a group would silently gain a
+service identity's grants). This is enforced closed by
+`fm_runtime.export --check … --realm` (the group-role leg in
+`grants._verify_realm_groups`).
+
+The flow is **create user → add to group**: a user in `/standard` may call
+`/api/search` and `/api/mail` and gets 403 elsewhere; move them to `/power` for
+jobs/agents, or `/admins` to reach everything. The **`provision-user` skill**
+(`.claude/skills/provision-user/`) drives this end-to-end against the live prod
+realm via `kcadm` inside the Keycloak pod — `create <user> <email> [group]` (temp
+password + forced reset), `add`/`remove <user> <group>`, `list-users`,
+`list-groups`. It ensures the bundle groups exist (create-if-missing, assigning
+the bundle's roles) so it works even before a realm re-import. You can equally do
+it by hand in the Keycloak console (linked from the hub for admin-role users).
+The bundled dev realm ships one human principal (`admin`, realm role `admin`).
+
+Changing **who is in a group** is a pure Keycloak operation (no code change).
+Changing the **bundles themselves** — adding/retiring a group or a role in one —
+is a realm change mirrored in the tracked realm files + the `provision-user`
+`roles_for()` map, proven in lockstep by `python -m fm_runtime.export --check
+… --realm` and reviewed by `security-reviewer`. Adding a brand-new *role* is
+still a coordinated realm + `deploy/policy/data.json` + `fm_runtime/grants.py`
+change (P7).
 
 ## Dev vs prod
 

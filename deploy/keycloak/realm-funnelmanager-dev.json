@@ -47,6 +47,33 @@
       }
     ]
   },
+  "groups": [
+    {
+      "name": "standard",
+      "path": "/standard",
+      "realmRoles": [
+        "search-access",
+        "mail-access"
+      ]
+    },
+    {
+      "name": "power",
+      "path": "/power",
+      "realmRoles": [
+        "search-access",
+        "mail-access",
+        "jobs-access",
+        "agents-access"
+      ]
+    },
+    {
+      "name": "admins",
+      "path": "/admins",
+      "realmRoles": [
+        "admin"
+      ]
+    }
+  ],
   "users": [
     {
       "username": "admin",

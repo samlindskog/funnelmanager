@@ -32,6 +32,30 @@ The full reference (two identities per request, per-hop audiences, token exchang
 - Every service accepts only JWTs whose `aud` names it; internal hops exchange (never forward) tokens via RFC 8693 — the realm's `svc-<target>` client scopes are the one-hop pairing allowlist (`search→leads`, `mcp→leads`, `agent→mcp`).
 - Requests in the mesh also carry the calling workload's mTLS identity; OPA (ext_authz) decides on both. Applications receive the principal through `fm_runtime` and key user-owned data (search history) on `preferred_username`.
 
+### Provisioning users
+
+Human access is granted via **Keycloak groups** (role bundles), not by picking per-service roles one at a time. The realm ships three defaults (`deploy/keycloak/realm-funnelmanager-*.json` `groups` block) — **adjust these to taste**:
+
+| Group | Grants | For |
+|---|---|---|
+| `/standard` | `search-access`, `mail-access` | day-to-day users |
+| `/power` | `+ jobs-access`, `agents-access` | full product surface |
+| `/admins` | `admin` (all services) | administrators |
+
+Groups only ever confer the human-facing `-access` roles or `admin` — never the machine roles (`internal-service`, `jobs-internal`); `python -m fm_runtime.export --check … --realm` fails closed otherwise.
+
+Provision against the live prod realm with the `provision-user` skill (kcadm inside the Keycloak pod):
+
+```bash
+.claude/skills/provision-user/provision.sh create alice alice@acme.com standard   # + temp password, forced reset
+.claude/skills/provision-user/provision.sh add    alice power                      # change tier
+.claude/skills/provision-user/provision.sh remove alice standard
+.claude/skills/provision-user/provision.sh list-users
+.claude/skills/provision-user/provision.sh list-groups
+```
+
+Changing *who* is in a group is a pure Keycloak op; changing the *bundles* is a realm edit (mirror both realm files + the skill's role map, then re-run the `--check`). Full detail: [`docs/authentication.md`](docs/authentication.md#what-each-client-type-interfaces).
+
 ## Quick start (Docker development)
 
 ```bash

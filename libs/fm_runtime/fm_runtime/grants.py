@@ -245,6 +245,11 @@ def verify_policy(
       roles** (so ``admin`` actually confers each service's access; drift here
       would silently under- or over-grant admins). This is the third leg of the
       code ⇔ data.json ⇔ realm lockstep — previously kept by hand.
+    - **Realm provisioning groups (when a realm is supplied):** every
+      ``groups[*].realmRoles`` entry must be a realm-defined role **and** a
+      human-facing ``-access``/``admin`` role — a group may never map a MACHINE
+      role (``internal-service``/``jobs-internal``). See
+      :func:`_verify_realm_groups`.
     """
     errors: list[str] = []
     config = data.get("funnelmanager", {}).get("config", {}) if isinstance(data, dict) else {}
@@ -332,6 +337,67 @@ def verify_policy(
                     f"{FM_ORIGIN_SCOPE!r} to defaultClientScopes, or add the client "
                     "to ORIGIN_MINTING_CLIENTS if it mints fm_origin itself"
                 )
+
+        errors.extend(_verify_realm_groups(realm))
+    return errors
+
+
+def _verify_realm_groups(realm: dict[str, Any]) -> list[str]:
+    """Assert the realm's provisioning ``groups`` map only *safe* roles.
+
+    Groups are the human-provisioning unit (assign roles to a group, add users to
+    the group — see the ``provision-user`` skill). Two invariants, both fail-closed:
+
+    - **Definedness:** every ``realmRoles`` entry on a group must be a realm role
+      the realm actually defines — else adding a user to the group grants nothing
+      (or the import fails), a silent dead mapping.
+    - **Human-facing only:** a group may map **only** the per-service ``-access``
+      roles or ``admin`` (the human-assignable set). It must **never** map a
+      MACHINE role (``internal-service``, ``jobs-internal``) — those are held by
+      service accounts via client-credentials, and a human dropped into such a
+      group would silently gain a service identity's grants (a privilege-escalation
+      path that bypasses the one-access-role-per-service model).
+
+    Returns drift messages (empty == in sync). A realm with no ``groups`` key is a
+    no-op (backwards compatible). This is the groups leg of the realm lockstep —
+    see :func:`verify_policy`."""
+    errors: list[str] = []
+    realm_role_names = {
+        str(role.get("name"))
+        for role in (realm.get("roles", {}) or {}).get("realm", []) or []
+        if isinstance(role, dict)
+    }
+    # The only roles a group may confer: the per-service access roles + admin.
+    # Everything else in _DEFAULT_ROLE_GRANTS (internal-service, jobs-internal) is
+    # a machine role and must never be reachable via group membership.
+    human_assignable = {
+        role for role in _DEFAULT_ROLE_GRANTS if role.endswith("-access")
+    } | {"admin"}
+
+    def _walk(groups: Any) -> None:
+        for group in groups or []:
+            if not isinstance(group, dict):
+                continue
+            label = str(group.get("path") or group.get("name") or "?")
+            for role in group.get("realmRoles", []) or []:
+                role = str(role)
+                if role not in realm_role_names:
+                    errors.append(
+                        f"realm group {label!r} maps realm role {role!r} that the "
+                        "realm does not define — adding a user to it grants nothing "
+                        "(dead mapping); define the role or drop it from the group"
+                    )
+                elif role not in human_assignable:
+                    errors.append(
+                        f"realm group {label!r} maps role {role!r} which is NOT a "
+                        "human-facing '-access'/'admin' role — groups must never "
+                        "confer a MACHINE role (e.g. 'internal-service', "
+                        "'jobs-internal'); a human added to this group would gain a "
+                        "service identity's grants (privilege escalation)"
+                    )
+            _walk(group.get("subGroups"))
+
+    _walk(realm.get("groups", []))
     return errors
 
 
