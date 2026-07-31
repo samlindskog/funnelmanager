@@ -30,6 +30,16 @@ admin_user_token(aud, azp) := jwt({
 	"realm_access": {"roles": ["admin"]},
 })
 
+# A normal, least-privilege human: a specific -access role list, NEVER admin.
+user_token(aud, azp, roles) := jwt({
+	"iss": prod_iss,
+	"aud": aud,
+	"azp": azp,
+	"sub": "u-e2e",
+	"preferred_username": "e2e-canary",
+	"realm_access": {"roles": roles},
+})
+
 http_input(src_ns, src_sa, dst_ns, dst_sa, method, path, token) := {"attributes": {
 	"source": {"principal": spiffe(src_ns, src_sa)},
 	"destination": {"principal": spiffe(dst_ns, dst_sa)},
@@ -361,5 +371,63 @@ test_canary_search_sa_reaches_leads_canary_pod if {
 	authz.allow with input as http_input(
 		"prod", "search", "prod", "leads", "POST", "/api/leads",
 		admin_user_token("leads", "search"),
+	)
+}
+
+# --------------------------------------------------------------------------
+# 9. search-access includes search's dependencies (leads + mail contacts)
+# --------------------------------------------------------------------------
+# A role grants everything its service depends on. search calls leads for every
+# result path, so a NON-ADMIN search-access user's exchanged token authorizes the
+# search->leads hop via the normal grant check — no policy bypass. Before this,
+# the whole leads surface (similarity, hydration, credits, enrich, even starting a
+# search) was admin-only because search forwarded the human token, which lacked a
+# leads grant.
+
+# THE FIX: a plain search-access user reaches leads on the search->leads hop.
+test_search_access_user_reaches_leads_similarity if {
+	authz.allow with input as http_input(
+		"prod", "search", "prod", "leads", "POST", "/api/leads/similarity-search",
+		user_token("leads", "search", ["search-access"]),
+	)
+}
+
+test_search_access_user_reaches_leads_hydration if {
+	authz.allow with input as http_input(
+		"prod", "search", "prod", "leads", "POST", "/api/leads",
+		user_token("leads", "search", ["search-access"]),
+	)
+}
+
+# The dependency grant does NOT let a search-access user hit leads on any OTHER
+# hop: caller_ok still fences leads to search/mcp. A mail workload carrying a
+# search-access token cannot reach leads.
+test_dependency_grant_still_fenced_by_caller if {
+	not authz.allow with input as http_input(
+		"prod", "mail", "prod", "leads", "POST", "/api/leads/similarity-search",
+		user_token("leads", "mail", ["search-access"]),
+	)
+}
+
+# And a search-access token replayed with a browser azp is still rejected at
+# leads (azp_ok), and a non-leads audience is still rejected (token_valid) —
+# expanding the grant did not drop the exchange constraints.
+test_dependency_grant_still_enforces_azp_and_aud if {
+	not authz.allow with input as http_input(
+		"prod", "search", "prod", "leads", "POST", "/api/leads/similarity-search",
+		user_token("leads", "frontend", ["search-access"]),
+	)
+	not authz.allow with input as http_input(
+		"prod", "search", "prod", "leads", "POST", "/api/leads/similarity-search",
+		user_token("search", "search", ["search-access"]),
+	)
+}
+
+# A user WITHOUT search-access (e.g. mail-access only) gets no leads dependency
+# grant — leads stays denied for them.
+test_non_search_user_still_denied_at_leads if {
+	not authz.allow with input as http_input(
+		"prod", "search", "prod", "leads", "POST", "/api/leads/similarity-search",
+		user_token("leads", "search", ["mail-access"]),
 	)
 }

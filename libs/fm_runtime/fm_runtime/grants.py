@@ -30,9 +30,17 @@ from fm_runtime.settings import get_runtime_settings
 # service's `/api/<service>` prefix (principle 1: within a service every user
 # sees the same data — the role only gates whether you may call the API at all,
 # not which rows). `admin` keeps service:* (everything); `internal-service` stays
-# leads-only (detached-job client-credentials identity). Humans get NO direct
-# `leads` grant — leads is internal, reached via search/mcp. Change this table
-# and deploy/policy/data.json together (verify_policy asserts they are equal).
+# leads-only (detached-job client-credentials identity).
+#
+# A role includes its service's DEPENDENCIES: authorization is the Keycloak role,
+# and a role grants everything the service needs to do its job. `search` calls
+# `leads` (Apollo/Mongo/Milvus for every result, similarity, hydration, enrich,
+# credits), so `search-access` also grants `/api/leads` — otherwise a non-admin
+# search user is denied at leads (the whole leads surface was admin-only before).
+# This does NOT widen direct browser access: leads has no browser route (only the
+# anonymous webhook path) and caller_ok fences it to the search/mcp workloads, so
+# the grant is reachable only via the search->leads exchange hop. Change this
+# table and deploy/policy/data.json together (verify_policy asserts they equal).
 #
 # SECURITY-REVIEW (internal-jobs trust boundary): `jobs-internal` is the ONLY
 # role that may reach a producer's `/internal/jobs/*` endpoints (job-event stream
@@ -50,7 +58,8 @@ _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
         {"service": "leads", "methods": ["*"], "path_prefix": "/api/leads"}
     ],
     "search-access": [
-        {"service": "search", "methods": ["*"], "path_prefix": "/api/search"}
+        {"service": "search", "methods": ["*"], "path_prefix": "/api/search"},
+        {"service": "leads", "methods": ["*"], "path_prefix": "/api/leads"},
     ],
     "mail-access": [
         {"service": "mail", "methods": ["*"], "path_prefix": "/api/mail"}

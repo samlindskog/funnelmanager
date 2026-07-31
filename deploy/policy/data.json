@@ -155,9 +155,10 @@
         ]
       },
       "search-access": {
-        "description": "Human access to the search API. Full methods within /api/search (principle 1: every user of the service sees the same data; the role only gates API access, not rows). No direct leads access — leads is internal, reached via search/mcp. Keep in sync with fm_runtime/grants.py.",
+        "description": "Human access to the search API + everything search DEPENDS ON to serve it. Full methods within /api/search (principle 1: every user sees the same data; the role gates API access, not rows). Search's function requires calling leads (Apollo/Mongo/Milvus for every result, similarity, hydration, enrich, credits), so this role also grants /api/leads — a role includes its service's dependencies (authorization is the Keycloak role; no policy bypass). The leads grant never widens direct browser access: leads has no browser route (only the anonymous webhook path) and caller_ok fences it to the search/mcp workloads, so it is reachable only via the search->leads exchange hop. Keep in sync with fm_runtime/grants.py.",
         "grants": [
-          {"service": "search", "methods": ["*"], "path_prefix": "/api/search"}
+          {"service": "search", "methods": ["*"], "path_prefix": "/api/search"},
+          {"service": "leads", "methods": ["*"], "path_prefix": "/api/leads"}
         ]
       },
       "mail-access": {
