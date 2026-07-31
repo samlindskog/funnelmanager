@@ -27,6 +27,22 @@ searchui/dist/
 .env
 .env.prod
 .env.local
+# Local-cluster filled-in settings (the tracked template is settings.env.example)
+deploy/local/settings.env
+
+# Credentials / keys — defensive; none are tracked today, this prevents an
+# accidental future commit now that the repo is public.
+*.pem
+*.key
+*.p12
+*.pfx
+kubeconfig
+*.kubeconfig
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.secret
 
 # OS / IDE
 .DS_Store
