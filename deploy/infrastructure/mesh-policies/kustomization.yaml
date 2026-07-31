@@ -4,3 +4,4 @@ resources:
   - peer-authentication.yaml
   - request-authentication.yaml
   - authorization-policies.yaml
+  - grafana-jwt-exemption.yaml

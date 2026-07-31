@@ -1,0 +1,71 @@
+# Grafana gateway JWT exemption.
+#
+# WHY THIS EXISTS. The `keycloak-jwt` RequestAuthentication
+# (request-authentication.yaml) has NO selector, so istiod installs the Envoy
+# `jwt_authn` filter on EVERY filter chain of the shared ingress gateway —
+# including the grafana.x9bc433.win HTTPS listener. `jwt_authn` rejects any
+# *present* `Authorization: Bearer` that is not a well-formed JWT with
+# 401 "Jwt is not in the form of Header.Payload.Signature". A Grafana
+# service-account token (`glsa_...`) is OPAQUE, not a JWT, so a non-browser API
+# client (e.g. the Grafana MCP server) that authenticates to Grafana with one is
+# rejected at the edge before the request ever reaches Grafana — even though
+# Grafana's own auth accepts that token perfectly in-cluster.
+#
+# WHY IT IS SAFE / CONSISTENT WITH TODAY'S POSTURE. Grafana is already
+# "gateway-anonymous, self-authenticated": OPA admits the grafana host wholesale
+# (authz.rego `host == config.grafana_host`, the same posture as Keycloak's
+# host) *because* Grafana enforces its own Keycloak OIDC login. Browser logins
+# are COOKIE-based (generic_oauth session) and carry no `Authorization` header,
+# so `jwt_authn` never saw a token for them — only non-browser bearer callers
+# were being blocked. This filter changes nothing for browsers.
+#
+# WHY AN ENVOYFILTER (the repo prefers a CRD — see istio/telemetry.yaml).
+# Istio 1.24.3 `RequestAuthentication` cannot be scoped OFF a single listener:
+# its `targetRefs` accept only a whole Gateway and carry NO `sectionName`
+# per-listener granularity (verified against the 1.24.3 CRD:
+# requestauthentications targetRefs schema has group/kind/name/namespace only).
+# There is therefore no CRD that removes `jwt_authn` for just this one host
+# without restructuring the shared gateway. This EnvoyFilter surgically REMOVES
+# the `jwt_authn` HTTP filter from ONLY the grafana SNI filter chain:
+#   - Every OTHER filter chain (x9bc433.win, dev.x9bc433.win, kc.x9bc433.win,
+#     the :80 redirect) keeps the RA's `jwt_authn` untouched, so app-host
+#     `/api/*` JWT validation and the token-less DENY policy are byte-for-byte
+#     unchanged. NO app-host validation is weakened.
+#   - The `ext_authz` (OPA) filter is NOT touched, so grafana stays exactly as
+#     authorized as today (host-wholesale allow). This only stops the gateway
+#     from REJECTING a non-JWT bearer, letting Grafana self-authenticate it —
+#     it opens NO unauthenticated hole (OPA still gates the request).
+#
+# The match key is our OWN stable SNI hostname plus Envoy's stable filter
+# constants — no Gateway-API-generated route/vhost name is referenced (the
+# fragility the anti-EnvoyFilter lean warns about is avoided). Scope is one
+# workload (the edge gateway) and one filter chain.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: grafana-jwt-exemption
+  namespace: istio-ingress
+spec:
+  workloadSelector:
+    # The istio-ingress gateway pod. The `gateway` chart's selector label is
+    # `istio: <name trimPrefix "istio-">` -> `istio: ingress` (name=istio-ingress).
+    labels:
+      istio: ingress
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          portNumber: 443
+          filterChain:
+            # TLS-terminate listeners get one filter chain per hostname/cert, so
+            # this selects ONLY grafana's chain (its own grafana-tls cert).
+            sni: grafana.x9bc433.win # PLACEHOLDERS.md
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.jwt_authn
+      patch:
+        # Drop jwt_authn from grafana's chain: a present non-JWT bearer is then
+        # forwarded upstream to Grafana untouched instead of 401'd at the edge.
+        operation: REMOVE

@@ -5,6 +5,14 @@
 #
 # A RequestAuthentication only *validates present* tokens; rejection of
 # token-less requests is the DENY policy in authorization-policies.yaml.
+#
+# NOTE: the istio-ingress RA below has NO selector, so its jwt_authn filter is
+# installed on EVERY gateway listener — including grafana.x9bc433.win, which
+# self-authenticates and must accept an opaque (non-JWT) Grafana SA bearer.
+# Istio 1.24.3 RA targetRefs cannot scope OFF a single listener (no
+# sectionName), so grafana-jwt-exemption.yaml surgically removes jwt_authn from
+# ONLY the grafana SNI filter chain. Keep the two in sync if the RA is
+# re-scoped or the grafana host changes.
 apiVersion: security.istio.io/v1
 kind: RequestAuthentication
 metadata:
