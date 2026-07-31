@@ -51,7 +51,7 @@ images:
   # the stable prod pin job seds only `newTag: sha-*`, so the two never collide.
   - name: ghcr.io/samlindskog/funnelmanager/frontend-canary
     newName: ghcr.io/samlindskog/funnelmanager/frontend
-    newTag: canary-bed99787
+    newTag: canary-2e4fcd34
   # Header-routed BACKEND search canary (Step 3b). Same pattern as
   # frontend-canary above: the base uses the canary-logical name
   # `.../search-canary`; this entry remaps it to the real `search` repo with an
