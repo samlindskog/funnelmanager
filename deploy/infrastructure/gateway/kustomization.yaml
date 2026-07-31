@@ -15,4 +15,3 @@ resources:
   # Both canaries are activated (replicas: 1) in git today, so both are listed.
   # To add a new canaried service, drop `canary/<svc>-canary.yaml` and the toggle
   # tooling manages its line here automatically.
-  - canary/search-canary.yaml
