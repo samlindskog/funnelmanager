@@ -25,7 +25,9 @@ session. Setup driver: `.claude/skills/drive-canary/setup.sh`.
   ✔ Connected. `setup.sh` verifies this.
 - **Creds/paths in `~/.config/fm-e2e/creds.env`** (chmod 600): `FM_E2E_USER` /
   `FM_E2E_PASS` (the e2e-canary login), `FM_CANARY_TOKEN` (the `fm_canary` secret
-  cookie value), `FM_HUB_URL` / `FM_KEYCLOAK` / `GRAFANA_URL` (+ `GRAFANA_TOKEN`).
+  cookie value, also the `?t=` for the `/canary/on` toggle), `FM_HUB_URL` (the app
+  origin). Grafana access is NOT here — the Grafana MCP holds its own URL + Viewer
+  token in `~/.claude.json`.
 - **Playwright MCP config** `~/.config/fm-e2e/playwright-mcp.json` — **COOKIE mode**:
   headless chromium, **no `extraHTTPHeaders`**. `setup.sh` writes it. The old
   `x-fm-canary` header is now stripped by the gateway *and* broke Keycloak token
