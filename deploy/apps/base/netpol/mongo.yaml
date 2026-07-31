@@ -1,4 +1,4 @@
-# mongo: leads is its only client; it initiates nothing itself.
+# mongo: leads (and its canary) are its only clients; it initiates nothing itself.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,6 +17,13 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: leads
+        # leads-canary reuses the leads SA + the REAL prod Mongo (its trust
+        # model): without this the canary's lifespan Mongo connect is dropped at
+        # L3 and the pod hangs at "Waiting for application startup". Egress is
+        # granted on leads-canary's own policy; this is the destination half.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads-canary
       ports:
         - protocol: TCP
           port: 27017

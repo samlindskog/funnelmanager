@@ -1,5 +1,5 @@
-# milvus: leads is its only client (gRPC 19530); Prometheus scrapes its
-# metrics port (9091). Milvus itself depends on etcd + minio (nested
+# milvus: leads (and its canary) are its only clients (gRPC 19530); Prometheus
+# scrapes its metrics port (9091). Milvus itself depends on etcd + minio (nested
 # dependencies — their own policies admit only milvus).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -20,6 +20,13 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: leads
+        # leads-canary reuses the leads SA + the REAL prod Milvus (its trust
+        # model): without this the canary's lifespan Milvus ensure is dropped at
+        # L3 and the pod hangs at "Waiting for application startup". Egress is
+        # granted on leads-canary's own policy; this is the destination half.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: leads-canary
       ports:
         - protocol: TCP
           port: 19530
