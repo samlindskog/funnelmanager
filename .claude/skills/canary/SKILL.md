@@ -25,6 +25,34 @@ sibling already owns — it does not re-implement flux/kubectl/curl/PromQL:
 
 The driver is `.claude/skills/canary/canary.sh` (paths are repo-root relative).
 
+## When to spin up a canary (debugging doctrine)
+
+Canaries are **ephemeral test environments** — build for a task, **retire when done**
+(idle canaries burn a pod + node). When debugging (asked by the user OR for your own
+purposes), walk a **cheapest-first ladder** and reach for a canary only at the rungs
+that need it:
+
+1. **Logs only** — backend bug with an error signature → read `{service_name=<svc>}`
+   in Loki by trace_id/level. No canary.
+2. **`drive-canary --target prod`** — backend trace of an EXISTING (unchanged) prod
+   path → the shim injects a sampled `traceparent` the mesh honors (backend spans,
+   no RUM). No canary.
+3. **Drive stable + observe** — reproduce a UI flow on stable; read logs/metrics. No
+   browser RUM.
+4. **SPA canary** (rung to spin up) — a production **frontend** needs FULL browser
+   telemetry (Faro RUM: web-vitals, JS errors, user-actions, browser→backend traces)
+   that stable tree-shakes out → `deploy <spa> <ref>`, drive cookied
+   (`fm_debug=<secret>|canary`), observe `variant=canary` + Faro. Safe (no DB).
+5. **Backend canary** (rung to spin up) — a **backend diff** needs validation in
+   prod-realistic conditions (real datastores/auth) before shipping → `deploy <svc>
+   <ref> --confirm-backend`, drive, observe, then promote (normal release) or discard.
+
+**Retire hygiene:** prove idle first via observe-grafana — non-probe `variant=canary`
+requests over ~30m–1h, **excluding `/healthz|/readyz|/metrics`** (constant pod
+self-probes that falsely look busy) — then `retire <svc> --force`. Only armed services
+activate (today `frontend`/`searchui`/`search`/`leads`); arming a new one is a reviewed
+platform change. Full doctrine: MEMORY `canary-debugging-doctrine`.
+
 ## Routing classes (how the marker is steered) — ORTHOGONAL to SPA/backend
 
 The driver classifies every canary two independent ways. `svc_class` (spa vs
