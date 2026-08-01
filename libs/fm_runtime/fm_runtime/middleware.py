@@ -132,11 +132,12 @@ class PrincipalMiddleware:
         trace_headers.setdefault("x-request-id", request_id)
 
         # Presence only, best-effort telemetry hint — NEVER an authorization
-        # input. The gateway canary-cookie-gate EnvoyFilter now strips any
-        # client-supplied x-fm-canary and re-injects it only from the validated
-        # fm_canary cookie, so gateway-routed traffic can't forge it. East-west /
-        # direct-to-backend calls remain spoofable (a mesh peer could set it) —
-        # this stays telemetry/log-labeling only, never authz.
+        # input. The gateway debug-session-gate EnvoyFilter strips any
+        # client-supplied x-fm-canary and re-injects it only from a validated
+        # fm_debug session cookie selecting canary (fm_debug=<secret>|canary), so
+        # gateway-routed traffic can't forge it. East-west / direct-to-backend
+        # calls remain spoofable (a mesh peer could set it) — this stays
+        # telemetry/log-labeling only, never authz.
         is_canary = "x-fm-canary" in trace_headers
 
         ctx = fm_context.RequestContext(
