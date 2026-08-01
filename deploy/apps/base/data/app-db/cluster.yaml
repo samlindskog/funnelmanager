@@ -46,7 +46,7 @@ spec:
       # + wal.compression (below) cuts that WAL churn ~50x. RPO <=30m (re-syncable).
       archive_timeout: "30min"
   backup:
-    retentionPolicy: "14d"
+    retentionPolicy: "2d"  # TEMP: reclaiming old empty WAL, restored to 14d after prune
     barmanObjectStore:
       destinationPath: s3://${cluster_obj_bucket_backups}/app-db
       endpointURL: https://${cluster_obj_host}
