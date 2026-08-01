@@ -22,7 +22,8 @@
 # HTTPRoutes; it must NOT be duplicated into mesh VirtualServices. The marker is
 # already non-forgeable by the time it is in-mesh: the gateway strips any
 # client-supplied `x-fm-canary` and re-injects the secret only for a valid
-# host-only `fm_canary` cookie, and the leads-canary NetworkPolicy admits only
+# host-only `fm_debug=<secret>|canary` cookie (the single value-encoded cookie),
+# and the leads-canary NetworkPolicy admits only
 # in-mesh callers (search / search-canary / mcp). So "any x-fm-canary present"
 # in-mesh already implies "originated from a cookie-gated canary request."
 #
@@ -50,7 +51,7 @@
 # they manage the gateway canary HTTPRoutes. They key off a `routing_class`
 # taxonomy (leads/mcp/jobs = eastwest); build-canary's `pin` job ADDs
 # `- canary/<svc>-canary-eastwest.yaml` to mesh-policies/kustomization.yaml (on
-# the `- canary-cookie-gate.yaml` anchor) when it activates, and `canary.sh
+# the `- debug-session-gate.yaml` anchor) when it activates, and `canary.sh
 # retire` REMOVEs it on scale-to-0. Their arm/preflight guards additionally
 # assert this VS presence-matches x-fm-canary (regex .+) on gateways:[mesh] and —
 # fail closed — that it NEVER contains the secret token.

@@ -70,9 +70,12 @@ spec:
                   - containerPort: 15090
                     protocol: TCP
                     name: http-envoy-prom
-              # Canary-cookie secret, delivered from the `fm-canary-token` Secret
-              # (istio-ingress ns, key `token`) as env var FM_CANARY_SECRET. The
-              # canary-cookie-gate EnvoyFilter Lua reads it via os.getenv — the
+              # Debug-session (fm_debug) secret, delivered from the `fm-canary-token`
+              # Secret (istio-ingress ns, key `token`) as env var FM_CANARY_SECRET.
+              # The Secret + env var keep their bootstrap names DELIBERATELY (a
+              # rename would leave the gateway referencing a nonexistent Secret until
+              # bootstrap recreates it); the value is the fm_debug session secret.
+              # The debug-session-gate EnvoyFilter Lua reads it via os.getenv — the
               # secret is NO LONGER hardcoded in any manifest. Rotate by updating
               # the Secret and `kubectl rollout restart` this Deployment.
               - op: add

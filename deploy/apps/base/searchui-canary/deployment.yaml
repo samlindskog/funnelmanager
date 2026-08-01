@@ -14,17 +14,18 @@
 # of the search trace; the hub (frontend-canary) only does login/navigation.
 #
 # Routing (cookie-gated, canary-if-exists-else-stable): the browser sets the
-# host-only `fm_canary=<secret>` cookie; the canary-cookie-gate EnvoyFilter
-# validates it and injects the secret `x-fm-canary` header the /search/ canary
-# HTTPRoute (gateway/canary/searchui-canary.yaml) matches. No cookie → stable
-# searchui. Same prod namespace, same Keycloak session, same OPA policy.
+# host-only `fm_debug=<secret>|canary` session cookie (the single value-encoded
+# cookie); the debug-session-gate EnvoyFilter validates it and injects the secret
+# `x-fm-canary` header the /search/ canary HTTPRoute
+# (gateway/canary/searchui-canary.yaml) matches. No cookie → stable searchui.
+# Same prod namespace, same Keycloak session, same OPA policy.
 #
 # BROWSER-SESSION TRUST BOUNDARY (security): served SAME-ORIGIN at x9bc433.win,
 # so its feature-branch JS runs in the hub's origin and can read the prod
 # Keycloak session (`fm_oidc_*` localStorage) of any user routed here — which is
-# exactly why reaching it requires the secret `fm_canary` capability cookie and
-# the EnvoyFilter strips any forged `x-fm-canary`. Build only from TRUSTED
-# branches; rotate the token if it leaks.
+# exactly why reaching it requires the secret `fm_debug=<secret>|canary` capability
+# cookie (the single value-encoded cookie) and the EnvoyFilter strips any forged
+# `x-fm-canary`. Build only from TRUSTED branches; rotate the token if it leaks.
 #
 # IDENTITY (why no OPA/data.json change is needed): reuses the STABLE `searchui`
 # ServiceAccount, so its SPIFFE id is identical to stable searchui and OPA's

@@ -6,16 +6,19 @@ and land on the telemetry canary without the secret ever living in your bookmark
 
 Flow when you open the bookmark:
   http://localhost:8799/           (your bookmark; no secret)
-    -> 302 https://x9bc433.win/canary/on?t=<secret>   (secret injected here, from creds.env)
-       -> the canary-cookie-gate EnvoyFilter validates t, sets the HttpOnly
-          fm_canary cookie, and 302s to /  (you're now on the canary; sign in as e2e-canary)
+    -> 302 https://x9bc433.win/debug/canary/on?t=<secret>   (secret injected here, from creds.env)
+       -> the debug-session-gate EnvoyFilter validates t, sets the HttpOnly
+          fm_debug=<secret>|canary session cookie (one Set-Cookie), then 302s to /
+          (you're now on the canary; sign in as e2e-canary). fm_debug=<secret> alone
+          would route to STABLE; the |canary suffix in the value is what steers you
+          to the canary pods.
 
-  http://localhost:8799/off  -> https://x9bc433.win/canary/off  (clears the cookie)
+  http://localhost:8799/off  -> https://x9bc433.win/debug/off  (clears the fm_debug cookie)
 
-The secret (FM_CANARY_TOKEN) is read from ~/.config/fm-e2e/creds.env and never
-printed. The only place it appears in the browser is the transient /canary/on?t=
-redirect (browser history), never your bookmark. The cookie itself is set
-server-side as HttpOnly, so page JS can't read it.
+The secret (FM_DEBUG_TOKEN) is read from ~/.config/fm-e2e/creds.env and never
+printed. The only place it appears in the browser is the transient
+/debug/canary/on?t= redirect (browser history), never your bookmark. The fm_debug
+cookie itself is set server-side as HttpOnly, so page JS can't read it.
 
 Run:  python3 launcher.py            (foreground; Ctrl-C to stop)
       FM_CANARY_LAUNCHER_PORT=9000 python3 launcher.py   (override port)
@@ -35,7 +38,7 @@ def load_secret() -> str | None:
     try:
         with open(CREDS) as f:
             for line in f:
-                if line.startswith("FM_CANARY_TOKEN="):
+                if line.startswith("FM_DEBUG_TOKEN="):
                     return line.split("=", 1)[1].strip()
     except OSError:
         return None
@@ -55,9 +58,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib API)
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path in ("/", "/on"):
-            self._redirect(f"{HUB}/canary/on?t={SECRET}")
+            self._redirect(f"{HUB}/debug/canary/on?t={SECRET}")
         elif path == "/off":
-            self._redirect(f"{HUB}/canary/off")
+            self._redirect(f"{HUB}/debug/off")
         else:
             self.send_error(404)
 
@@ -67,9 +70,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main() -> int:
     if not SECRET:
-        print(f"error: no FM_CANARY_TOKEN in {CREDS}", file=sys.stderr)
+        print(f"error: no FM_DEBUG_TOKEN in {CREDS}", file=sys.stderr)
         return 1
-    print(f"canary launcher: http://localhost:{PORT}  ->  {HUB}/canary/on")
+    print(f"canary launcher: http://localhost:{PORT}  ->  {HUB}/debug/canary/on")
     print("  bookmark http://localhost:%d  (·/off to disable)  ·  Ctrl-C to stop" % PORT)
     try:
         http.server.HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

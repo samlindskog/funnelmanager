@@ -6,7 +6,7 @@
 # healthy endpoints, else to stable `searchui`. Route PRESENCE is tied to canary
 # ACTIVATION — this file is in the gateway kustomization `resources:` list ⇔
 # `searchui-canary` is scaled up. When idle, the only `/search/` route left is
-# the stable rule in httproutes.yaml, so the `fm_canary` cookie is always safe.
+# the stable rule in httproutes.yaml, so the `fm_debug` session cookie is always safe.
 #
 # WHO TOGGLES IT: build-canary.yml `pin` job adds `- canary/searchui-canary.yaml`
 # on activate (replicas 0→1); the canary skill removes it on retire (replicas 1→0).
@@ -18,21 +18,24 @@
 # canary; /api/search/* is steered separately by canary/search-canary.yaml (the
 # backend canary), so a full browser trace can span searchui-canary AND
 # search-canary independently. The marker is the gateway-managed, non-forgeable
-# `x-fm-canary` from canary-cookie-gate.yaml.
+# `x-fm-canary` from debug-session-gate.yaml.
 #
-# SECURITY: reaching the canary requires the host-only `fm_canary` cookie whose
-# value is the secret; the gateway strips any client-supplied `x-fm-canary` and
-# re-injects the secret only for a valid cookie, so an unaware/induced user cannot
-# be served unreviewed feature-branch JS same-origin. This holds WHILE the
-# cookie-gate filter is attached; the bounded detach failure mode (presence-match
-# means the strip is what makes the marker non-forgeable) is documented in
-# mesh-policies/canary-cookie-gate.yaml "DETACH FAILURE MODE".
+# SECURITY: reaching the canary requires the host-only `fm_debug=<secret>|canary`
+# session cookie (the single value-encoded cookie whose value is the secret plus the
+# `|canary` route selector — un-plantable because the selection is part of the
+# secret value); the gateway strips any client-supplied `x-fm-canary` and re-injects
+# the secret only for that valid cookie, so an unaware/induced user cannot be served
+# unreviewed feature-branch JS same-origin. This holds WHILE the debug-session-gate
+# filter is attached; the
+# bounded detach failure mode (presence-match means the strip is what makes the
+# marker non-forgeable) is documented in
+# mesh-policies/debug-session-gate.yaml "DETACH FAILURE MODE".
 #
 # NO SECRET IN THIS FILE. This route PRESENCE-matches `x-fm-canary` (regex .+),
 # like the east-west VS — the secret is not duplicated per route. It lives ONLY in
 # the `fm-canary-token` Secret (istio-ingress), delivered to the gateway as the
 # FM_CANARY_SECRET env var. Rotate = update the Secret + restart the gateway; no
-# edit here (see PLACEHOLDERS.md "Canary access").
+# edit here (see PLACEHOLDERS.md "Debug session & canary access").
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

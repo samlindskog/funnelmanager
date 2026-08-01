@@ -1,6 +1,6 @@
 ---
 name: enter-canary
-description: Put YOUR OWN browser on the funnelmanager telemetry canary by setting the host-only fm_canary cookie, via a bookmarkable localhost launcher that redirects to the gateway /canary/on endpoint (secret stays out of your bookmark; cookie is set server-side HttpOnly). Use when you want to hand-drive the canary UI as a human (then sign in as e2e-canary) — pairs with watch-canary to have Claude observe your session. NOT for the headless agent loop (that's drive-canary).
+description: Put YOUR OWN browser on the funnelmanager telemetry canary by setting the host-only fm_debug session cookie to its canary value (fm_debug=<secret>|canary), via a bookmarkable localhost launcher that redirects to the gateway /debug/canary/on endpoint (secret stays out of your bookmark; fm_debug is set server-side HttpOnly). Use when you want to hand-drive the canary UI as a human (then sign in as e2e-canary) — pairs with watch-canary to have Claude observe your session. NOT for the headless agent loop (that's drive-canary).
 ---
 
 # Enter the canary (human browser)
@@ -12,9 +12,12 @@ in Loki/Tempo where `watch-canary` (Claude) can read it.
 
 Two independent things are involved — keep them straight:
 
-1. **The `fm_canary` cookie** (routing) — this skill sets it. It's a *host-only*
-   cookie on `x9bc433.win`, so it can only be set on that origin; this launcher
-   redirects you there. The gateway sets it **HttpOnly** (page JS can't read it).
+1. **The `fm_debug` session cookie (canary value)** (routing) — this skill sets it.
+   `fm_debug` is a *host-only*, HttpOnly, secret cookie on `x9bc433.win` (set
+   server-side; page JS can't read it). Its value is a single value-encoded token:
+   `fm_debug=<secret>|canary` steers you to the canary pods, while `fm_debug=<secret>`
+   alone routes to stable. The launcher redirects you to the gateway, which sets the
+   `<secret>|canary` value.
 2. **Your login** (identity) — separate and normal: after the cookie is set you
    land on the canary and sign in through Keycloak as **`e2e-canary`** (creds in
    `~/.config/fm-e2e/creds.env`). Nothing special — the canary uses the same auth
@@ -24,15 +27,16 @@ Two independent things are involved — keep them straight:
 
 ```
 bookmark  http://localhost:8799/            (clean; no secret)
-  └─302→  https://x9bc433.win/canary/on?t=<secret>     (secret injected by the launcher, from creds.env)
-            └─ canary-cookie-gate EnvoyFilter validates t → Set-Cookie fm_canary (HttpOnly) → 302 /
+  └─302→  https://x9bc433.win/debug/canary/on?t=<secret>   (secret injected by the launcher, from creds.env)
+            └─ debug-session-gate EnvoyFilter validates t → Set-Cookie fm_debug=<secret>|canary (HttpOnly)
+               → 302 /
                  └─ you're on the canary; sign in as e2e-canary
 ```
 
-The secret (`FM_CANARY_TOKEN`) lives only in `~/.config/fm-e2e/creds.env` and the
+The secret (`FM_DEBUG_TOKEN`) lives only in `~/.config/fm-e2e/creds.env` and the
 gateway EnvoyFilter — never in your bookmark. It appears once, transiently, in the
-`/canary/on?t=` redirect (browser history); rotate it (see PLACEHOLDERS.md
-"Canary access") if that matters.
+`/debug/canary/on?t=` redirect (browser history); rotate it (see PLACEHOLDERS.md
+"Debug session & canary access") if that matters.
 
 ## Use it
 
@@ -52,9 +56,9 @@ on" badge. (Cloudflare caches `/`; if you were just on stable, a hard-reload or 
 
 ## Prerequisites
 
-- `~/.config/fm-e2e/creds.env` present (`FM_CANARY_TOKEN`, plus the `e2e-canary`
+- `~/.config/fm-e2e/creds.env` present (`FM_DEBUG_TOKEN`, plus the `e2e-canary`
   login for signing in). `drive-canary/setup.sh` writes/verifies this file.
-- The gateway `/canary/on|off` endpoint deployed (canary-cookie-gate EnvoyFilter).
+- The gateway `/debug/*` endpoints deployed (debug-session-gate EnvoyFilter).
 - A canary must actually be **active** for its pages/APIs to serve — otherwise the
   cookie is harmless and you fall through to stable (`canary`-if-exists-else-stable).
   Activate one with the **canary** skill (`canary deploy <svc> <ref>`).

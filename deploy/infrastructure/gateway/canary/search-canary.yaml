@@ -35,16 +35,17 @@
 # This route PRESENCE-matches `x-fm-canary` (regex .+), NOT the secret value —
 # consistent with the east-west leads VS. The secret lives in ONE place only: the
 # `fm-canary-token` Secret (istio-ingress), delivered to the gateway as the
-# FM_CANARY_SECRET env var and injected by the canary-cookie-gate EnvoyFilter for
-# a valid host-only `fm_canary` cookie. The gate strips any client-supplied
-# `x-fm-canary` and re-injects the secret only from the cookie, so the marker is
-# non-forgeable at the edge; by the time it reaches route matching it can only be
-# gateway-set, and presence is sufficient. There is NO secret in this file, so
-# there is nothing here to rotate — rotation is `kubectl` on the Secret + a
-# gateway restart (see PLACEHOLDERS.md "Canary access"). Non-forgeability here
-# depends on the cookie-gate filter being ATTACHED (it does the strip); the bounded
-# fail-open-on-detach failure mode is documented in
-# mesh-policies/canary-cookie-gate.yaml "DETACH FAILURE MODE".
+# FM_CANARY_SECRET env var and injected by the debug-session-gate EnvoyFilter for
+# a valid host-only `fm_debug=<secret>|canary` cookie (the single value-encoded
+# cookie whose `|canary` suffix selects canary as part of the secret value). The
+# gate strips any client-supplied `x-fm-canary` and re-injects the secret only for
+# that cookie, so the marker is non-forgeable at the edge; by the time it reaches route
+# matching it can only be gateway-set, and presence is sufficient. There is NO
+# secret in this file, so there is nothing here to rotate — rotation is `kubectl`
+# on the Secret + a gateway restart (see PLACEHOLDERS.md "Debug session & canary
+# access"). Non-forgeability here depends on the debug-session-gate filter being
+# ATTACHED (it does the strip); the bounded fail-open-on-detach failure mode is
+# documented in mesh-policies/debug-session-gate.yaml "DETACH FAILURE MODE".
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

@@ -5,11 +5,15 @@ resources:
   - request-authentication.yaml
   - authorization-policies.yaml
   - grafana-jwt-exemption.yaml
-  # App-host gateway Lua filter: strips client-supplied `x-fm-canary` and re-adds
-  # `x-fm-canary: <secret>` only for a valid `fm_canary` cookie (SNI-scoped like
-  # the grafana filter above). Makes the canary marker trustworthy for each active
-  # canary's route (gateway/canary/<svc>-canary.yaml).
-  - canary-cookie-gate.yaml
+  # App-host gateway Lua filter (was `canary-cookie-gate`): strips client-supplied
+  # `x-fm-canary` and re-adds `x-fm-canary: <secret>` only for a valid
+  # `fm_debug=<secret>|canary` session cookie (the single value-encoded cookie —
+  # `<secret>` alone = debug session on stable, `<secret>|canary` = debug session
+  # on the canary); also gates prod tracing on a valid `fm_debug` and serves the
+  # `/debug/*` cookie-toggle endpoints (SNI-scoped like the grafana filter above).
+  # Makes the canary marker trustworthy for each active canary's route
+  # (gateway/canary/<svc>-canary.yaml).
+  - debug-session-gate.yaml
   - canary/leads-canary-eastwest.yaml
   # EAST-WEST canary VirtualServices — "canary-if-exists-else-stable" for
   # INTERNAL hops (the in-mesh analogue of the gateway/canary/<svc>-canary.yaml
@@ -23,7 +27,7 @@ resources:
   # MANAGED TOGGLE (no longer a manual GitOps edit): the canary tooling now owns
   # these east-west lines exactly like the gateway canary routes.
   # build-canary.yml's `pin` job ADDs `- canary/<svc>-canary-eastwest.yaml` here
-  # (anchored on the `- canary-cookie-gate.yaml` resource line above) in the same
+  # (anchored on the `- debug-session-gate.yaml` resource line above) in the same
   # commit that activates an internal canary (leads/mcp/jobs, replicas 0->1), and
   # `.claude/skills/canary/canary.sh retire` REMOVEs it when it scales back to 0.
   # leads-canary is ACTIVE in git today, so its east-west VS

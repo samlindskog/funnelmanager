@@ -20,6 +20,12 @@ chase) and **prod-health** (cluster-side status). Full query reference:
   Faro RUM user-action that started it.
 - **Verify canary telemetry** — confirm a canary request actually rode the canary
   pods and was fully traced (`variant="canary"`, `app_version=~"canary-.*"`).
+- **Trace a stable-prod request** — a `drive-canary --target prod` run (fm_debug
+  only, prod-tracing shim) forces a sampled backend trace on **stable** pods. Such a
+  trace carries **backend spans only** — prod SPAs ship no Faro, so there is **no RUM
+  / browser span** and `variant="stable"`. Chase it by its `trace_id` (from
+  `window.__fm_last_trace_id`) through the Loki backend join + Tempo, not the Faro
+  streams.
 - **Gate a promotion** — compare `fm_http_*` success-rate / P99 latency for
   `variant="canary"` vs stable before promoting (the `variant` metric label only
   populates once backends redeploy with the fm_runtime change that added it; until
