@@ -2,12 +2,12 @@
 # arbitrary feature branch, push it as `<service>:canary-<shortsha>`, then
 # pin+activate it in that service's prod canary Deployment on main. Flux
 # reconciles the commit and the canary goes live for browsers that set the
-# host-only `fm_canary=<secret>` cookie on x9bc433.win — the canary-cookie-gate
-# EnvoyFilter validates it and injects the secret `x-fm-canary` token that the
-# active canary's dedicated route matches (see
-# deploy/infrastructure/gateway/canary/<svc>-canary.yaml — the per-service route,
-# present only while the canary is scaled up — and
-# deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml).
+# host-only `fm_debug=<secret>` session cookie PLUS the `fm_route=canary` selector
+# on x9bc433.win — the debug-session-gate EnvoyFilter validates them and injects
+# the secret `x-fm-canary` token that the active canary's dedicated route matches
+# (see deploy/infrastructure/gateway/canary/<svc>-canary.yaml — the per-service
+# route, present only while the canary is scaled up — and
+# deploy/infrastructure/mesh-policies/debug-session-gate.yaml).
 # Mirrors build-images.yml's auth/login/buildx + commit-pin pattern.
 #
 # General over every deployed service (NOT `backup` — it's a batch job, not a
@@ -34,12 +34,13 @@
 #     PRESENCE-matches the x-fm-canary header (regex .+, NEVER the secret),
 #     toggled in the gateway kustomization (anchor `- referencegrants.yaml`). The
 #     secret lives ONLY in the fm-canary-token Secret (istio-ingress) and is
-#     injected at the gateway by the canary-cookie-gate EnvoyFilter for a valid
-#     cookie; the routes are secret-free, exactly like the east-west VS.
+#     injected at the gateway by the debug-session-gate EnvoyFilter for a valid
+#     fm_debug cookie + fm_route=canary selector; the routes are secret-free,
+#     exactly like the east-west VS.
 #   * eastwest (leads/mcp/jobs) — INTERNAL-only: an in-mesh Istio VirtualService
 #     under mesh-policies/canary/<svc>-canary-eastwest.yaml that PRESENCE-matches
 #     x-fm-canary (regex .+, NEVER the secret), toggled in the mesh-policies
-#     kustomization (anchor `- canary-cookie-gate.yaml`).
+#     kustomization (anchor `- debug-session-gate.yaml`).
 # The preflight+pin guards assert BOTH classes presence-match and that NO
 # secret-looking literal is present in either route/VS (fail closed if present).
 #
@@ -278,7 +279,7 @@ jobs:
             kustomization="deploy/infrastructure/mesh-policies/kustomization.yaml"
             route_entry="canary/${SVC}-canary-eastwest.yaml"
             route_file="deploy/infrastructure/mesh-policies/${route_entry}"
-            anchor='- canary-cookie-gate\.yaml'
+            anchor='- debug-session-gate\.yaml'
           fi
           # SINGLE derivation for this job: hand the resolved kustomization to the
           # next step (same runner/checkout) via $GITHUB_ENV rather than re-deriving
@@ -381,7 +382,7 @@ jobs:
           # 503 the x-fm-canary marker — it falls through to stable. `canary.sh
           # retire` removes this line when it scales back to 0. Anchor the insert to
           # a STRUCTURAL resource line (a stable YAML token) — for gateway that is
-          # `- referencegrants.yaml`, for east-west `- canary-cookie-gate.yaml` —
+          # `- referencegrants.yaml`, for east-west `- debug-session-gate.yaml` —
           # NOT a prose comment, so a comment edit can't break it. Match only
           # UNCOMMENTED resource lines (`^  - `) so a commented note is never
           # mistaken for an existing entry. Idempotent: skip if already present.

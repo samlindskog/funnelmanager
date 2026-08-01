@@ -3,8 +3,9 @@
 #
 # A canary is a SEPARATE `<svc>-canary` Deployment beside stable `<svc>`, built
 # from an arbitrary feature ref as `<svc>:canary-<sha>`, reachable ONLY by a
-# host-only `fm_canary=<secret>` cookie on x9bc433.win (canary-cookie-gate
-# EnvoyFilter -> x-fm-canary header -> app-prod HTTPRoute). Activation = the
+# host-only `fm_debug=<secret>` session cookie PLUS the `fm_route=canary` selector
+# on x9bc433.win (debug-session-gate EnvoyFilter -> x-fm-canary header -> app-prod
+# HTTPRoute). Activation = the
 # build-canary.yml workflow pins the tag + flips replicas 0->1 on main; Flux
 # reconciles. Retire = replicas back to 0 (ephemeral-canary pattern).
 #
@@ -38,9 +39,9 @@ GW_CANARY_DIR=deploy/infrastructure/gateway/canary
 # not a gateway HTTPRoute — the in-mesh analogue of the gateway canary routes.
 EW_KUSTOMIZATION=deploy/infrastructure/mesh-policies/kustomization.yaml
 EW_CANARY_DIR=deploy/infrastructure/mesh-policies/canary
-# The canary-cookie secret is NO LONGER in git: it lives only in the
+# The debug-session (fm_debug) secret is NO LONGER in git: it lives only in the
 # `fm-canary-token` Secret (istio-ingress) and is injected at the gateway by the
-# canary-cookie-gate EnvoyFilter. ALL canary routes/VS now PRESENCE-match
+# debug-session-gate EnvoyFilter. ALL canary routes/VS now PRESENCE-match
 # `x-fm-canary` (regex .+) and must carry NO secret-looking literal — so there is
 # no secret to derive here.
 DEPLOY=.claude/skills/deploy-funnelmanager/deploy.sh
@@ -349,14 +350,14 @@ case "$cmd" in
       echo "propagates the x-fm-canary marker IN-MESH (fm_runtime carries it across hops). Concretely, for leads:"
       echo "run a cookie-gated canary SEARCH (search-canary must be active) whose search->${svc} hop carries the"
       echo "marker onto ${svc}-canary. Preferred: the enter-canary launcher (reads the token from ~/.config/fm-e2e/creds.env)."
-      echo "Manual: set the host-only cookie on https://x9bc433.win (token = the fm-canary-token Secret / creds.env FM_CANARY_TOKEN):"
-      echo "    document.cookie = 'fm_canary=<token>; path=/; secure; samesite=lax'"
+      echo "Manual: server-set both cookies via the gateway (token = the fm-canary-token Secret / creds.env FM_DEBUG_TOKEN):"
+      echo "    open https://x9bc433.win/debug/canary/on?t=<token>   # sets fm_debug (HttpOnly) + fm_route=canary"
       echo "Then exercise a search via drive-canary; its internal ${svc} call lands on ${svc}-canary."
     else
-      echo "Preferred: the enter-canary launcher (reads the token from ~/.config/fm-e2e/creds.env and hits /canary/on)."
-      echo "Manual: set the host-only cookie on https://x9bc433.win (token = the fm-canary-token Secret / creds.env FM_CANARY_TOKEN):"
-      echo "    document.cookie = 'fm_canary=<token>; path=/; secure; samesite=lax'"
-      echo "Then load the app; requests carrying the cookie route to ${svc}-canary. Exercise it via drive-canary."
+      echo "Preferred: the enter-canary launcher (reads the token from ~/.config/fm-e2e/creds.env and hits /debug/canary/on)."
+      echo "Manual: server-set both cookies via the gateway (token = the fm-canary-token Secret / creds.env FM_DEBUG_TOKEN):"
+      echo "    open https://x9bc433.win/debug/canary/on?t=<token>   # sets fm_debug (HttpOnly) + fm_route=canary"
+      echo "Then load the app; requests carrying both cookies route to ${svc}-canary. Exercise it via drive-canary."
     fi
     ;;
 

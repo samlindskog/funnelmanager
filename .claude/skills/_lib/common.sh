@@ -51,9 +51,10 @@ SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $FM_CP_HOST"
 K="sudo -n kubectl"
 FLUX="sudo -n env KUBECONFIG=$FM_KUBECONFIG flux"
 
-# NOTE: the former `fm_canary_secret` helper (which derived the canary-cookie
+# NOTE: the former `fm_canary_secret` helper (which derived the debug-session
 # secret from the EnvoyFilter Lua) was RETIRED — the secret is no longer in git.
 # It lives only in the `fm-canary-token` Secret (istio-ingress ns), delivered to
-# the gateway as the FM_CANARY_SECRET env var and injected by the cookie-gate
-# EnvoyFilter. Canary routes/VS presence-match `x-fm-canary`; nothing derives the
-# value from the tree. E2E callers read it from ~/.config/fm-e2e/creds.env.
+# the gateway as the FM_CANARY_SECRET env var and injected by the debug-session-gate
+# EnvoyFilter for a valid `fm_debug` cookie + `fm_route=canary` selector. Canary
+# routes/VS presence-match `x-fm-canary`; nothing derives the value from the tree.
+# E2E callers read it from ~/.config/fm-e2e/creds.env (FM_DEBUG_TOKEN).

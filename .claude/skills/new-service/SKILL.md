@@ -129,7 +129,7 @@ programmatic assembly for the parts that toggle on `stateful`/`browser`:
   `TPL_SERVICEACCOUNT`, `TPL_KUSTOMIZATION`; data: `TPL_DB_CLUSTER`,
   `TPL_DB_BACKUP`, `TPL_DB_KUSTOMIZATION`; netpol: `build_netpol()`, `TPL_DB_NETPOL`.
 - compose: `build_compose_service()` (dev/prod, db block, loopback vs expose).
-- canary: `TPL_GW_CANARY` (gateway, secret from `canary-cookie-gate.yaml`),
+- canary: `TPL_GW_CANARY` (gateway, secret from `debug-session-gate.yaml`),
   `TPL_EW_CANARY` (east-west, secret-free).
 - agent doc: `TPL_AGENT_MD`.
 

@@ -1,0 +1,380 @@
+# Debug-session gate (was `canary-cookie-gate`) — the security-critical edge Lua.
+#
+# WHAT THIS DOES. It splits the single legacy `fm_canary` secret cookie into TWO
+# independent, orthogonal things and adds a prod-tracing gate:
+#
+#   1. `fm_debug=<secret>` — an UN-FORGEABLE "debug session" grant (a straight
+#      RENAME of the old `fm_canary` secret cookie: still host-only, HttpOnly,
+#      server-set, same secret-token mechanism). By itself it does TWO things:
+#        (a) it PERMITS canary routing but does NOT trigger it (a plain debug
+#            session routes to STABLE/prod pods), and
+#        (b) it GATES the prod-tracing capability below — only a request carrying a
+#            valid `fm_debug` may force a trace sample on prod (stable OR canary).
+#   2. `fm_route=canary` — a NON-secret selector cookie, HONORED ONLY when a valid
+#      `fm_debug` is ALSO present. When both are present the gate injects the
+#      internal `x-fm-canary` routing header EXACTLY as before, so the per-service
+#      `<svc>-canary` HTTPRoutes/VirtualServices (unchanged, presence-match
+#      `x-fm-canary` regex `.+`) steer the request to the canary workload.
+#
+# So: `fm_debug` alone -> debug session on STABLE (prod tracing allowed);
+#     `fm_debug` + `fm_route=canary` -> debug session on the CANARY.
+# The internal `x-fm-canary` header, the `<svc>-canary` deployments, the
+# `variant`/`canary` telemetry labels and `FM_DEPLOYMENT_VARIANT` are ALL unchanged
+# — only the SESSION COOKIE, its toggle endpoints and this gate are renamed/extended.
+#
+# The browser must reach the canary WITHOUT sending `x-fm-canary` itself: that
+# header on `/api/*` rides cross-origin to Keycloak, triggering a CORS preflight
+# that breaks browser token refresh — and a client-set header is forgeable. So:
+#   - We ALWAYS remove any inbound (client-supplied) `x-fm-canary` request header,
+#     on ANY route (`/`, `/api/*`, SPAs), so it is never client-forgeable.
+#   - We re-inject `x-fm-canary: <secret>` ONLY when the request carries a valid
+#     host-only `fm_debug=<secret>` cookie AND an `fm_route=canary` selector cookie.
+#     Cookies trigger no preflight and are host-scoped (no Domain attribute -> not
+#     sent to kc./grafana. subdomains).
+#
+# FORCED-TRACING GATE (new). Istio ingress honors an incoming `traceparent` whose
+# sampled flag is 1, so ANY anonymous client could force-sample prod at will
+# (Denial-of-Wallet on the trace pipeline / forensic-noise vector). We close that:
+# when a request carries a sampled `traceparent` (`...-01`) but has NO valid
+# `fm_debug` cookie, we reset the flags byte to `-00` so Envoy's own random
+# baseline decides instead. With a valid `fm_debug` the `traceparent` is left
+# UNTOUCHED (honor-incoming-sampled -> a full trace on whatever pods it hits,
+# stable or canary). `fm_debug` is thus the real gate for prod tracing. Fail-safe:
+# any parse error UNDER-samples (never over-samples) and a request WITHOUT a
+# traceparent is never touched (has()-guarded, like the accesslog CEL filter).
+#
+# *** ORDERING CAVEAT — READ BEFORE TRUSTING THE FORCED-TRACING GATE. ***
+# This Lua runs as an HTTP filter INSERT_BEFORE `jwt_authn` — the EARLIEST HTTP
+# filter position we can occupy at this HCM. For the traceparent reset to change
+# the INGRESS sampling decision, it must run BEFORE the HCM makes that decision.
+# Envoy makes its per-request tracing/sampling decision inside
+# `ConnectionManagerImpl::ActiveStream::decodeHeaders` (it reads the incoming
+# trace context there), and the relative ordering of THAT vs. the HTTP filter
+# chain's `decodeHeaders` is NOT guaranteed by these manifests and is
+# version-dependent. If the HCM samples BEFORE the filter chain runs, this rewrite
+# still fixes DOWNSTREAM propagation (the rewritten header is what egresses to the
+# upstream sidecar, so `<svc>`/`<svc>-canary` won't honor a forced sample) but may
+# NOT suppress the ingress span itself. This MUST be validated live before it is
+# relied on — see the "LIVE TEST" in the branch report. Do not assume it holds.
+#
+# The SECRET is NOT hardcoded here. It lives in ONE place: the `fm-canary-token`
+# Secret (istio-ingress ns, key `token`) — its bootstrap name is DELIBERATELY kept
+# to avoid a live-Secret break on reconcile (renaming it would leave the gateway
+# referencing a nonexistent Secret until bootstrap recreates it). It is delivered
+# to this gateway's Envoy container as env `FM_CANARY_SECRET` (see
+# infrastructure/istio/gateway-deployment.yaml); the Lua reads it via
+# os.getenv("FM_CANARY_SECRET"). It is the `fm_debug` session secret. Rotate by
+# updating the Secret + `kubectl rollout restart` the gateway; no manifest edit.
+#
+# FAIL-SAFE (this runs on EVERY front-door request). If FM_CANARY_SECRET is unset
+# or empty the filter degrades safely: it NEVER injects `x-fm-canary`, the
+# `/debug/*` endpoints set no `fm_debug` cookie, the forced-tracing gate still
+# under-samples any anonymous forced sample, and it never errors or interrupts the
+# request — normal traffic simply flows to stable. The client-`x-fm-canary`-strip
+# stays UNCONDITIONAL while the filter is attached.
+#
+# DETACH FAILURE MODE — HONEST ACCOUNTING (unchanged from the old gate). The canary
+# HTTPRoutes/VS PRESENCE-match `x-fm-canary` (regex .+), not the literal secret,
+# because the secret was moved out of git and Gateway API cannot match a
+# Secret-delivered value. Consequence: if this filter ever silently DETACHES (Istio
+# upgrade renames the jwt_authn anchor, gateway redeploy, reconcile lag,
+# workloadSelector drift) it stops stripping the client header too — so a
+# client-supplied `x-fm-canary: anything` would then reach route matching and steer
+# to the canary. Accepted because the blast radius is bounded and shallow:
+#   * it can route to a canary ONLY while that canary is ACTIVE (its route file
+#     exists only then — "canary-if-exists-else-stable"); idle = no route;
+#   * reaching a canary pod is NOT an authz bypass — the canary enforces the SAME
+#     Keycloak/OPA auth as stable; an anonymous caller still gets 401/login;
+#   * `x-fm-canary` is telemetry/routing-only, NEVER an authz input (OPA never
+#     inspects it);
+#   * a browser CANNOT be induced to send `x-fm-canary` cross-origin (forbidden
+#     header / CORS), so the "trick a victim onto canary JS" vector stays closed.
+# NOTE the forced-tracing gate ALSO degrades on detach: a detached filter stops
+# resetting forced samples, so anonymous clients could again force-sample prod.
+# That is a telemetry-cost regression, not a privilege gain, and is bounded the
+# same way — keep the filter attached (the gateway reconcile is the guard).
+#
+# The secret rides `x-fm-canary` internally (fm_runtime TRACE_HEADERS, propagated
+# east-west). Acceptable: mTLS mesh, never logged, same containment class as a
+# Bearer token.
+#
+# WHY EARLY (INSERT_BEFORE jwt_authn). Inserting ahead of `jwt_authn` guarantees
+# the header is canonicalized (stripped, then conditionally re-added) BEFORE auth
+# and BEFORE route matching, so route selection sees only the gateway-set value.
+# It runs before ext_authz too, so this is NOT an authz decision (OPA does not
+# inspect `x-fm-canary`) — canary routing is a pure traffic-splitting concern. It
+# is also the earliest place we can attempt the traceparent reset (see the ORDERING
+# CAVEAT above for why "earliest HTTP filter" may still be after the HCM samples).
+#
+# WHY AN ENVOYFILTER + SNI SCOPE. Mirrors grafana-jwt-exemption.yaml: match key is
+# our OWN stable SNI hostname (`x9bc433.win`, the app host) plus Envoy's stable
+# filter constants — no Gateway-API-generated route/vhost name is referenced.
+# Scope is one workload (the edge gateway) and one filter chain (the app host);
+# the kc./grafana. chains and the :80 redirect are untouched.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: debug-session-gate
+  namespace: istio-ingress
+spec:
+  workloadSelector:
+    # The istio-ingress gateway pod (chart selector `istio: <name trimPrefix
+    # "istio-">` -> `istio: ingress`), same as grafana-jwt-exemption.yaml.
+    labels:
+      istio: ingress
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          portNumber: 443
+          filterChain:
+            # ONLY the app host's TLS filter chain (its own x9bc433.win cert).
+            sni: x9bc433.win # PLACEHOLDERS.md (App host)
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                # Insert immediately before the RequestAuthentication's jwt_authn
+                # so the marker is fixed before auth + routing.
+                name: envoy.filters.http.jwt_authn
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: debug-session-gate
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            default_source_code:
+              inline_string: |
+                -- Split the legacy `fm_canary` secret cookie into `fm_debug`
+                -- (secret session grant) + `fm_route=canary` (non-secret selector),
+                -- gate prod tracing on `fm_debug`, and expose the `/debug/*`
+                -- server-side cookie-toggle endpoints. Fails SAFE throughout: no
+                -- valid `fm_debug` -> no `x-fm-canary` injected (stable) AND any
+                -- forced trace sample is reset to the baseline. The secret is never
+                -- logged.
+
+                -- Extract query param `key` from a raw query string (the text
+                -- AFTER "?"), exact-matching the param NAME (so `t` is never
+                -- confused with `foot`, nor with another param whose VALUE merely
+                -- contains the token). nil if absent.
+                function fm_query_param(query, key)
+                  for pair in string.gmatch(query, "([^&]+)") do
+                    local eq = string.find(pair, "=", 1, true)
+                    if eq ~= nil then
+                      local name = string.sub(pair, 1, eq - 1)
+                      if name == key then
+                        return string.sub(pair, eq + 1)
+                      end
+                    end
+                  end
+                  return nil
+                end
+
+                -- Forced-tracing gate. Reset a client-forced trace sample unless a
+                -- valid `fm_debug` session is present. W3C traceparent is
+                -- "vv-<32hex traceid>-<16hex spanid>-<ff flags>" = 55 chars; the
+                -- sampled bit is the LSB of the flags byte. We rewrite ONLY when the
+                -- header EXISTS (has()-guarded), is well-formed, and its sampled bit
+                -- is set. The pcall body is PURE (computes the new value, never
+                -- mutates) so an error can't leave a half-applied state; on ANY
+                -- error we UNDER-sample (flags -> 00, or strip a malformed value),
+                -- NEVER over-sample, and a request WITHOUT a traceparent is never
+                -- touched. See the ORDERING CAVEAT in this file's header.
+                function fm_desample(headers)
+                  local tp = headers:get("traceparent")
+                  if tp == nil then
+                    return
+                  end
+                  local ok, newtp = pcall(function()
+                    if string.len(tp) ~= 55 then
+                      return nil            -- malformed; Envoy validates it itself
+                    end
+                    local n = tonumber(string.sub(tp, 54, 55), 16)
+                    if n == nil then
+                      error("bad flags")    -- force the fail-safe branch
+                    end
+                    if (n % 2) == 1 then
+                      return string.sub(tp, 1, 53) .. "00"  -- clear the sampled bit
+                    end
+                    return nil              -- not sampled; nothing to do
+                  end)
+                  if not ok then
+                    -- Parse errored -> under-sample. Reset flags if it LOOKS the
+                    -- right length, else strip so no forced sample survives.
+                    if string.len(tp) == 55 then
+                      newtp = string.sub(tp, 1, 53) .. "00"
+                    else
+                      newtp = false         -- sentinel: strip the header
+                    end
+                  end
+                  if newtp == false then
+                    headers:remove("traceparent")
+                  elseif newtp ~= nil then
+                    headers:replace("traceparent", newtp)
+                  end
+                end
+
+                function envoy_on_request(request_handle)
+                  local headers = request_handle:headers()
+                  -- The ONE secret local (the fm_debug session secret), reused by
+                  -- the toggle endpoints and the strip/inject below. Read from the
+                  -- gateway env (fm-canary-token Secret -> FM_CANARY_SECRET). nil if
+                  -- unset; treat nil OR empty as "no secret" and fail SAFE.
+                  local secret = os.getenv("FM_CANARY_SECRET")
+                  local have_secret = (secret ~= nil) and (secret ~= "")
+
+                  -- ===== Server-side cookie toggle endpoints (short-circuit) =====
+                  -- Run at the TOP of the request phase, answered ENTIRELY by this
+                  -- Lua local reply (INSERT_BEFORE jwt_authn, so they never hit
+                  -- jwt_authn / OPA / the app). All cookies are set SERVER-SIDE,
+                  -- hence HttpOnly. Secure + SameSite=Lax retained.
+                  --
+                  -- Because Envoy's Lua `respond()` takes a single Lua table it can
+                  -- emit only ONE Set-Cookie per reply; fm_debug and fm_route are
+                  -- SEPARATE cookies, so the public endpoints set `fm_debug` then
+                  -- 302 to an internal `/debug/route/{canary,off}` helper that
+                  -- sets/clears the `fm_route` selector. A browser follows the 302
+                  -- as one navigation (each hop is Sec-Fetch-Dest: document), so it
+                  -- is transparent to the caller.
+                  local method = headers:get(":method")
+                  local path = headers:get(":path")
+                  if method == "GET" and path ~= nil then
+                    -- Split off any query string, then EXACT-match the path so
+                    -- `/debug/onx` does NOT match `/debug/on` and `/debug/on` is
+                    -- distinct from `/debug/canary/on`.
+                    local base = path
+                    local query = ""
+                    local qpos = string.find(path, "?", 1, true)
+                    if qpos ~= nil then
+                      base = string.sub(path, 1, qpos - 1)
+                      query = string.sub(path, qpos + 1)
+                    end
+
+                    -- /debug/on and /debug/canary/on both SET the secret `fm_debug`
+                    -- cookie, guarded IDENTICALLY (fail CLOSED): set it ONLY when
+                    -- `t` EXACTLY equals the secret AND the request is a top-level
+                    -- navigation. They differ only in where they 302 next:
+                    --   /debug/on         -> /debug/route/off    (clear fm_route -> STABLE)
+                    --   /debug/canary/on  -> /debug/route/canary (set  fm_route=canary)
+                    -- A missing/wrong `t` OR a non-navigation redirects to `/` with
+                    -- NO cookie set (never a debug session, never a route selector).
+                    --
+                    -- Navigation guard: these are state-changing GETs, so someone
+                    -- WITH the secret could try a drive-by plant via
+                    -- `<img src=".../debug/on?t=...">` (SameSite=Lax stops the cookie
+                    -- being SENT cross-site, not being SET by a subresource load). A
+                    -- subresource carries Sec-Fetch-Dest image/script/empty/iframe; a
+                    -- real top-level navigation carries `document`. Sec-Fetch-* are
+                    -- browser-set FORBIDDEN headers (page JS can't forge them).
+                    -- Absent => older browser -> allow (exact-`t` + SameSite=Lax
+                    -- still gate). Present-and-not-"document" => refuse.
+                    if base == "/debug/on" or base == "/debug/canary/on" then
+                      local dest = headers:get("sec-fetch-dest")
+                      local nav = (dest == nil) or (dest == "document")
+                      local t = fm_query_param(query, "t")
+                      -- have_secret guards TWO things: (1) with no secret set no
+                      -- cookie (fail safe), and (2) the nil==nil trap — if secret is
+                      -- nil and `t` absent (also nil), `t == secret` would be TRUE.
+                      if nav and have_secret and t == secret then
+                        local nextp = "/debug/route/off"
+                        if base == "/debug/canary/on" then
+                          nextp = "/debug/route/canary"
+                        end
+                        request_handle:respond(
+                          {[":status"] = "302",
+                           ["location"] = nextp,
+                           ["set-cookie"] = "fm_debug=" .. secret ..
+                             "; Path=/; Max-Age=604800; Secure; HttpOnly; SameSite=Lax"},
+                          "")
+                      else
+                        request_handle:respond(
+                          {[":status"] = "302", ["location"] = "/"},
+                          "")
+                      end
+                      return
+                    end
+
+                    -- INTERNAL helper: set the NON-secret `fm_route=canary` selector,
+                    -- then land on `/`. No secret needed — fm_route is INERT without
+                    -- a valid fm_debug (injection needs BOTH; routing needs the
+                    -- injected x-fm-canary which needs both). Reached only via the
+                    -- 302 from /debug/canary/on (a document navigation).
+                    if base == "/debug/route/canary" then
+                      request_handle:respond(
+                        {[":status"] = "302",
+                         ["location"] = "/",
+                         ["set-cookie"] = "fm_route=canary; Path=/; Max-Age=604800; Secure; HttpOnly; SameSite=Lax"},
+                        "")
+                      return
+                    end
+
+                    -- INTERNAL helper: CLEAR the `fm_route` selector, then land on
+                    -- `/`. Clearing is always safe (drops to stable). Reached via the
+                    -- 302 from /debug/on and /debug/off.
+                    if base == "/debug/route/off" then
+                      request_handle:respond(
+                        {[":status"] = "302",
+                         ["location"] = "/",
+                         ["set-cookie"] = "fm_route=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"},
+                        "")
+                      return
+                    end
+
+                    -- /debug/off — clear the secret `fm_debug` cookie, then 302 to
+                    -- /debug/route/off to also clear the fm_route selector, so BOTH
+                    -- are cleared. Clearing needs no secret (always drops to stable).
+                    if base == "/debug/off" then
+                      request_handle:respond(
+                        {[":status"] = "302",
+                         ["location"] = "/debug/route/off",
+                         ["set-cookie"] = "fm_debug=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"},
+                        "")
+                      return
+                    end
+                  end
+
+                  -- ===== Parse cookies ONCE: valid fm_debug? fm_route=canary? =====
+                  -- fm_debug=<secret> is the un-forgeable debug-session grant;
+                  -- fm_route=canary is the non-secret selector, honored ONLY with a
+                  -- valid fm_debug. Both are read from the single Cookie header.
+                  local have_debug = false
+                  local want_canary = false
+                  local cookie = headers:get("cookie")
+                  if have_secret and cookie ~= nil then
+                    for pair in string.gmatch(cookie, "([^;]+)") do
+                      local kv = string.gsub(pair, "^%s*(.-)%s*$", "%1")
+                      local eq = string.find(kv, "=", 1, true)
+                      if eq ~= nil then
+                        local name = string.sub(kv, 1, eq - 1)
+                        local value = string.sub(kv, eq + 1)
+                        if name == "fm_debug" and value == secret then
+                          have_debug = true
+                        elseif name == "fm_route" and value == "canary" then
+                          want_canary = true
+                        end
+                      end
+                    end
+                  end
+
+                  -- ===== Strip (UNCONDITIONAL) =====
+                  -- Untrusted: strip any client-supplied marker from the request
+                  -- headers REGARDLESS of secret config, so a client can never
+                  -- smuggle in `x-fm-canary`.
+                  headers:remove("x-fm-canary")
+
+                  -- ===== Forced-tracing gate =====
+                  -- Only a valid fm_debug session may force-sample prod. Without it,
+                  -- reset a client-forced sample to the baseline (fail-safe
+                  -- under-sample). With it, leave traceparent untouched
+                  -- (honor-incoming-sampled).
+                  if not have_debug then
+                    fm_desample(headers)
+                  end
+
+                  -- ===== Conditional inject =====
+                  -- Route to the canary ONLY when the debug session is valid AND the
+                  -- fm_route=canary selector is set. fm_debug alone -> stable.
+                  if have_debug and want_canary then
+                    headers:add("x-fm-canary", secret)
+                  end
+                end

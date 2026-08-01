@@ -113,10 +113,11 @@ spec:
     # NOT here — same "canary-if-exists-else-stable" model as the search canary
     # above: a SEPARATE HTTPRoute added to the gateway kustomization only while
     # `frontend-canary` is scaled up. When the canary is idle the marked `/`
-    # request falls through to this stable catch-all, so the `fm_canary` cookie is
-    # always safe. The canary-cookie-gate EnvoyFilter (unchanged) still strips any
-    # client-supplied `x-fm-canary` and re-injects the secret only for a valid
-    # host-only `fm_canary` cookie. See canary/frontend-canary.yaml + kustomization.
+    # request falls through to this stable catch-all, so the `fm_debug` session
+    # cookie is always safe. The debug-session-gate EnvoyFilter (unchanged) still
+    # strips any client-supplied `x-fm-canary` and re-injects the secret only for a
+    # valid host-only `fm_debug` cookie WITH the `fm_route=canary` selector. See
+    # canary/frontend-canary.yaml + kustomization.
     # Hub/search SPA — catch-all last (its nginx does try_files fallback).
     - matches:
         - path: { type: PathPrefix, value: / }

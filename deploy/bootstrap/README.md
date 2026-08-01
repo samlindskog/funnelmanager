@@ -71,8 +71,9 @@ Creates (names fixed, values prompted): `cert-manager/cloudflare-api-token`,
 `objectstore-backups` (prod/dev/identity), `monitoring/objectstore-loki`,
 `monitoring/grafana-admin`, `fm-oidc-<svc>` + `apollo` + `openai` +
 `google-oauth` + `milvus-minio` (prod/dev), `ghcr-pull` (prod/dev), and
-`istio-ingress/fm-canary-token` (the canary cookie secret the gateway Envoy
-reads as `FM_CANARY_SECRET`; blank prompt auto-generates a random 32-hex value).
+`istio-ingress/fm-canary-token` (the debug-session `fm_debug` secret the gateway
+Envoy reads as `FM_CANARY_SECRET` — Secret + env keep their bootstrap names; blank
+prompt auto-generates a random 32-hex value).
 If adopting SOPS later, these become encrypted manifests; the bootstrap
 key would be created here.
 

@@ -6,11 +6,11 @@
 # port 8000, probes, resources) so it talks to the stack EXACTLY like prod.
 #
 # Routing (cookie-gated, browser hop only): to reach the canary the browser
-# sets a host-only `fm_canary=<secret>` cookie on x9bc433.win; the
-# canary-cookie-gate EnvoyFilter validates that cookie at the gateway, strips
-# any client-supplied `x-fm-canary` header, and injects the secret `x-fm-canary`
-# token that the app-prod HTTPRoute's /api/search/ canary rule matches. Everyone
-# without the cookie keeps hitting stable `search`.
+# sets a host-only `fm_debug=<secret>` session cookie PLUS the `fm_route=canary`
+# selector on x9bc433.win; the debug-session-gate EnvoyFilter validates them at
+# the gateway, strips any client-supplied `x-fm-canary` header, and injects the
+# secret `x-fm-canary` token that the app-prod HTTPRoute's /api/search/ canary
+# rule matches. Everyone without the cookies keeps hitting stable `search`.
 #
 # The BROWSER hop: browser(cookie) -> canary UI -> canary search. The
 # search->leads hop carries the propagated x-fm-canary marker via fm_runtime; if
@@ -49,9 +49,10 @@
 #      spend (via leads), unlike the static, egress-less frontend canary. (The
 #      build-canary.yml change itself is a later pass — this comment records the
 #      requirement; do not activate until it lands.)
-#   2. The secret `fm_canary` cookie gate: a request reaches this workload only
-#      if it carries the capability-token cookie (an unaware/induced user
-#      cannot be routed here), and the EnvoyFilter strips any forged header.
+#   2. The secret `fm_debug` cookie gate: a request reaches this workload only
+#      if it carries the capability-token cookie PLUS the `fm_route=canary`
+#      selector (an unaware/induced user cannot be routed here), and the
+#      EnvoyFilter strips any forged header.
 #   3. `replicas: 0` by default: nothing serves until a deliberate test scales
 #      it up; the placeholder `canary-PINME` tag is never pulled while idle.
 # Because it shares prod's identity + datastores, treat activation as running

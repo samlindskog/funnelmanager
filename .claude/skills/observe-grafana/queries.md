@@ -124,6 +124,14 @@ Expected canary shape: a single trace spanning browser (Faro) → istio-ingress 
 `<svc>-canary` → stable upstreams, sampled because the canary SPA originated
 `sampled=1` (honor-incoming-sampled at the 5% mesh baseline).
 
+Expected **`drive-canary --target prod`** shape: NO browser/Faro span (prod ships
+no RUM). The drive-canary fetch **shim** originates `sampled=1` on same-origin
+`/api/*` only, so the trace starts at **istio-ingress → stable `<svc>` → upstreams**
+with `variant="stable"` — **backend spans only**. Honored solely because the request
+carried a valid `fm_debug` cookie (the `debug-session-gate` resets a forced
+`traceparent` to baseline otherwise). Chase it by the `trace_id` the shim stashed on
+`window.__fm_last_trace_id`.
+
 ---
 
 ## Prometheus (PromQL)

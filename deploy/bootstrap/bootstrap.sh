@@ -158,12 +158,15 @@ YAML
     ensure cert-manager cloudflare-api-token generic cloudflare-api-token \
       --from-literal=api-token="$CFT"
 
-    # Canary cookie secret: the gateway Envoy reads it as FM_CANARY_SECRET (via
-    # secretKeyRef in infrastructure/istio/gateway-deployment.yaml) and the
-    # canary-cookie-gate EnvoyFilter injects it for a valid `fm_canary` cookie.
-    # The routes presence-match `x-fm-canary`, so this Secret is the ONE place the
-    # value lives. Blank = generate a random 32-hex value.
-    read -rsp "Canary cookie secret (istio-ingress, blank = generate): " CANTOK; echo
+    # Debug-session (fm_debug) secret: the gateway Envoy reads it as
+    # FM_CANARY_SECRET (via secretKeyRef in
+    # infrastructure/istio/gateway-deployment.yaml) and the debug-session-gate
+    # EnvoyFilter injects `x-fm-canary` for a valid `fm_debug` cookie + `fm_route=
+    # canary` selector. The Secret + env keep their bootstrap names deliberately
+    # (a rename would break the live gateway ref); the value is the fm_debug
+    # session secret. The routes presence-match `x-fm-canary`, so this Secret is
+    # the ONE place the value lives. Blank = generate a random 32-hex value.
+    read -rsp "Debug-session (fm_debug) secret (istio-ingress, blank = generate): " CANTOK; echo
     [ -n "$CANTOK" ] || CANTOK="$(openssl rand -hex 16)"
     ensure istio-ingress fm-canary-token generic fm-canary-token \
       --from-literal=token="$CANTOK"
