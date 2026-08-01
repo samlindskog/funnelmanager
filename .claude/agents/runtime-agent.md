@@ -38,6 +38,14 @@ your delta.
   `/webhooks/apollo/{secret}`) and OIDC `code`/`state` otherwise land in Loki. The
   unmatched-route fallback still logs the raw path — document that residual, don't
   special-case it (P10).
+- **The `fm_http_requests_total` / `fm_http_request_duration_seconds` label sets —
+  `{service, method, route, status, variant}` / `{service, method, route, variant}` —
+  are a downstream query contract** consumed by `.claude/skills/observe-grafana/queries.md`,
+  the canary promotion PromQL, and the provisioned Grafana dashboards
+  (`deploy/infrastructure/observability/dashboards/`). Changing a label set is a
+  paired update: fix the cookbook/dashboard queries in the same change (or name
+  `platform-agent` in the hand-off), and keep cardinality fixed (`variant` is exactly
+  `stable|canary`, read once at init from `FM_DEPLOYMENT_VARIANT`).
 - **`@anonymous` is the allowlist** (`fm_runtime.anonymous(reason)`). It is
   exported via `python3 -m fm_runtime.export`; OPA policy data is generated from it,
   so **code and policy cannot drift** — regenerate after any change.
@@ -75,7 +83,10 @@ verify against ≥2 backends (principal acceptance, a token exchange, a grant al
 and re-run `python3 -m fm_runtime.export --check … --realm` after any
 annotation/grant/scope change (this env has no `python` alias; the module must be
 importable — run inside a backend venv or `python3 -m pip install -e ./libs/fm_runtime`
-first). The canonical invocation is `python3 -m fm_runtime.export …` — documented the same
+first — but **never `pip install -e` a worktree copy** into the shared interpreter: the
+editable path dangles when the worktree is cleaned and races with sibling runs; in a
+worktree, verify with `PYTHONPATH=libs/fm_runtime python3 -c 'import fm_runtime…'` or a
+run-local venv instead). The canonical invocation is `python3 -m fm_runtime.export …` — documented the same
 way in `agents-`/`search-`/`jobs-`/`mcp-`/`mail-`/`platform-agent`; keep them consistent. **You own the base of the pyramid (P11):** add unit tests
 here for the grants matrix (each `-access`→its prefix; `admin`=service:\*;
 `internal-service`=leads-only; `jobs-internal` scoped to `/internal/jobs`), the
@@ -85,6 +96,8 @@ P10). Add an integration test using a **real Keycloak** (Testcontainers, realm i
 asserting audience rejection and scope-gated exchange (never mocked JWTs).
 
 ## When done
-Clean `git diff`. **Always** hand off to `security-reviewer` (this library is the
+Clean `git diff` — and never return without the Verify floor having actually run: even a
+one-line or comment-only edit gets the `python3 -c "import fm_runtime.<mod>"` check, with
+the result stated in your report. **Always** hand off to `security-reviewer` (this library is the
 security boundary) plus `bug-hunter`. Call out any grant/`@anonymous`/audience
 change and confirm `data.json` + the export stay in sync.

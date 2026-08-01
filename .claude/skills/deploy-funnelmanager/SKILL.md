@@ -16,7 +16,10 @@ This skill releases the **stable** prod track only — it never touches the
 `*-canary` workloads. Building, activating, and retiring a telemetry-enabled
 canary is owned by the separate **`canary`** skill (which delegates its rollout
 back to this skill's `reconcile`/health path). A normal release here leaves any
-active canary untouched.
+active canary untouched. Corollary: `reconcile`/`rollout` wait only the ten stable
+Deployments in `FM_SERVICES` — when a reconcile applies a canary pin, wait on that
+workload explicitly
+(`ssh usfr4 'sudo -n kubectl -n prod rollout status deploy/<svc>-canary --timeout=180s'`).
 
 All paths are relative to the repo root. The driver is
 `.claude/skills/deploy-funnelmanager/deploy.sh`.
@@ -87,10 +90,18 @@ ssh usfr4 'for d in frontend searchui mailui agentsui search leads mail mcp jobs
 
 ## Gotchas (all hit for real)
 
-- **Local `main` is behind after every release.** CI pushes the
-  `ci(prod): pin images to sha-… [skip ci]` commit to `main`. Always
-  `git pull` before the next commit or your push gets rejected. The driver
-  pulls automatically inside `watch`.
+- **Local `main` is behind after every release — and after every canary
+  build/activation.** CI pushes the `ci(prod): pin images to sha-… [skip ci]` commit
+  to `main`, and `build-canary` likewise pushes `ci(canary): pin <svc> to canary-…
+  [skip ci]` commits. Always `git pull` before the next commit or your push gets
+  rejected. The driver pulls automatically inside `watch`.
+- **Run `release`/`reconcile` in the background or with a ≥10-min timeout.** An
+  end-to-end `release` takes ~5–7.5 min (CI ~2.5 min + reconcile + rollout waits),
+  and even a bare `flux reconcile source git … && … kustomization …` over ssh
+  regularly outlives a 2-minute shell limit — foreground invocations die with exit
+  143 mid-reconcile. The kill is local-only and usually cosmetic: the
+  tag/push/annotation already landed, so check cluster state (or re-run just the
+  reconcile tail) rather than assuming the release failed.
 - **`flux`/`kubectl` on usfr4 need root's kubeconfig.** Bare `flux reconcile`
   fails with `dial tcp [::1]:8080: connect: connection refused`. Use
   `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux …` (baked into the
@@ -103,6 +114,20 @@ ssh usfr4 'for d in frontend searchui mailui agentsui search leads mail mcp jobs
   — a release does **not** force them. When an infra change must apply **now**, name
   it explicitly: `deploy.sh reconcile infra-gateway infra-mesh-policies` (extra args
   to `reconcile` are infra kustomizations to also force, after `apps-prod`).
+- **Reconciling `infra-opa` is NOT enough after a `deploy/policy/*` change.**
+  `data.json` lands in the fixed-name `fm-policy` ConfigMap (no kustomize hash
+  suffix), so OPA never restarts on its own — new routes keep 403ing on stale policy
+  data. After `deploy.sh reconcile infra-opa`, also run
+  `ssh usfr4 'sudo -n kubectl -n opa-system rollout restart daemonset/opa && sudo -n kubectl -n opa-system rollout status daemonset/opa --timeout=90s'`.
+  OPA is a **DaemonSet in namespace `opa-system`**, not a prod Deployment. Same
+  class: a `keycloak-providers`/realm ConfigMap change needs
+  `kubectl -n identity rollout restart deploy/keycloak` (single replica — expect a
+  brief auth blip).
+- **A new deployed service is invisible to the release until it is in
+  `FM_SERVICES`.** The rollout-wait and the drift/health workload set both come from
+  the single `FM_SERVICES` list in `.claude/skills/_lib/common.sh` — when adding a
+  service, add it there too, or `release` silently never waits on (or verifies) its
+  rollout.
 - **Cloudflare API calls from usfr4 must be `curl -4`.** Over IPv6 the scoped
   token fails with "Cannot use the access token from location". The token
   (secret `cloudflare-api-token`, ns `cert-manager`) is DNS/purge-scoped:
@@ -126,6 +151,7 @@ ssh usfr4 'for d in frontend searchui mailui agentsui search leads mail mcp jobs
 | `flux … connection refused` on usfr4 | missing `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml` prefix |
 | Cloudflare "Invalid API Token" / "access token from location" | add `-4` to curl; ensure `FM_CF_ZONE_ID` is set in the ops env (`purge` errors if unset) |
 | Rollout hangs on one deploy | `ssh usfr4 'sudo -n kubectl -n prod describe pod <pod>'` — usually an image pull or probe failure; `deploy.sh rollback <last-good-tag>` |
+| New route/SPA 403s after release | Two separate deniers. (1) Stale OPA policy data — see the `infra-opa` gotcha (reconcile + restart the `opa` DaemonSet). (2) The `require-principal` AuthorizationPolicy (`infra-mesh-policies`): check the workload's istio-proxy log for `rbac_access_denied_matched_policy[require-principal-…]` — the policy needs a `/<app>/*` glob, not just `/<app>`. After reconciling, allow ~30s xDS propagation before concluding it didn't work |
 
 ## Self-improvement hook (advisory)
 

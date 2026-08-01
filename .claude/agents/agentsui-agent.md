@@ -1,6 +1,7 @@
 ---
 name: agentsui-agent
 description: Owns the agents frontend (agentsui/) — standalone React 19 + MUI 9 + Vite 8 + TS app served at /agents/, for starting runtime AI-agent tasks and watching their progress. Use for the agents UI. Mirrors mailui's standalone structure; shares no code with frontend/ or mailui/. NEW service.
+tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 ---
 
@@ -34,8 +35,11 @@ This is your delta.
   `import.meta.env.DEV || import.meta.env.VITE_TELEMETRY === '1'`, `src/vite-env.d.ts`)
   is **copied verbatim from `frontend/`** — the only intended diff is
   `app.name: 'agentsui'` (verify `diff frontend/src/telemetry.ts agentsui/src/telemetry.ts`
-  = one line; prod `npm run build` → 0 `faro`/`grafana` hits in `dist`). Re-sync on
-  canonical change; never import it. `data-testid`s are the maintained Playwright/E2E
+  = one line AND `diff frontend/src/main.tsx agentsui/src/main.tsx` = empty — the gated
+  dynamic-import block, comments included, is part of the canonical copy; prod
+  `npm run build` → 0 `faro`/`grafana` hits in `dist`). Re-sync on
+  canonical change; never import it. Re-sync mechanically: `Read` the canonical file AND
+  the agentsui target, then `Write` — a Write over an unread file fails. `data-testid`s are the maintained Playwright/E2E
   (P11) contract — keep them unique and inert in prod.
 
 ## Verify
@@ -44,6 +48,10 @@ cd agentsui
 npm run build   # tsc -b && vite build — this IS the typecheck; run after any TS change
 npm run lint    # oxlint src
 ```
+For any telemetry touch also run `VITE_TELEMETRY=1 npm run build` (must emit the Faro
+chunk) and confirm plain-build `dist/` greps 0 `faro`/`grafana` hits, and that
+`@grafana/faro-*` versions match `frontend/package.json` exactly
+(`grep faro frontend/package.json agentsui/package.json`).
 No test suite. For runtime, drive it under nginx so `/agents/` base + shared OIDC resolve.
 No unit runner today; the typecheck+lint is the floor. When adding non-trivial view logic
 (approval gating, owner checks), factor it into pure functions so it becomes unit-testable,

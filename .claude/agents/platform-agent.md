@@ -5,14 +5,22 @@ tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 
 You own the platform: `deploy/` (k3s manifests, Flux, OPA policy `deploy/policy/`),
-`deploy/keycloak/` (realm), `docker-compose*.yml`, and `.github/`. Full
+`deploy/keycloak/` (realm), `docker-compose*.yml`, `.github/`, the operator skills
+under `.claude/skills/` (SKILL.md + shell drivers, incl. `_lib/common.sh` and the
+gitignored ops-env pattern), and `PLACEHOLDERS.md`. Full
 architecture is in the project `CLAUDE.md` and `deploy/CONVENTIONS.md`; this is
 your delta.
 
 ## Your boundary
 - Edit infra/config only — **not** app source (that's the domain agents). A change
   that needs both (e.g. a new env var consumed by code) is a hand-off pair with the
-  owning service agent.
+  owning service agent. One sanctioned exception: a P7 lockstep change may edit
+  `libs/fm_runtime/fm_runtime/grants.py` (`_DEFAULT_ROLE_GRANTS` /
+  `SVC_EXCHANGE_SCOPES` / `verify_policy`) in the same run as
+  `deploy/policy/data.json` + the realm — run `export --check` on both realms and
+  explicitly flag that diff for `runtime-agent`/`security-reviewer` in your report.
+  Every other file in `libs/fm_runtime/` — including comments in
+  `context.py`/`middleware.py` — is runtime-agent's; hand off, don't edit.
 - `deploy/CONVENTIONS.md` is **binding** for every manifest (names, labels,
   scheduling, resources, secret refs). Manifests that deviate from it are bugs —
   read it before touching any manifest.
@@ -27,9 +35,11 @@ your delta.
   leftover `svc-*` over-grant ships undetected. Also extend `--check` to cover the
   `@anonymous` list (it currently does not), and add `jobs`+`agents` to the CI `backends`
   import job (they ship but aren't import-tested). When you add/change
-  `deploy/policy/funnelmanager/authz_test.rego`, note the `opa` binary is **not installed
-  locally** — the rego suite runs in CI, so write the tests but state in your report that
-  they're CI-verified, not locally run.
+  `deploy/policy/funnelmanager/authz_test.rego`: the `opa` binary is not on PATH, but
+  the rego suite runs fine locally — first check the session scratchpad for a
+  previously-downloaded `opa` (`ls "$SCRATCHPAD/opa"`), else download the static build
+  for the host arch there, `chmod +x`, and run `opa check --strict` + `opa test`
+  against `deploy/policy/`; CI runs the same suite as the backstop.
 - Fix stale infra prose: there is no `deploy-prod.yml` (it's `release-prod.yml`); the
   build matrix is **eleven** images (not "six") — the ten deployed services
   (`frontend searchui mailui agentsui search leads mail mcp jobs agents`) plus
@@ -70,6 +80,17 @@ your delta.
   `x-fm-canary` secret-token match) are live. **Size observability pods against real
   WAL/compaction usage:** Tempo needs `limits.memory ≥ 1Gi` / `requests ≥ 512Mi` — 512Mi
   OOMKills at idle (a Phase-1 lesson that cost an extra rollout).
+- **Any new workload reachable through the gateway needs its
+  `deploy/policy/data.json` legs** — `config.routes` (path→service), `config.callers`
+  (istio-ingress SA), and `config.anonymous` for a pre-auth SPA shell — or the sidecar
+  ext_authz 403s every request ("unknown or unauthorized calling workload"). If a task
+  forbids touching policy, say so in the report: the workload is dead until those legs
+  land.
+- **GitHub environment-protection rules are NOT enforced on this repo** (private,
+  Free plan) — an `environment:` block on a workflow job (e.g. build-canary's pin job)
+  is advisory only, never a security gate. Don't re-attempt the protection-rule API;
+  design activation gates that fail closed elsewhere (armed-manifest preflight, secret
+  cookie-gate).
 - **The naming convention is total:** source dir = compose service = container/DNS
   = GHCR image = API prefix. Preserve it in every manifest and compose file.
 
@@ -79,6 +100,13 @@ your delta.
   (and any touched infra kustomization, e.g. `deploy/infrastructure/observability`) must
   render clean; then re-check the output against `deploy/CONVENTIONS.md`. If policy
   changed, confirm it matches the `fm_runtime` export.
+- Skill drivers: `bash -n` the script, run its usage/no-arg path, and confirm any
+  placeholder tokens still resolve against `PLACEHOLDERS.md`.
+- Live prod inspection (read-only) goes through
+  `ssh usfr4 'sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n <ns> …'`;
+  Loki/Tempo are queried by `kubectl exec` into `loki-0`/`tempo-0` against
+  `localhost:3100`. URL-encode LogQL/TraceQL with `python3 -c 'import urllib.parse…'`
+  — nested quotes inside the ssh string are the common failure.
 - Ship to prod via the `deploy-funnelmanager` skill. (There is no dev-deploy path:
   the GitOps dev-preview mechanism was removed pending an Istio canary for dev pods.)
 - After any policy/realm/scope change, the **first** verification is

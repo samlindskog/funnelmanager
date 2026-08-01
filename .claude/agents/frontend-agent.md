@@ -33,7 +33,14 @@ in the project `CLAUDE.md`; this is your delta.
   `grep -ril "faro\|grafana" dist` = 0; canary `VITE_TELEMETRY=1 npm run build` emits
   the telemetry chunk). `frontend/` is the **canonical source** that
   `searchui`/`mailui`/`agentsui` copy verbatim (they differ only in `app.name`) — a
-  change here is a **re-sync hand-off to all three**. `data-testid`s are a stable
+  change here — including comment-only edits, and including `main.tsx`'s gate block —
+  is a **re-sync hand-off to all three** (the copies must stay byte-identical apart
+  from `app.name`). Faro deps are pinned `--save-exact` (`@grafana/faro-web-sdk@2.9.0`,
+  `@grafana/faro-web-tracing@2.9.0`); a version bump is part of the same re-sync
+  hand-off — the three SPAs' `package.json` must match `frontend/`'s exactly. When
+  changing telemetry config, read `node_modules/@grafana/faro-*/dist/types` (esp.
+  `@grafana/faro-core/dist/types/config`) for the config surface — don't guess API
+  names. `data-testid`s are a stable
   Playwright/E2E-roadmap (P11) contract and the Faro user-action names the canary loop
   chases — keep them unique (slug dynamic-list ids) and inert in prod. (`frontend` has
   a `frontend-canary`, armed but idle today.)

@@ -31,10 +31,16 @@ project `CLAUDE.md`; this is your delta.
   `import.meta.env.DEV || import.meta.env.VITE_TELEMETRY === '1'`, `src/vite-env.d.ts`)
   is **copied verbatim from `frontend/`** — the ONLY intended diff is
   `app.name: 'mailui'` (verify `diff frontend/src/telemetry.ts mailui/src/telemetry.ts`
-  = one line; prod `npm run build` → 0 `faro`/`grafana` hits in `dist`). This is the
+  = one line AND `diff frontend/src/main.tsx mailui/src/main.tsx` = empty — comments
+  included; prod `npm run build` → 0 `faro`/`grafana` hits in `dist`). This is the
   sanctioned duplication (P10 counter-example) — re-sync when frontend's canonical
-  changes; never `import` it.
+  changes; never `import` it. When re-syncing, `Read` the existing target file before
+  `Write` — the harness rejects overwriting an unread file.
 - It appears on the hub only as a `WEB_APPS` tile (`/mail/`).
+- `data-testid`s on dynamic lists use stable unique ids (`account.id`,
+  `attachment.attachment_id`) — never `slug(free-form text)`; `slug()` lives in
+  `src/slug.ts`, is not injective, and is a last resort for values with no stable id.
+  Testids are the Faro user-action + Playwright (P11) contract.
 
 ## Verify
 ```bash
@@ -42,6 +48,9 @@ cd mailui
 npm run build   # tsc -b && vite build — this IS the typecheck; run after any TS change
 npm run lint    # oxlint src
 ```
+For any telemetry touch also run `VITE_TELEMETRY=1 npm run build` (Faro chunk must
+appear) and confirm the plain prod build greps 0 `faro`/`grafana` hits in `dist/`, and
+`@grafana/faro-*` versions match `frontend/package.json`.
 No test suite. For runtime, drive the app under nginx so the `/mail/` base and the
 shared OIDC session resolve. When touching the P4 confirm flow or the sandboxed message
 iframe (`sandbox=""`), drive it under nginx against a real mail backend as the integration
