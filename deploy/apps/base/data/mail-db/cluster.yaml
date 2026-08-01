@@ -48,7 +48,7 @@ spec:
       # (mostly-zero) segment to a few KB. RPO becomes <=30m (fine — re-syncable).
       archive_timeout: "30min"
   backup:
-    retentionPolicy: "2d"  # TEMP: reclaiming old empty WAL, restored to 14d after prune
+    retentionPolicy: "14d"
     barmanObjectStore:
       destinationPath: s3://${cluster_obj_bucket_backups}/mail-db
       endpointURL: https://${cluster_obj_host}
