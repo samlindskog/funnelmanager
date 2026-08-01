@@ -1,6 +1,9 @@
 # mail: reached from the ingress gateway, mcp (mail MCP tools), and search
 # (contacted-set read for exclude_contacted); talks to its own Postgres
-# (mail-db), Keycloak, and Google APIs on 443. DNS via allow-dns.
+# (mail-db) and Google APIs on 443. DNS via allow-dns. mail does NO RFC 8693
+# exchange and JWT verification is done by the mesh, so it needs no Keycloak
+# egress — the former identity:8080 rule was already dead at L3 (Keycloak's own
+# ingress allowlist omits mail) and was removed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -54,16 +57,6 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: identity
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: keycloak
-      ports:
-        - protocol: TCP
-          port: 8080
     # Google OAuth + Gmail REST live on the public internet.
     - to:
         - ipBlock:

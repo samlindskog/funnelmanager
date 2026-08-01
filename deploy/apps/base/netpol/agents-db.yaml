@@ -24,11 +24,19 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-    # Operator reach-in: 5432 plus the instance manager's status port.
+    # Operator reach-in: 5432 (superuser ops) + 8000 (instance manager status).
+    # Without a ports: block this rule allowed cnpg-system ALL ports; the comment
+    # already documents the intended two. cnpg-system is not mesh-injected, so
+    # NetworkPolicy is the only gate for this peer — keep it to the two ports.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
   egress:
     # Backups/WAL archiving to the object store (HTTPS).
     - to:
