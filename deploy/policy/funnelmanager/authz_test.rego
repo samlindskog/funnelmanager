@@ -187,7 +187,11 @@ test_agent_without_granted_role_denied if {
 
 test_frontend_azp_rejected_at_leads if {
 	# A browser token (azp frontend) must never be replayed straight to
-	# leads — hops exchange, so azp must be search or mcp there.
+	# leads — hops exchange, so azp must be search or mcp there. This also
+	# exercises the FAIL-CLOSED azp constraint (frontend is not in
+	# azp_allow[leads]); a service entirely absent from azp_allow is likewise
+	# denied (no fail-open default), and fm_runtime.export --check asserts every
+	# service HAS an entry so that state can never ship.
 	not authz.allow with input as http_input(
 		"prod", "search", "prod", "leads", "GET", "/api/leads/stats",
 		admin_user_token("leads", "frontend"),

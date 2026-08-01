@@ -256,6 +256,19 @@ def verify_policy(
     azp_allow: dict[str, Any] = config.get("azp_allow", {}) or {}
     code_edges = set(SVC_EXCHANGE_SCOPES)
 
+    # Every backend service MUST have an azp_allow entry. OPA's azp_ok_for(svc)
+    # fails OPEN on a missing key (any azp passes — the only fail-open default in
+    # authz.rego), so an omission silently disables that service's delegation
+    # constraint in the mesh. This is exactly the drift a new-service add is most
+    # likely to introduce, so --check asserts SERVICES ⊆ azp_allow.keys().
+    for svc in SERVICES:
+        if svc not in azp_allow:
+            errors.append(
+                f"azp_allow has no entry for service {svc!r} — OPA's azp_ok_for "
+                f"fails OPEN on a missing key (any azp would pass). Add "
+                f"azp_allow[{svc!r}] to deploy/policy/data.json."
+            )
+
     for src, dst in SVC_EXCHANGE_SCOPES:
         if src not in (azp_allow.get(dst) or []):
             errors.append(

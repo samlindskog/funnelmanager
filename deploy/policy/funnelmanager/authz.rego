@@ -87,13 +87,14 @@ token_valid_for(svc, environment) if {
 
 # azp must be one of the clients allowed to mint/exchange tokens for this
 # service (delegation constraint — Keycloak stamps the exchanging client
-# into azp). Services without an entry accept any azp.
+# into azp). FAIL CLOSED: a service with no azp_allow entry admits NO azp.
+# Every backend must have an entry — fm_runtime.export --check asserts
+# SERVICES ⊆ azp_allow, so a forgotten entry is caught at CI rather than
+# silently fail-open in the mesh (this was the one fail-open default here).
 azp_ok_for(svc) if {
 	allowed := config.azp_allow[svc]
 	claims.azp in allowed
 }
-
-azp_ok_for(svc) if not config.azp_allow[svc]
 
 # Caller allowlists. ns "env" means "same namespace as the destination"
 # (prod calls prod, same-namespace); anything else is a literal namespace.
