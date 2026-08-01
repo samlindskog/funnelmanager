@@ -8,12 +8,12 @@ Flow when you open the bookmark:
   http://localhost:8799/           (your bookmark; no secret)
     -> 302 https://x9bc433.win/debug/canary/on?t=<secret>   (secret injected here, from creds.env)
        -> the debug-session-gate EnvoyFilter validates t, sets the HttpOnly
-          fm_debug session cookie, 302s to /debug/route/canary which sets the
-          fm_route=canary selector, then 302s to /  (you're now on the canary;
-          sign in as e2e-canary). fm_debug alone would route to STABLE; the
-          fm_route=canary selector is what steers you to the canary pods.
+          fm_debug=<secret>|canary session cookie (one Set-Cookie), then 302s to /
+          (you're now on the canary; sign in as e2e-canary). fm_debug=<secret> alone
+          would route to STABLE; the |canary suffix in the value is what steers you
+          to the canary pods.
 
-  http://localhost:8799/off  -> https://x9bc433.win/debug/off  (clears both cookies)
+  http://localhost:8799/off  -> https://x9bc433.win/debug/off  (clears the fm_debug cookie)
 
 The secret (FM_DEBUG_TOKEN) is read from ~/.config/fm-e2e/creds.env and never
 printed. The only place it appears in the browser is the transient

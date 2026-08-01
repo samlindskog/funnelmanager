@@ -477,8 +477,8 @@ TPL_GW_CANARY = '''\
 # the secret) — the debug-session-gate EnvoyFilter makes the marker non-forgeable
 # by stripping any client-supplied header and re-injecting the secret (from the
 # `fm-canary-token` k8s Secret, read via os.getenv) only for a valid host-only
-# `fm_debug` cookie WITH the `fm_route=canary` selector, so presence is sufficient
-# and NO secret lives in this file.
+# `fm_debug=<secret>|canary` cookie (the single value-encoded cookie), so presence
+# is sufficient and NO secret lives in this file.
 # It is listed in gateway/kustomization.yaml ONLY while `%%name%%-canary` is
 # scaled up (route presence == canary activation), so an idle canary never 503s
 # the marker — it falls through to the stable /api/%%name%%/ rule. The canary

@@ -1,6 +1,6 @@
 ---
 name: enter-canary
-description: Put YOUR OWN browser on the funnelmanager telemetry canary by setting the host-only fm_debug session cookie + fm_route=canary selector, via a bookmarkable localhost launcher that redirects to the gateway /debug/canary/on endpoint (secret stays out of your bookmark; fm_debug is set server-side HttpOnly). Use when you want to hand-drive the canary UI as a human (then sign in as e2e-canary) — pairs with watch-canary to have Claude observe your session. NOT for the headless agent loop (that's drive-canary).
+description: Put YOUR OWN browser on the funnelmanager telemetry canary by setting the host-only fm_debug session cookie to its canary value (fm_debug=<secret>|canary), via a bookmarkable localhost launcher that redirects to the gateway /debug/canary/on endpoint (secret stays out of your bookmark; fm_debug is set server-side HttpOnly). Use when you want to hand-drive the canary UI as a human (then sign in as e2e-canary) — pairs with watch-canary to have Claude observe your session. NOT for the headless agent loop (that's drive-canary).
 ---
 
 # Enter the canary (human browser)
@@ -12,24 +12,24 @@ in Loki/Tempo where `watch-canary` (Claude) can read it.
 
 Two independent things are involved — keep them straight:
 
-1. **The `fm_debug` session cookie + `fm_route=canary` selector** (routing) — this
-   skill sets both. `fm_debug` is a *host-only*, HttpOnly, secret cookie on
-   `x9bc433.win` (the debug-session grant, set server-side; page JS can't read it);
-   `fm_route=canary` is the non-secret selector that actually steers you to the
-   canary pods (`fm_debug` alone routes to stable). The launcher redirects you to
-   the gateway, which sets both.
-2. **Your login** (identity) — separate and normal: after the cookies are set you
+1. **The `fm_debug` session cookie (canary value)** (routing) — this skill sets it.
+   `fm_debug` is a *host-only*, HttpOnly, secret cookie on `x9bc433.win` (set
+   server-side; page JS can't read it). Its value is a single value-encoded token:
+   `fm_debug=<secret>|canary` steers you to the canary pods, while `fm_debug=<secret>`
+   alone routes to stable. The launcher redirects you to the gateway, which sets the
+   `<secret>|canary` value.
+2. **Your login** (identity) — separate and normal: after the cookie is set you
    land on the canary and sign in through Keycloak as **`e2e-canary`** (creds in
    `~/.config/fm-e2e/creds.env`). Nothing special — the canary uses the same auth
-   as prod; the cookies only decide *which pods* serve you.
+   as prod; the cookie only decides *which pods* serve you.
 
 ## How it works
 
 ```
 bookmark  http://localhost:8799/            (clean; no secret)
   └─302→  https://x9bc433.win/debug/canary/on?t=<secret>   (secret injected by the launcher, from creds.env)
-            └─ debug-session-gate EnvoyFilter validates t → Set-Cookie fm_debug (HttpOnly)
-               → 302 /debug/route/canary → Set-Cookie fm_route=canary → 302 /
+            └─ debug-session-gate EnvoyFilter validates t → Set-Cookie fm_debug=<secret>|canary (HttpOnly)
+               → 302 /
                  └─ you're on the canary; sign in as e2e-canary
 ```
 

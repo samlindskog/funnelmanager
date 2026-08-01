@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Leave the canary: clear the host-only fm_debug session cookie + fm_route=canary
-# selector in your default browser and stop the enter-canary launcher. The
-# counterpart to enter-canary.
+# Leave the canary: clear the host-only fm_debug session cookie (the single
+# value-encoded cookie) in your default browser and stop the enter-canary launcher.
+# The counterpart to enter-canary.
 #
-# /debug/off needs NO secret — clearing the cookies only pushes you to STABLE
+# /debug/off needs NO secret — clearing the cookie only pushes you to STABLE
 # (the safe default), so there's nothing to gate. It just opens the gateway
-# clear-cookie endpoint in your browser (302 -> Set-Cookie fm_debug Max-Age=0 ->
-# 302 /debug/route/off -> Set-Cookie fm_route Max-Age=0 -> /).
+# clear-cookie endpoint in your browser (302 -> Set-Cookie fm_debug Max-Age=0 -> /).
 #
 # This exits YOUR BROWSER's canary routing. It does NOT scale down the canary
 # WORKLOADS — for that use the `canary` skill:  canary retire <svc>.
@@ -16,7 +15,7 @@ set -uo pipefail
 
 HUB="${FM_HUB_ORIGIN:-https://x9bc433.win}"
 
-echo "clearing the fm_debug + fm_route cookies via ${HUB}/debug/off ..."
+echo "clearing the fm_debug cookie via ${HUB}/debug/off ..."
 if command -v open >/dev/null 2>&1; then
   open "${HUB}/debug/off"
 elif command -v xdg-open >/dev/null 2>&1; then

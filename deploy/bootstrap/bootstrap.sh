@@ -161,8 +161,8 @@ YAML
     # Debug-session (fm_debug) secret: the gateway Envoy reads it as
     # FM_CANARY_SECRET (via secretKeyRef in
     # infrastructure/istio/gateway-deployment.yaml) and the debug-session-gate
-    # EnvoyFilter injects `x-fm-canary` for a valid `fm_debug` cookie + `fm_route=
-    # canary` selector. The Secret + env keep their bootstrap names deliberately
+    # EnvoyFilter injects `x-fm-canary` for a valid `fm_debug=<secret>|canary`
+    # cookie (the single value-encoded cookie). The Secret + env keep their bootstrap names deliberately
     # (a rename would break the live gateway ref); the value is the fm_debug
     # session secret. The routes presence-match `x-fm-canary`, so this Secret is
     # the ONE place the value lives. Blank = generate a random 32-hex value.

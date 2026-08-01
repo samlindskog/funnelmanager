@@ -5,17 +5,17 @@
 #
 # COOKIE mode = headless chromium, NO extraHTTPHeaders. The old `x-fm-canary` header
 # is now stripped by the gateway AND broke Keycloak token refresh via CORS; a debug
-# session is reached instead by seeding the host-only `fm_debug` cookie (+ the
-# `fm_route=canary` selector for a canary target) at RUNTIME (the drive-canary loop,
-# step 2 — a persistent-profile cookie can't be set from this static config). This
-# script only writes the config + verifies wiring + prints the shim; it drives
-# nothing.
+# session is reached instead by seeding the host-only `fm_debug` cookie (the single
+# value-encoded cookie — `fm_debug=<secret>|canary` for a canary target) at RUNTIME
+# (the drive-canary loop, step 2 — a persistent-profile cookie can't be set from this
+# static config). This script only writes the config + verifies wiring + prints the
+# shim; it drives nothing.
 #
 # --target prod | canary  (default: canary)
-#   canary  set fm_debug + fm_route=canary via /debug/canary/on -> requests route
+#   canary  set fm_debug=<secret>|canary via /debug/canary/on -> requests route
 #           to <svc>-canary; the CANARY bundle's own Faro gives full RUM + browser
 #           traces. No shim needed.
-#   prod    set fm_debug ONLY via /debug/on -> requests route to STABLE/prod pods,
+#   prod    set fm_debug=<secret> ONLY via /debug/on -> requests route to STABLE/prod pods,
 #           but fm_debug PERMITS forced tracing. Prod SPA bundles ship NO Faro
 #           (tree-shaken), so there is NO browser RUM on prod — inject the
 #           traceparent SHIM (below) so /api/* requests carry a sampled trace the
@@ -54,8 +54,8 @@ write_config() {
   echo "== write Playwright MCP config (cookie mode) =="
   mkdir -p "$CFG_DIR"
   # Headless chromium, NO extraHTTPHeaders — the debug session is gated by the
-  # runtime-seeded fm_debug cookie, not by a header (stripped at the gateway +
-  # broke KC CORS refresh).
+  # runtime-seeded fm_debug cookie (fm_debug=<secret>|canary for a canary target),
+  # not by a header (stripped at the gateway + broke KC CORS refresh).
   cat > "$MCP_CFG" <<'JSON'
 {
   "browser": {
@@ -147,13 +147,13 @@ target_guidance() {
   echo "== target: $TARGET =="
   if [ "$TARGET" = canary ]; then
     echo "$OK CANARY target — full RUM + traces from the canary bundle's own Faro."
-    echo "   Seed cookies:   browser_navigate  https://x9bc433.win/debug/canary/on?t=<FM_DEBUG_TOKEN>"
-    echo "   (sets fm_debug HttpOnly + fm_route=canary; /api/* routes to <svc>-canary)"
+    echo "   Seed cookie:    browser_navigate  https://x9bc433.win/debug/canary/on?t=<FM_DEBUG_TOKEN>"
+    echo "   (sets fm_debug=<secret>|canary, HttpOnly; /api/* routes to <svc>-canary)"
     echo "   No shim needed — capture traceparent from browser_network_requests as usual."
   else
-    echo "$OK PROD target — fm_debug ONLY (routes to STABLE prod pods; permits forced tracing)."
+    echo "$OK PROD target — fm_debug=<secret> ONLY (routes to STABLE prod pods; permits forced tracing)."
     echo "   Seed cookie:    browser_navigate  https://x9bc433.win/debug/on?t=<FM_DEBUG_TOKEN>"
-    echo "   (sets fm_debug HttpOnly; NO fm_route -> stable). Prod ships NO Faro, so:"
+    echo "   (sets fm_debug=<secret>, HttpOnly; no |canary suffix -> stable). Prod ships NO Faro, so:"
     echo "   Inject the SHIM via browser_evaluate AFTER login+settle:"
     echo "       .claude/skills/drive-canary/setup.sh shim"
     echo "   $WARN LIMITATION: backend spans ONLY, no browser/RUM spans on prod."

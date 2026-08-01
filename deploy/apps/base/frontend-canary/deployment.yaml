@@ -3,21 +3,21 @@
 # Deployment/Service/labels are never touched, so there is no routing gap.
 #
 # Routing (Step 3a — cookie-gated): to reach the canary the browser sets a
-# host-only `fm_debug=<secret>` session cookie PLUS the `fm_route=canary` selector
+# host-only `fm_debug=<secret>|canary` session cookie (the single value-encoded cookie)
 # on x9bc433.win; the debug-session-gate EnvoyFilter
 # (deploy/infrastructure/mesh-policies/debug-session-gate.yaml)
-# validates them at the gateway, strips any client-supplied `x-fm-canary`
+# validates it at the gateway, strips any client-supplied `x-fm-canary`
 # header, and injects the secret `x-fm-canary` token the app-prod HTTPRoute
-# matches. Everyone without the cookies keeps hitting stable `frontend`. Same
+# matches. Everyone without the cookie keeps hitting stable `frontend`. Same
 # `prod` namespace, same Keycloak session, same OPA policy.
 #
 # BROWSER-SESSION TRUST BOUNDARY (security): the canary is served SAME-ORIGIN at
 # x9bc433.win, so its (potentially unreviewed, feature-branch) JS runs in the
 # same origin as the hub and can read the prod Keycloak session — the
 # `fm_oidc_*` localStorage keys — of ANY user whose browser reaches it. That is
-# exactly why reaching the canary requires the secret `fm_debug` cookie (a
-# capability token, not a guessable value) plus the `fm_route=canary` selector,
-# and the EnvoyFilter strips any forged `x-fm-canary` header: an unaware or
+# exactly why reaching the canary requires the secret `fm_debug=<secret>|canary`
+# cookie (a capability token, the single value-encoded cookie — not a guessable
+# value), and the EnvoyFilter strips any forged `x-fm-canary` header: an unaware or
 # induced user cannot be routed here. ONLY build the canary from TRUSTED branches,
 # and rotate the token (the fm-canary-token Secret + PLACEHOLDERS.md) if it leaks.
 #

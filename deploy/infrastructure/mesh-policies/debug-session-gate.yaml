@@ -1,26 +1,36 @@
 # Debug-session gate (was `canary-cookie-gate`) — the security-critical edge Lua.
 #
-# WHAT THIS DOES. It splits the single legacy `fm_canary` secret cookie into TWO
-# independent, orthogonal things and adds a prod-tracing gate:
+# WHAT THIS DOES. It replaces the single legacy `fm_canary` secret cookie with ONE
+# value-encoded secret cookie that carries BOTH the debug-session grant AND the
+# (secret-gated) canary route selection, and adds a prod-tracing gate:
 #
-#   1. `fm_debug=<secret>` — an UN-FORGEABLE "debug session" grant (a straight
-#      RENAME of the old `fm_canary` secret cookie: still host-only, HttpOnly,
-#      server-set, same secret-token mechanism). By itself it does TWO things:
-#        (a) it PERMITS canary routing but does NOT trigger it (a plain debug
-#            session routes to STABLE/prod pods), and
+#   1. `fm_debug=<secret>` — an UN-FORGEABLE "debug session" grant on STABLE (a
+#      straight RENAME of the old `fm_canary` secret cookie: still host-only,
+#      HttpOnly, server-set, same secret-token mechanism). By itself it does TWO
+#      things:
+#        (a) it routes to STABLE/prod pods (it PERMITS canary routing but does NOT
+#            trigger it), and
 #        (b) it GATES the prod-tracing capability below — only a request carrying a
 #            valid `fm_debug` may force a trace sample on prod (stable OR canary).
-#   2. `fm_route=canary` — a NON-secret selector cookie, HONORED ONLY when a valid
-#      `fm_debug` is ALSO present. When both are present the gate injects the
-#      internal `x-fm-canary` routing header EXACTLY as before, so the per-service
+#   2. `fm_debug=<secret>|canary` — the SAME un-forgeable debug session, routed to
+#      the CANARY. Route selection is thus ITSELF secret-gated: the `|canary` suffix
+#      is only ever honored as PART of the exact secret value (`<secret>|canary`),
+#      never as a standalone selector. There is NO non-secret selector cookie, so a
+#      cross-site `Set-Cookie` of a bare `canary` marker cannot plant a canary route
+#      onto a victim — the selection is UN-PLANTABLE. When present the gate injects
+#      the internal `x-fm-canary` routing header EXACTLY as before, so the per-service
 #      `<svc>-canary` HTTPRoutes/VirtualServices (unchanged, presence-match
 #      `x-fm-canary` regex `.+`) steer the request to the canary workload.
 #
-# So: `fm_debug` alone -> debug session on STABLE (prod tracing allowed);
-#     `fm_debug` + `fm_route=canary` -> debug session on the CANARY.
-# The internal `x-fm-canary` header, the `<svc>-canary` deployments, the
-# `variant`/`canary` telemetry labels and `FM_DEPLOYMENT_VARIANT` are ALL unchanged
-# — only the SESSION COOKIE, its toggle endpoints and this gate are renamed/extended.
+# So: `fm_debug=<secret>`        -> debug session on STABLE (prod tracing allowed);
+#     `fm_debug=<secret>|canary` -> debug session on the CANARY.
+# The gate uses `|` as the separator — a valid RFC6265 cookie-octet (no quoting).
+# Matching is EXACT-EQUALITY only (`value == secret` or `value == secret.."|canary"`),
+# never a prefix / `string.find`, so `<secret>evil` or `<secret>|anything-else` is
+# NOT a valid session. The internal `x-fm-canary` header, the `<svc>-canary`
+# deployments, the `variant`/`canary` telemetry labels and `FM_DEPLOYMENT_VARIANT`
+# are ALL unchanged — only the SESSION COOKIE, its toggle endpoints and this gate
+# are renamed/extended.
 #
 # The browser must reach the canary WITHOUT sending `x-fm-canary` itself: that
 # header on `/api/*` rides cross-origin to Keycloak, triggering a CORS preflight
@@ -28,9 +38,9 @@
 #   - We ALWAYS remove any inbound (client-supplied) `x-fm-canary` request header,
 #     on ANY route (`/`, `/api/*`, SPAs), so it is never client-forgeable.
 #   - We re-inject `x-fm-canary: <secret>` ONLY when the request carries a valid
-#     host-only `fm_debug=<secret>` cookie AND an `fm_route=canary` selector cookie.
-#     Cookies trigger no preflight and are host-scoped (no Domain attribute -> not
-#     sent to kc./grafana. subdomains).
+#     host-only `fm_debug=<secret>|canary` cookie (a valid debug session that ALSO
+#     selects canary). Cookies trigger no preflight and are host-scoped (no Domain
+#     attribute -> not sent to kc./grafana. subdomains).
 #
 # FORCED-TRACING GATE (new). Istio ingress honors an incoming `traceparent` whose
 # sampled flag is 1, so ANY anonymous client could force-sample prod at will
@@ -40,8 +50,11 @@
 # baseline decides instead. With a valid `fm_debug` the `traceparent` is left
 # UNTOUCHED (honor-incoming-sampled -> a full trace on whatever pods it hits,
 # stable or canary). `fm_debug` is thus the real gate for prod tracing. Fail-safe:
-# any parse error UNDER-samples (never over-samples) and a request WITHOUT a
-# traceparent is never touched (has()-guarded, like the accesslog CEL filter).
+# any parse error UNDER-samples (never over-samples), a NON-CANONICAL traceparent
+# (any length other than the canonical 55) is STRIPPED entirely (never passed
+# through, so a crafted odd-length forced sample can't survive), and a request
+# WITHOUT a traceparent is never touched (has()-guarded, like the accesslog CEL
+# filter).
 #
 # *** ORDERING CAVEAT — READ BEFORE TRUSTING THE FORCED-TRACING GATE. ***
 # This Lua runs as an HTTP filter INSERT_BEFORE `jwt_authn` — the EARLIEST HTTP
@@ -145,13 +158,16 @@ spec:
             "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
             default_source_code:
               inline_string: |
-                -- Split the legacy `fm_canary` secret cookie into `fm_debug`
-                -- (secret session grant) + `fm_route=canary` (non-secret selector),
-                -- gate prod tracing on `fm_debug`, and expose the `/debug/*`
-                -- server-side cookie-toggle endpoints. Fails SAFE throughout: no
-                -- valid `fm_debug` -> no `x-fm-canary` injected (stable) AND any
-                -- forced trace sample is reset to the baseline. The secret is never
-                -- logged.
+                -- ONE value-encoded secret cookie `fm_debug`: `<secret>` = debug
+                -- session on STABLE; `<secret>|canary` = debug session on the
+                -- CANARY. Route selection is itself secret-gated (the `|canary`
+                -- suffix is only ever honored as part of the exact secret value),
+                -- so it is un-plantable — there is NO non-secret selector cookie.
+                -- Gate prod tracing on a valid `fm_debug`, and expose the
+                -- `/debug/*` server-side cookie-toggle endpoints. Fails SAFE
+                -- throughout: no valid `fm_debug` -> no `x-fm-canary` injected
+                -- (stable) AND any forced trace sample is reset to the baseline.
+                -- The secret is never logged.
 
                 -- Extract query param `key` from a raw query string (the text
                 -- AFTER "?"), exact-matching the param NAME (so `t` is never
@@ -179,7 +195,10 @@ spec:
                 -- mutates) so an error can't leave a half-applied state; on ANY
                 -- error we UNDER-sample (flags -> 00, or strip a malformed value),
                 -- NEVER over-sample, and a request WITHOUT a traceparent is never
-                -- touched. See the ORDERING CAVEAT in this file's header.
+                -- touched. A NON-CANONICAL length (anything other than 55) is routed
+                -- into the fail-safe STRIP path — it is removed, never honored, so a
+                -- crafted odd-length sampled traceparent from an uncookied client
+                -- cannot survive. See the ORDERING CAVEAT in this file's header.
                 function fm_desample(headers)
                   local tp = headers:get("traceparent")
                   if tp == nil then
@@ -187,7 +206,7 @@ spec:
                   end
                   local ok, newtp = pcall(function()
                     if string.len(tp) ~= 55 then
-                      return nil            -- malformed; Envoy validates it itself
+                      error("unexpected length")  -- non-canonical -> fail-safe STRIP
                     end
                     local n = tonumber(string.sub(tp, 54, 55), 16)
                     if n == nil then
@@ -229,13 +248,11 @@ spec:
                   -- jwt_authn / OPA / the app). All cookies are set SERVER-SIDE,
                   -- hence HttpOnly. Secure + SameSite=Lax retained.
                   --
-                  -- Because Envoy's Lua `respond()` takes a single Lua table it can
-                  -- emit only ONE Set-Cookie per reply; fm_debug and fm_route are
-                  -- SEPARATE cookies, so the public endpoints set `fm_debug` then
-                  -- 302 to an internal `/debug/route/{canary,off}` helper that
-                  -- sets/clears the `fm_route` selector. A browser follows the 302
-                  -- as one navigation (each hop is Sec-Fetch-Dest: document), so it
-                  -- is transparent to the caller.
+                  -- ONE cookie now carries both the session and the route selection,
+                  -- so each endpoint emits exactly ONE Set-Cookie and 302s straight
+                  -- to `/` — no internal redirect-relay hop is needed (the old
+                  -- two-cookie design required a 302 relay because Envoy Lua
+                  -- `respond()` emits only one Set-Cookie per reply).
                   local method = headers:get(":method")
                   local path = headers:get(":path")
                   if method == "GET" and path ~= nil then
@@ -253,11 +270,12 @@ spec:
                     -- /debug/on and /debug/canary/on both SET the secret `fm_debug`
                     -- cookie, guarded IDENTICALLY (fail CLOSED): set it ONLY when
                     -- `t` EXACTLY equals the secret AND the request is a top-level
-                    -- navigation. They differ only in where they 302 next:
-                    --   /debug/on         -> /debug/route/off    (clear fm_route -> STABLE)
-                    --   /debug/canary/on  -> /debug/route/canary (set  fm_route=canary)
-                    -- A missing/wrong `t` OR a non-navigation redirects to `/` with
-                    -- NO cookie set (never a debug session, never a route selector).
+                    -- navigation. They differ only in the cookie VALUE they set:
+                    --   /debug/on         -> fm_debug=<secret>          (STABLE)
+                    --   /debug/canary/on  -> fm_debug=<secret>|canary   (CANARY)
+                    -- both 302 straight to `/`. A missing/wrong `t` OR a
+                    -- non-navigation redirects to `/` with NO cookie set (never a
+                    -- debug session, never a canary route).
                     --
                     -- Navigation guard: these are state-changing GETs, so someone
                     -- WITH the secret could try a drive-by plant via
@@ -276,14 +294,15 @@ spec:
                       -- cookie (fail safe), and (2) the nil==nil trap — if secret is
                       -- nil and `t` absent (also nil), `t == secret` would be TRUE.
                       if nav and have_secret and t == secret then
-                        local nextp = "/debug/route/off"
+                        -- ONE Set-Cookie: value encodes the route selection.
+                        local cval = secret
                         if base == "/debug/canary/on" then
-                          nextp = "/debug/route/canary"
+                          cval = secret .. "|canary"
                         end
                         request_handle:respond(
                           {[":status"] = "302",
-                           ["location"] = nextp,
-                           ["set-cookie"] = "fm_debug=" .. secret ..
+                           ["location"] = "/",
+                           ["set-cookie"] = "fm_debug=" .. cval ..
                              "; Path=/; Max-Age=604800; Secure; HttpOnly; SameSite=Lax"},
                           "")
                       else
@@ -294,49 +313,25 @@ spec:
                       return
                     end
 
-                    -- INTERNAL helper: set the NON-secret `fm_route=canary` selector,
-                    -- then land on `/`. No secret needed — fm_route is INERT without
-                    -- a valid fm_debug (injection needs BOTH; routing needs the
-                    -- injected x-fm-canary which needs both). Reached only via the
-                    -- 302 from /debug/canary/on (a document navigation).
-                    if base == "/debug/route/canary" then
-                      request_handle:respond(
-                        {[":status"] = "302",
-                         ["location"] = "/",
-                         ["set-cookie"] = "fm_route=canary; Path=/; Max-Age=604800; Secure; HttpOnly; SameSite=Lax"},
-                        "")
-                      return
-                    end
-
-                    -- INTERNAL helper: CLEAR the `fm_route` selector, then land on
-                    -- `/`. Clearing is always safe (drops to stable). Reached via the
-                    -- 302 from /debug/on and /debug/off.
-                    if base == "/debug/route/off" then
-                      request_handle:respond(
-                        {[":status"] = "302",
-                         ["location"] = "/",
-                         ["set-cookie"] = "fm_route=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"},
-                        "")
-                      return
-                    end
-
-                    -- /debug/off — clear the secret `fm_debug` cookie, then 302 to
-                    -- /debug/route/off to also clear the fm_route selector, so BOTH
-                    -- are cleared. Clearing needs no secret (always drops to stable).
+                    -- /debug/off — clear the single `fm_debug` cookie (Max-Age=0),
+                    -- then 302 to `/`. Clearing needs no secret (always drops to
+                    -- stable). One cookie now, so one Set-Cookie clears everything.
                     if base == "/debug/off" then
                       request_handle:respond(
                         {[":status"] = "302",
-                         ["location"] = "/debug/route/off",
+                         ["location"] = "/",
                          ["set-cookie"] = "fm_debug=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"},
                         "")
                       return
                     end
                   end
 
-                  -- ===== Parse cookies ONCE: valid fm_debug? fm_route=canary? =====
-                  -- fm_debug=<secret> is the un-forgeable debug-session grant;
-                  -- fm_route=canary is the non-secret selector, honored ONLY with a
-                  -- valid fm_debug. Both are read from the single Cookie header.
+                  -- ===== Parse the single fm_debug cookie ONCE =====
+                  -- `fm_debug=<secret>`        -> valid debug session (STABLE).
+                  -- `fm_debug=<secret>|canary` -> valid debug session (CANARY).
+                  -- EXACT-equality only (no prefix / string.find), so `<secret>evil`
+                  -- is NOT a valid session and `<secret>|canary` is the ONLY value
+                  -- that selects canary. Route selection is thus secret-gated.
                   local have_debug = false
                   local want_canary = false
                   local cookie = headers:get("cookie")
@@ -347,10 +342,13 @@ spec:
                       if eq ~= nil then
                         local name = string.sub(kv, 1, eq - 1)
                         local value = string.sub(kv, eq + 1)
-                        if name == "fm_debug" and value == secret then
-                          have_debug = true
-                        elseif name == "fm_route" and value == "canary" then
-                          want_canary = true
+                        if name == "fm_debug" then
+                          if value == secret then
+                            have_debug = true
+                          elseif value == secret .. "|canary" then
+                            have_debug = true
+                            want_canary = true
+                          end
                         end
                       end
                     end
@@ -372,8 +370,8 @@ spec:
                   end
 
                   -- ===== Conditional inject =====
-                  -- Route to the canary ONLY when the debug session is valid AND the
-                  -- fm_route=canary selector is set. fm_debug alone -> stable.
+                  -- Route to the canary ONLY when the debug session selects it
+                  -- (`fm_debug=<secret>|canary`). `fm_debug=<secret>` alone -> stable.
                   if have_debug and want_canary then
                     headers:add("x-fm-canary", secret)
                   end

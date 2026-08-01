@@ -6,11 +6,13 @@ resources:
   - authorization-policies.yaml
   - grafana-jwt-exemption.yaml
   # App-host gateway Lua filter (was `canary-cookie-gate`): strips client-supplied
-  # `x-fm-canary` and re-adds `x-fm-canary: <secret>` only for a valid `fm_debug`
-  # session cookie WITH the `fm_route=canary` selector; also gates prod tracing on
-  # `fm_debug` and serves the `/debug/*` cookie-toggle endpoints (SNI-scoped like
-  # the grafana filter above). Makes the canary marker trustworthy for each active
-  # canary's route (gateway/canary/<svc>-canary.yaml).
+  # `x-fm-canary` and re-adds `x-fm-canary: <secret>` only for a valid
+  # `fm_debug=<secret>|canary` session cookie (the single value-encoded cookie —
+  # `<secret>` alone = debug session on stable, `<secret>|canary` = debug session
+  # on the canary); also gates prod tracing on a valid `fm_debug` and serves the
+  # `/debug/*` cookie-toggle endpoints (SNI-scoped like the grafana filter above).
+  # Makes the canary marker trustworthy for each active canary's route
+  # (gateway/canary/<svc>-canary.yaml).
   - debug-session-gate.yaml
   - canary/leads-canary-eastwest.yaml
   # EAST-WEST canary VirtualServices — "canary-if-exists-else-stable" for

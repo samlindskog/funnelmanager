@@ -98,20 +98,24 @@ git (bootstrap prompts create their Secrets).
       rename would leave the gateway referencing a nonexistent Secret until
       bootstrap recreates it. The value is the `fm_debug` session secret.)*
 
-      **Two cookies, split responsibilities** (on `x9bc433.win`, both host-only —
-      no `Domain` attribute, so NOT sent to `kc.`/`grafana.` subdomains):
-      - **`fm_debug=<secret>`** — the un-forgeable **debug-session** grant
-        (HttpOnly, server-set, same secret mechanism as the old `fm_canary`). It
+      **ONE value-encoded cookie, two forms** (on `x9bc433.win`, host-only — no
+      `Domain` attribute, so NOT sent to `kc.`/`grafana.` subdomains). It is HttpOnly,
+      server-set, same secret mechanism as the old `fm_canary`:
+      - **`fm_debug=<secret>`** — the un-forgeable **debug-session** grant. It
         **permits** canary routing and **gates** the prod-tracing capability, but by
         itself routes to **STABLE/prod** pods.
-      - **`fm_route=canary`** — a **non-secret** selector, honored ONLY when a valid
-        `fm_debug` is also present. When present it triggers canary routing.
+      - **`fm_debug=<secret>|canary`** — the SAME debug session, routed to the
+        **canary**. Route selection is itself secret-gated: the `|canary` suffix is
+        only ever honored as part of the exact secret value (`|` is a valid RFC6265
+        cookie-octet). There is **no** non-secret selector cookie, so a canary route
+        cannot be planted on a victim by a cross-site `Set-Cookie`.
 
-      The EnvoyFilter validates the cookies at the gateway, **always strips** any
+      The EnvoyFilter validates the cookie at the gateway with **exact equality**
+      (`<secret>` or `<secret>|canary`, never a prefix), **always strips** any
       client-supplied `x-fm-canary` header, and re-injects `x-fm-canary: <secret>`
-      **only when `fm_debug` is valid AND `fm_route=canary` is present**. Every
-      canary route/VS then **presence-matches** `x-fm-canary` (regex `.+`) — the
-      secret is NOT in any route — and routes the request to `<svc>-canary`.
+      **only when `fm_debug=<secret>|canary` is present**. Every canary route/VS then
+      **presence-matches** `x-fm-canary` (regex `.+`) — the secret is NOT in any
+      route — and routes the request to `<svc>-canary`.
 
       **Prod-tracing gate.** Istio ingress honors an incoming sampled `traceparent`.
       The gate closes the "any client can force-sample prod" hole: a sampled
@@ -132,19 +136,19 @@ git (bootstrap prompts create their Secrets).
       **Easy toggle (preferred).** The same EnvoyFilter answers server-side
       cookie-setter endpoints entirely at the gateway (INSERT_BEFORE jwt_authn, so
       they never hit OPA or the app):
-      - `https://x9bc433.win/debug/on?t=<secret>` sets **`fm_debug` only** (debug
+      - `https://x9bc433.win/debug/on?t=<secret>` sets **`fm_debug=<secret>`** (debug
         session on stable) and 302-redirects home (a wrong/absent/missing-secret `t`
         or a non-navigation fails closed: redirects with NO cookie set).
-      - `https://x9bc433.win/debug/canary/on?t=<secret>` sets **`fm_debug` +
-        `fm_route=canary`** (debug session on the canary), same fail-closed guard.
-      - `https://x9bc433.win/debug/off` clears **both** cookies and redirects home.
-      *(`/debug/canary/on` and `/debug/off` chain through internal
-      `/debug/route/{canary,off}` helpers to set/clear the `fm_route` selector,
-      because Envoy Lua `respond()` emits one Set-Cookie per reply; the browser
-      follows the 302s as one navigation.)* `fm_debug` is set SERVER-SIDE, so it is
-      **HttpOnly** (JS cannot read it); both cookies stay `Secure` + `SameSite=Lax`.
-      The `enter-canary` launcher automates this, reading the secret from
-      `~/.config/fm-e2e/creds.env` (`FM_DEBUG_TOKEN`).
+      - `https://x9bc433.win/debug/canary/on?t=<secret>` sets
+        **`fm_debug=<secret>|canary`** (debug session on the canary), same
+        fail-closed guard.
+      - `https://x9bc433.win/debug/off` clears the `fm_debug` cookie and redirects
+        home.
+      Each endpoint emits exactly **one** Set-Cookie and 302s straight to `/` — the
+      single value-encoded cookie means no internal redirect relay is needed.
+      `fm_debug` is set SERVER-SIDE, so it is **HttpOnly** (JS cannot read it) and
+      stays `Secure` + `SameSite=Lax`. The `enter-canary` launcher automates this,
+      reading the secret from `~/.config/fm-e2e/creds.env` (`FM_DEBUG_TOKEN`).
 
       **Getting the secret value** (to set the cookies manually or drive E2E):
       read it from the `fm-canary-token` Secret

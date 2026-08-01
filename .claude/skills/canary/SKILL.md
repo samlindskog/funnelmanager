@@ -1,17 +1,17 @@
 ---
 name: canary
-description: Operate the funnelmanager full-stack canary — build a telemetry-enabled canary of a service from a feature ref, activate it (cookie-gated on x9bc433.win), retire an idle canary, and list/inspect canary workloads. Use when asked to canary a service, deploy/activate/ship a canary, put a branch behind the fm_debug session + fm_route=canary selector cookies, retire/scale down a canary, or list canary status. NOT for a normal prod release (use deploy-funnelmanager) or a raw health check (use prod-health).
+description: Operate the funnelmanager full-stack canary — build a telemetry-enabled canary of a service from a feature ref, activate it (cookie-gated on x9bc433.win), retire an idle canary, and list/inspect canary workloads. Use when asked to canary a service, deploy/activate/ship a canary, put a branch behind the fm_debug session cookie (the fm_debug=<secret>|canary value routes to the canary), retire/scale down a canary, or list canary status. NOT for a normal prod release (use deploy-funnelmanager) or a raw health check (use prod-health).
 ---
 
 # canary
 
 The **lifecycle engine** for the funnelmanager header-routed canary. A canary is
 a separate `<svc>-canary` Deployment beside stable `<svc>`, built from an
-arbitrary feature ref as `<svc>:canary-<sha>`, reachable **only** by a host-only
-`fm_debug=<secret>` session cookie **plus** an `fm_route=canary` selector on
-https://x9bc433.win (the `debug-session-gate` EnvoyFilter turns that pair into the
-secret `x-fm-canary` header the app-prod HTTPRoute matches; `fm_debug` alone routes
-to stable). Activation = the `build-canary.yml` workflow pins the tag and
+arbitrary feature ref as `<svc>:canary-<sha>`, reachable **only** by the host-only
+`fm_debug=<secret>|canary` session cookie (the single value-encoded cookie) on
+https://x9bc433.win (the `debug-session-gate` EnvoyFilter turns that cookie into the
+secret `x-fm-canary` header the app-prod HTTPRoute matches; `fm_debug=<secret>` alone
+routes to stable). Activation = the `build-canary.yml` workflow pins the tag and
 flips replicas `0→1` on `main`; Flux reconciles. Retire = replicas back to `0`
 (the ephemeral-canary pattern).
 
@@ -102,7 +102,7 @@ therefore which toggled artifact + which kustomization the tooling operates on:
    canaries), then **delegates** verification to `prod-health` (`drift` confirms
    the canary runs its pinned `canary-<sha>`; `smoke` confirms the stable public
    surface is unharmed). Finally prints how to reach the canary via the
-   `fm_debug` + `fm_route=canary` cookies (token lives in `PLACEHOLDERS.md` →
+   `fm_debug=<secret>|canary` cookie (token lives in `PLACEHOLDERS.md` →
    *Debug session & canary access*).
 
 ### `retire <svc>` — scale an idle canary to 0
@@ -155,11 +155,11 @@ should run for last-seen canary traffic.
   (`replicas: 0`, no route line). Each ships its arming legs: base Deployment,
   overlay images entry, netpol, and its class-specific route/VS (a gateway
   HTTPRoute, or the east-west VirtualService for `leads`).
-- **The cookies are the only way in.** Reaching a canary needs the host-only
-  `fm_debug=<secret>` session cookie **plus** the `fm_route=canary` selector on
+- **The cookie is the only way in.** Reaching a canary needs the host-only
+  `fm_debug=<secret>|canary` session cookie (the single value-encoded cookie) on
   `x9bc433.win`; the `debug-session-gate` EnvoyFilter strips any client-supplied
-  `x-fm-canary` header and re-injects the secret only for that valid pair, so it
-  isn't forgeable (`fm_debug` alone routes to stable). The secret is NOT in git —
+  `x-fm-canary` header and re-injects the secret only for that exact cookie value, so
+  it isn't forgeable (`fm_debug=<secret>` alone routes to stable). The secret is NOT in git —
   rotating it means updating the `fm-canary-token` Secret + `kubectl rollout
   restart deploy/istio-ingress` (see `PLACEHOLDERS.md` → *Debug session & canary
   access*); no manifest edit.

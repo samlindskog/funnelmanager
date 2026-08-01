@@ -36,9 +36,10 @@
 # consistent with the east-west leads VS. The secret lives in ONE place only: the
 # `fm-canary-token` Secret (istio-ingress), delivered to the gateway as the
 # FM_CANARY_SECRET env var and injected by the debug-session-gate EnvoyFilter for
-# a valid host-only `fm_debug` cookie WITH the `fm_route=canary` selector. The gate
-# strips any client-supplied `x-fm-canary` and re-injects the secret only for that
-# pair, so the marker is non-forgeable at the edge; by the time it reaches route
+# a valid host-only `fm_debug=<secret>|canary` cookie (the single value-encoded
+# cookie whose `|canary` suffix selects canary as part of the secret value). The
+# gate strips any client-supplied `x-fm-canary` and re-injects the secret only for
+# that cookie, so the marker is non-forgeable at the edge; by the time it reaches route
 # matching it can only be gateway-set, and presence is sufficient. There is NO
 # secret in this file, so there is nothing here to rotate — rotation is `kubectl`
 # on the Secret + a gateway restart (see PLACEHOLDERS.md "Debug session & canary

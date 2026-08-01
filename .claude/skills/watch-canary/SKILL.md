@@ -15,9 +15,9 @@ for the query cookbook). It never drives your browser or deploys.
 
 ## Setup (once per session)
 
-1. You're on the canary: run **enter-canary** (sets the `fm_debug` session cookie +
-   `fm_route=canary` selector) and sign in as `e2e-canary`. Confirm the red
-   "CANARY · telemetry on" badge.
+1. You're on the canary: run **enter-canary** (sets the `fm_debug` session cookie to
+   its canary value, `fm_debug=<secret>|canary`) and sign in as `e2e-canary`. Confirm
+   the red "CANARY · telemetry on" badge.
 2. Claude identifies **your** session — the human (non-headless) canary RUM
    session, newest first:
    ```

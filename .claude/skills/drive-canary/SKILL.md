@@ -1,6 +1,6 @@
 ---
 name: drive-canary
-description: Drive the telemetry-enabled funnelmanager canary (or trace stable prod) headlessly through the Playwright MCP as the e2e-canary identity — log in, seed the fm_debug session cookie (+ fm_route=canary for a canary target), click a labeled control by its data-testid, and capture the resulting traceparent to hand to observe-grafana. This is the agent-driven E2E loop. Use when asked to drive/exercise the canary, trace a prod request, click a button and trace it, run the E2E loop, reproduce a UI flow with telemetry, or capture a trace from a browser action. Read-mostly ONLY (P4 budget) — never triggers a large Apollo search.
+description: Drive the telemetry-enabled funnelmanager canary (or trace stable prod) headlessly through the Playwright MCP as the e2e-canary identity — log in, seed the fm_debug session cookie (the fm_debug=<secret>|canary value for a canary target, fm_debug=<secret> for prod), click a labeled control by its data-testid, and capture the resulting traceparent to hand to observe-grafana. This is the agent-driven E2E loop. Use when asked to drive/exercise the canary, trace a prod request, click a button and trace it, run the E2E loop, reproduce a UI flow with telemetry, or capture a trace from a browser action. Read-mostly ONLY (P4 budget) — never triggers a large Apollo search.
 ---
 
 # drive-canary
@@ -15,15 +15,16 @@ driven from this session. Setup driver: `.claude/skills/drive-canary/setup.sh`.
 
 ## Targets: `--target canary` (default) vs `--target prod`
 
-The single `fm_debug` session cookie now gates the debug capability; a separate
-`fm_route=canary` selector decides canary-vs-stable routing. So the loop has two
-modes (run `setup.sh --target <t>` for target-specific wiring):
+The single value-encoded `fm_debug` cookie gates the debug capability AND encodes
+the route selection: `fm_debug=<secret>|canary` routes to the canary, `fm_debug=<secret>`
+alone to stable. So the loop has two modes (run `setup.sh --target <t>` for
+target-specific wiring):
 
-- **`--target canary`** — seed **both** cookies via `/debug/canary/on` so `/api/*`
-  routes to `<svc>-canary`. The canary bundle ships its own **Faro** (full RUM +
-  browser-originated traces); capture the `traceparent` from
+- **`--target canary`** — seed `fm_debug=<secret>|canary` via `/debug/canary/on` so
+  `/api/*` routes to `<svc>-canary`. The canary bundle ships its own **Faro** (full
+  RUM + browser-originated traces); capture the `traceparent` from
   `browser_network_requests` exactly as before. No shim.
-- **`--target prod`** — seed **`fm_debug` only** via `/debug/on`. Requests route to
+- **`--target prod`** — seed `fm_debug=<secret>` via `/debug/on`. Requests route to
   **stable/prod** pods, but `fm_debug` **permits forced tracing**. Prod SPA bundles
   ship **no Faro** (tree-shaken out), so there is **no browser RUM** — inject the
   **prod-tracing shim** (below) so `/api/*` requests carry a fresh sampled
@@ -106,20 +107,20 @@ any request lacking a valid `fm_debug` (so the shim without the cookie traces no
    authenticate as `FM_E2E_USER` / `FM_E2E_PASS` (`browser_type` into the KC form,
    `browser_click` submit). The hub shares the KC session via `fm_oidc_*` localStorage.
 2. **Set the debug-session cookie (once)** — `browser_navigate` to the gateway toggle
-   endpoint, which sets the cookie(s) **server-side (HttpOnly)** — identical to the
+   endpoint, which sets the cookie **server-side (HttpOnly)** — identical to the
    human `enter-canary` flow. A Playwright top-level navigation sends `Sec-Fetch-Dest:
    document`, so the endpoint's anti-drive-by guard passes. Pick by target:
    ```
-   # --target canary  (default): fm_debug + fm_route=canary -> /api/* to <svc>-canary
+   # --target canary  (default): fm_debug=<secret>|canary -> /api/* to <svc>-canary
    browser_navigate  https://x9bc433.win/debug/canary/on?t=<FM_DEBUG_TOKEN>
-   # --target prod: fm_debug ONLY -> stable pods, forced tracing permitted
+   # --target prod: fm_debug=<secret> ONLY -> stable pods, forced tracing permitted
    browser_navigate  https://x9bc433.win/debug/on?t=<FM_DEBUG_TOKEN>
    ```
-   The canary form 302s through `/debug/route/canary` (sets `fm_route=canary`) back to
+   The canary endpoint sets `fm_debug=<secret>|canary` (one Set-Cookie) and 302s to
    `/`, so the gateway serves the **canary bundle** and routes `/api/*` to `<svc>-canary`
-   (automatic stable fallback where no canary exists). The cookies are host-only (no CORS
+   (automatic stable fallback where no canary exists). The cookie is host-only (no CORS
    preflight), which also keeps the **KC-refresh CORS fix** the old header broke.
-   `.../debug/off` clears both.
+   `.../debug/off` clears it.
    **For `--target prod`, also inject the prod-tracing shim** (see *Targets* above) after
    login+settle — prod ships no Faro, so the shim is what makes `/api/*` requests carry a
    sampled `traceparent`.
@@ -150,8 +151,8 @@ that verification runs are estimate-first and read-mostly.
   nothing until the MCP/session restarts — `setup.sh` reminds you.
 - **Never re-add `extraHTTPHeaders: x-fm-canary`.** The gateway strips a
   client-supplied `x-fm-canary` on all ingress routes and re-injects the secret only
-  for a validated `fm_debug` cookie **plus** the `fm_route=canary` selector; the header
-  also broke KC refresh via CORS. The cookie gate (step 2) is the *only* supported
+  for a validated `fm_debug=<secret>|canary` cookie; the header also broke KC refresh
+  via CORS. The cookie gate (step 2) is the *only* supported
   activation path — and it fixes the KC-refresh CORS bug. The same CORS lesson is why
   the prod-tracing shim scopes its `traceparent` to same-origin `/api/*` only.
 - **Async telemetry-init caveat (still applies).** Faro loads via a dynamic import, so

@@ -2,8 +2,8 @@
 # arbitrary feature branch, push it as `<service>:canary-<shortsha>`, then
 # pin+activate it in that service's prod canary Deployment on main. Flux
 # reconciles the commit and the canary goes live for browsers that set the
-# host-only `fm_debug=<secret>` session cookie PLUS the `fm_route=canary` selector
-# on x9bc433.win — the debug-session-gate EnvoyFilter validates them and injects
+# host-only `fm_debug=<secret>|canary` session cookie (the single value-encoded cookie)
+# on x9bc433.win — the debug-session-gate EnvoyFilter validates it and injects
 # the secret `x-fm-canary` token that the active canary's dedicated route matches
 # (see deploy/infrastructure/gateway/canary/<svc>-canary.yaml — the per-service
 # route, present only while the canary is scaled up — and
@@ -35,8 +35,8 @@
 #     toggled in the gateway kustomization (anchor `- referencegrants.yaml`). The
 #     secret lives ONLY in the fm-canary-token Secret (istio-ingress) and is
 #     injected at the gateway by the debug-session-gate EnvoyFilter for a valid
-#     fm_debug cookie + fm_route=canary selector; the routes are secret-free,
-#     exactly like the east-west VS.
+#     fm_debug=<secret>|canary cookie (the single value-encoded cookie); the routes
+#     are secret-free, exactly like the east-west VS.
 #   * eastwest (leads/mcp/jobs) — INTERNAL-only: an in-mesh Istio VirtualService
 #     under mesh-policies/canary/<svc>-canary-eastwest.yaml that PRESENCE-matches
 #     x-fm-canary (regex .+, NEVER the secret), toggled in the mesh-policies

@@ -22,8 +22,8 @@
 # HTTPRoutes; it must NOT be duplicated into mesh VirtualServices. The marker is
 # already non-forgeable by the time it is in-mesh: the gateway strips any
 # client-supplied `x-fm-canary` and re-injects the secret only for a valid
-# host-only `fm_debug` cookie WITH the `fm_route=canary` selector, and the
-# leads-canary NetworkPolicy admits only
+# host-only `fm_debug=<secret>|canary` cookie (the single value-encoded cookie),
+# and the leads-canary NetworkPolicy admits only
 # in-mesh callers (search / search-canary / mcp). So "any x-fm-canary present"
 # in-mesh already implies "originated from a cookie-gated canary request."
 #

@@ -55,6 +55,7 @@ FLUX="sudo -n env KUBECONFIG=$FM_KUBECONFIG flux"
 # secret from the EnvoyFilter Lua) was RETIRED — the secret is no longer in git.
 # It lives only in the `fm-canary-token` Secret (istio-ingress ns), delivered to
 # the gateway as the FM_CANARY_SECRET env var and injected by the debug-session-gate
-# EnvoyFilter for a valid `fm_debug` cookie + `fm_route=canary` selector. Canary
-# routes/VS presence-match `x-fm-canary`; nothing derives the value from the tree.
+# EnvoyFilter for a valid `fm_debug=<secret>|canary` cookie (the single value-encoded
+# cookie). Canary routes/VS presence-match `x-fm-canary`; nothing derives the value
+# from the tree.
 # E2E callers read it from ~/.config/fm-e2e/creds.env (FM_DEBUG_TOKEN).
