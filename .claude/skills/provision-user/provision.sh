@@ -78,12 +78,16 @@ $K config credentials --server http://localhost:8080 --realm master \
   --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" \
   >/dev/null 2>&1 || { echo "ERR: kcadm login failed (keycloak-admin creds)"; exit 3; }
 
-# id of a top-level group by exact name (empty if absent)
+# id of a top-level group by exact name (empty if absent). Pure-bash CSV parse:
+# the keycloak container image has NO awk (UBI-micro), so parsing kcadm's
+# `"id","name"` output must use only shell builtins.
 gid() { $K get groups -r "$R" --format csv --fields id,name 2>/dev/null \
-  | awk -F',' -v n="\"$1\"" '$2==n{gsub(/"/,"",$1);print $1;exit}'; }
+  | while IFS= read -r line; do line="${line//\"/}"; \
+      [ "${line#*,}" = "$1" ] && { printf '%s' "${line%%,*}"; break; }; done; }
 # id of a user by exact username (server-side exact match)
 uid_of() { $K get users -r "$R" -q username="$1" -q exact=true --format csv --fields id,username 2>/dev/null \
-  | awk -F',' -v n="\"$1\"" '$2==n{gsub(/"/,"",$1);print $1;exit}'; }
+  | while IFS= read -r line; do line="${line//\"/}"; \
+      [ "${line#*,}" = "$1" ] && { printf '%s' "${line%%,*}"; break; }; done; }
 
 # Default role bundle for a known group name (empty for an unknown group).
 roles_for() { case "$1" in
