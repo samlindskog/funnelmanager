@@ -102,8 +102,8 @@ git (bootstrap prompts create their Secrets).
       `Domain` attribute, so NOT sent to `kc.`/`grafana.` subdomains). It is HttpOnly,
       server-set, same secret mechanism as the old `fm_canary`:
       - **`fm_debug=<secret>`** — the un-forgeable **debug-session** grant. It
-        **permits** canary routing and **gates** the prod-tracing capability, but by
-        itself routes to **STABLE/prod** pods.
+        **permits** canary routing, but by itself routes to **STABLE/prod** pods.
+        (It does NOT gate prod tracing — see the note below.)
       - **`fm_debug=<secret>|canary`** — the SAME debug session, routed to the
         **canary**. Route selection is itself secret-gated: the `|canary` suffix is
         only ever honored as part of the exact secret value (`|` is a valid RFC6265
@@ -117,19 +117,18 @@ git (bootstrap prompts create their Secrets).
       **presence-matches** `x-fm-canary` (regex `.+`) — the secret is NOT in any
       route — and routes the request to `<svc>-canary`.
 
-      **Prod-tracing gate.** Istio ingress honors an incoming sampled `traceparent`.
-      The gate closes the "any client can force-sample prod" hole: a sampled
-      `traceparent` (`…-01`) with **no valid `fm_debug`** has its flags reset to
-      `-00` (Envoy's random baseline then decides); with a valid `fm_debug` the
-      `traceparent` is left untouched (full trace on whatever pods it hits, stable
-      or canary). *(Ordering caveat: the reset must run before the HCM's sampling
-      decision — see the ORDERING CAVEAT block in `debug-session-gate.yaml`; validate
-      live before relying on ingress-span suppression.)*
+      **No prod-tracing gate** (attempted, removed). Istio ingress honors an incoming
+      sampled `traceparent` from **any** client, and that can't be made
+      cookie-conditional in-band — Envoy fixes the sampling decision before the HTTP
+      filter chain (confirmed live). So "any client can force-sample prod" remains
+      open: a **telemetry-cost-only** residual (tracing is never authz), bounded by
+      Cloudflare + Tempo ingestion caps. The `--target prod` shim still traces prod
+      via honor-incoming-sampled. True prevention would need a Cloudflare edge
+      `traceparent` rewrite + origin-locked-to-CF (tracked follow-up).
 
       **Fail-safe.** If `FM_CANARY_SECRET` is unset/empty the filter degrades
       safely: it never injects `x-fm-canary`, the `/debug/*` endpoints set no
-      `fm_debug` cookie, the prod-tracing gate still under-samples any anonymous
-      forced sample, and it never errors — normal traffic flows to stable. The
+      `fm_debug` cookie, and it never errors — normal traffic flows to stable. The
       client-header strip stays unconditional. If the filter detaches, no route
       injects the marker and callers fall through to stable (never fail-open).
 

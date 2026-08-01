@@ -2,16 +2,14 @@
 #
 # WHAT THIS DOES. It replaces the single legacy `fm_canary` secret cookie with ONE
 # value-encoded secret cookie that carries BOTH the debug-session grant AND the
-# (secret-gated) canary route selection, and adds a prod-tracing gate:
+# (secret-gated) canary route selection. (It does NOT gate prod tracing — see the
+# "NO FORCED-TRACING GATE" note below; that was attempted and removed.)
 #
 #   1. `fm_debug=<secret>` — an UN-FORGEABLE "debug session" grant on STABLE (a
 #      straight RENAME of the old `fm_canary` secret cookie: still host-only,
-#      HttpOnly, server-set, same secret-token mechanism). By itself it does TWO
-#      things:
-#        (a) it routes to STABLE/prod pods (it PERMITS canary routing but does NOT
-#            trigger it), and
-#        (b) it GATES the prod-tracing capability below — only a request carrying a
-#            valid `fm_debug` may force a trace sample on prod (stable OR canary).
+#      HttpOnly, server-set, same secret-token mechanism). By itself it routes to
+#      STABLE/prod pods (it PERMITS canary routing but does NOT trigger it). It has
+#      no other effect — prod tracing is NOT cookie-gated (see below).
 #   2. `fm_debug=<secret>|canary` — the SAME un-forgeable debug session, routed to
 #      the CANARY. Route selection is thus ITSELF secret-gated: the `|canary` suffix
 #      is only ever honored as PART of the exact secret value (`<secret>|canary`),
@@ -42,33 +40,24 @@
 #     selects canary). Cookies trigger no preflight and are host-scoped (no Domain
 #     attribute -> not sent to kc./grafana. subdomains).
 #
-# FORCED-TRACING GATE (new). Istio ingress honors an incoming `traceparent` whose
-# sampled flag is 1, so ANY anonymous client could force-sample prod at will
-# (Denial-of-Wallet on the trace pipeline / forensic-noise vector). We close that:
-# when a request carries a sampled `traceparent` (`...-01`) but has NO valid
-# `fm_debug` cookie, we reset the flags byte to `-00` so Envoy's own random
-# baseline decides instead. With a valid `fm_debug` the `traceparent` is left
-# UNTOUCHED (honor-incoming-sampled -> a full trace on whatever pods it hits,
-# stable or canary). `fm_debug` is thus the real gate for prod tracing. Fail-safe:
-# any parse error UNDER-samples (never over-samples), a NON-CANONICAL traceparent
-# (any length other than the canonical 55) is STRIPPED entirely (never passed
-# through, so a crafted odd-length forced sample can't survive), and a request
-# WITHOUT a traceparent is never touched (has()-guarded, like the accesslog CEL
-# filter).
-#
-# *** ORDERING CAVEAT — READ BEFORE TRUSTING THE FORCED-TRACING GATE. ***
-# This Lua runs as an HTTP filter INSERT_BEFORE `jwt_authn` — the EARLIEST HTTP
-# filter position we can occupy at this HCM. For the traceparent reset to change
-# the INGRESS sampling decision, it must run BEFORE the HCM makes that decision.
-# Envoy makes its per-request tracing/sampling decision inside
-# `ConnectionManagerImpl::ActiveStream::decodeHeaders` (it reads the incoming
-# trace context there), and the relative ordering of THAT vs. the HTTP filter
-# chain's `decodeHeaders` is NOT guaranteed by these manifests and is
-# version-dependent. If the HCM samples BEFORE the filter chain runs, this rewrite
-# still fixes DOWNSTREAM propagation (the rewritten header is what egresses to the
-# upstream sidecar, so `<svc>`/`<svc>-canary` won't honor a forced sample) but may
-# NOT suppress the ingress span itself. This MUST be validated live before it is
-# relied on — see the "LIVE TEST" in the branch report. Do not assume it holds.
+# NO FORCED-TRACING GATE (removed — Envoy makes it impossible in-band). An earlier
+# version tried to gate prod trace-sampling on `fm_debug`: reset a client-forced
+# `traceparent` (`...-01` -> `-00`) unless the cookie was present. It DID NOT WORK
+# and was removed. Root cause (Envoy source-confirmed + verified live 2026-08-01):
+# the HCM runs `traceRequest()` and fixes the sampled decision + propagated span
+# context BEFORE the entire HTTP filter chain, and for a parent-present
+# `traceparent` the OTel tracer just does setSampled(parent.sampled()) without
+# consulting any HCM/route/Telemetry knob. So NO in-band filter (Lua/Wasm/ext_proc/
+# ext_authz) can make honor-incoming-sampled cookie-conditional — a cookied and an
+# uncookied injected-sampled request produced IDENTICAL full traces. ACCEPTED
+# RESIDUAL: any client can force-sample prod. This is a TELEMETRY-COST issue only
+# (never an authz/data input — tracing is never authz), already bounded by
+# Cloudflare ingress limits + Tempo ingestion caps (tempo.yaml `rate_limit_bytes` /
+# `max_traces_per_user`). True prevention needs `traceparent` normalization OUTSIDE
+# Envoy's decision (a Cloudflare edge Transform Rule + origin-locked-to-CF) — a
+# tracked follow-up, not done here. The prod-tracing SHIM (drive-canary
+# --target prod) still works: it injects a sampled `traceparent` the mesh honors
+# regardless (the same honor-incoming behavior canary Faro relies on).
 #
 # The SECRET is NOT hardcoded here. It lives in ONE place: the `fm-canary-token`
 # Secret (istio-ingress ns, key `token`) — its bootstrap name is DELIBERATELY kept
@@ -184,53 +173,6 @@ spec:
                     end
                   end
                   return nil
-                end
-
-                -- Forced-tracing gate. Reset a client-forced trace sample unless a
-                -- valid `fm_debug` session is present. W3C traceparent is
-                -- "vv-<32hex traceid>-<16hex spanid>-<ff flags>" = 55 chars; the
-                -- sampled bit is the LSB of the flags byte. We rewrite ONLY when the
-                -- header EXISTS (has()-guarded), is well-formed, and its sampled bit
-                -- is set. The pcall body is PURE (computes the new value, never
-                -- mutates) so an error can't leave a half-applied state; on ANY
-                -- error we UNDER-sample (flags -> 00, or strip a malformed value),
-                -- NEVER over-sample, and a request WITHOUT a traceparent is never
-                -- touched. A NON-CANONICAL length (anything other than 55) is routed
-                -- into the fail-safe STRIP path — it is removed, never honored, so a
-                -- crafted odd-length sampled traceparent from an uncookied client
-                -- cannot survive. See the ORDERING CAVEAT in this file's header.
-                function fm_desample(headers)
-                  local tp = headers:get("traceparent")
-                  if tp == nil then
-                    return
-                  end
-                  local ok, newtp = pcall(function()
-                    if string.len(tp) ~= 55 then
-                      error("unexpected length")  -- non-canonical -> fail-safe STRIP
-                    end
-                    local n = tonumber(string.sub(tp, 54, 55), 16)
-                    if n == nil then
-                      error("bad flags")    -- force the fail-safe branch
-                    end
-                    if (n % 2) == 1 then
-                      return string.sub(tp, 1, 53) .. "00"  -- clear the sampled bit
-                    end
-                    return nil              -- not sampled; nothing to do
-                  end)
-                  if not ok then
-                    -- Parse errored -> under-sample. Reset flags if it LOOKS the
-                    -- right length, else strip so no forced sample survives.
-                    if string.len(tp) == 55 then
-                      newtp = string.sub(tp, 1, 53) .. "00"
-                    else
-                      newtp = false         -- sentinel: strip the header
-                    end
-                  end
-                  if newtp == false then
-                    headers:remove("traceparent")
-                  elseif newtp ~= nil then
-                    headers:replace("traceparent", newtp)
-                  end
                 end
 
                 function envoy_on_request(request_handle)
@@ -359,15 +301,6 @@ spec:
                   -- headers REGARDLESS of secret config, so a client can never
                   -- smuggle in `x-fm-canary`.
                   headers:remove("x-fm-canary")
-
-                  -- ===== Forced-tracing gate =====
-                  -- Only a valid fm_debug session may force-sample prod. Without it,
-                  -- reset a client-forced sample to the baseline (fail-safe
-                  -- under-sample). With it, leave traceparent untouched
-                  -- (honor-incoming-sampled).
-                  if not have_debug then
-                    fm_desample(headers)
-                  end
 
                   -- ===== Conditional inject =====
                   -- Route to the canary ONLY when the debug session selects it

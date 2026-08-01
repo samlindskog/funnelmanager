@@ -1,6 +1,6 @@
 ---
 name: drive-canary
-description: Drive the telemetry-enabled funnelmanager canary (or trace stable prod) headlessly through the Playwright MCP as the e2e-canary identity — log in, seed the fm_debug session cookie (the fm_debug=<secret>|canary value for a canary target, fm_debug=<secret> for prod), click a labeled control by its data-testid, and capture the resulting traceparent to hand to observe-grafana. This is the agent-driven E2E loop. Use when asked to drive/exercise the canary, trace a prod request, click a button and trace it, run the E2E loop, reproduce a UI flow with telemetry, or capture a trace from a browser action. Read-mostly ONLY (P4 budget) — never triggers a large Apollo search.
+description: Drive the telemetry-enabled funnelmanager canary (or trace stable prod) headlessly through the Playwright MCP as the e2e-canary identity — log in, seed the fm_debug=<secret>|canary cookie for a canary target (prod tracing needs no cookie — inject the tracing shim), click a labeled control by its data-testid, and capture the resulting traceparent to hand to observe-grafana. This is the agent-driven E2E loop. Use when asked to drive/exercise the canary, trace a prod request, click a button and trace it, run the E2E loop, reproduce a UI flow with telemetry, or capture a trace from a browser action. Read-mostly ONLY (P4 budget) — never triggers a large Apollo search.
 ---
 
 # drive-canary
@@ -24,13 +24,15 @@ target-specific wiring):
   `/api/*` routes to `<svc>-canary`. The canary bundle ships its own **Faro** (full
   RUM + browser-originated traces); capture the `traceparent` from
   `browser_network_requests` exactly as before. No shim.
-- **`--target prod`** — seed `fm_debug=<secret>` via `/debug/on`. Requests route to
-  **stable/prod** pods, but `fm_debug` **permits forced tracing**. Prod SPA bundles
-  ship **no Faro** (tree-shaken out), so there is **no browser RUM** — inject the
-  **prod-tracing shim** (below) so `/api/*` requests carry a fresh sampled
-  `traceparent` the **backend** honors. **LIMITATION: backend spans only, no
-  browser/RUM spans.** This is the safe way to trace a *stable prod* request end to
-  end without a canary.
+- **`--target prod`** — **no cookie needed.** Just log in and inject the
+  **prod-tracing shim** (below); `/api/*` requests then carry a fresh sampled
+  `traceparent` the mesh **honors** (honor-incoming-sampled — the same behavior
+  canary Faro relies on), routed to **stable/prod** pods. Prod SPA bundles ship
+  **no Faro** (tree-shaken out), so **LIMITATION: backend spans only, no browser/RUM
+  spans.** The `fm_debug` cookie does **not** gate this — the mesh honors any
+  injected sampled `traceparent` (a cookie-based force-sample gate was attempted and
+  removed as impossible in Envoy; see `debug-session-gate.yaml`). Safe way to trace a
+  *stable prod* request end to end without a canary.
 
 ### The prod-tracing shim (inject via `browser_evaluate`)
 
@@ -76,9 +78,10 @@ and stashes the last trace id on `window.__fm_last_trace_id` for hand-off:
 
 Then read `window.__fm_last_trace_id` (via `browser_evaluate`) after the click, or the
 `traceparent` header off the `/api/*` request in `browser_network_requests`, and hand
-it to observe-grafana. Prod forced-sampling is honored **only** because `fm_debug` is
-present — the `debug-session-gate` resets a forced `traceparent` to the baseline for
-any request lacking a valid `fm_debug` (so the shim without the cookie traces nothing).
+it to observe-grafana. Prod forced-sampling is honored via **honor-incoming-sampled**
+— the mesh honors any injected sampled `traceparent`, cookie or not (an accepted
+telemetry-cost residual; a cookie-gate was attempted and removed as impossible
+in-band — see `debug-session-gate.yaml`), so `--target prod` needs no cookie.
 
 ## When to use
 
@@ -113,8 +116,9 @@ any request lacking a valid `fm_debug` (so the shim without the cookie traces no
    ```
    # --target canary  (default): fm_debug=<secret>|canary -> /api/* to <svc>-canary
    browser_navigate  https://x9bc433.win/debug/canary/on?t=<FM_DEBUG_TOKEN>
-   # --target prod: fm_debug=<secret> ONLY -> stable pods, forced tracing permitted
-   browser_navigate  https://x9bc433.win/debug/on?t=<FM_DEBUG_TOKEN>
+   # --target prod: SKIP this step — prod tracing needs no cookie (the shim's
+   # injected sampled traceparent is honored by the mesh regardless; requests go
+   # to stable pods). /debug/on exists but is now a no-op for tracing.
    ```
    The canary endpoint sets `fm_debug=<secret>|canary` (one Set-Cookie) and 302s to
    `/`, so the gateway serves the **canary bundle** and routes `/api/*` to `<svc>-canary`
