@@ -387,10 +387,10 @@
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": true,
       "redirectUris": [
-        "https://grafana.x9bc433.win/login/generic_oauth"
+        "http://localhost:3000/login/generic_oauth"
       ],
       "webOrigins": [
-        "https://grafana.x9bc433.win"
+        "http://localhost:3000"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256"

@@ -56,6 +56,13 @@ reconcile() {
   if [ "$#" -gt 0 ]; then
     echo "--- also forcing infra kustomization(s): $* ---"
     for kust in "$@"; do
+      # $kust is interpolated into the ssh remote-command string. A Flux
+      # Kustomization name is a k8s object name (RFC1123 label: lowercase
+      # [a-z0-9-]), so validate against that allowlist BEFORE use — otherwise a
+      # caller-supplied name like 'x; <cmd>' is shell injection / RCE on the prod
+      # control plane (this box has sudo kubectl+flux = effectively cluster-admin).
+      [[ "$kust" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] \
+        || die "invalid kustomization name '$kust' (k8s names are lowercase [a-z0-9-])"
       $SSH "$FLUX reconcile kustomization $kust 2>&1 | tail -2"
     done
   fi
@@ -123,15 +130,21 @@ case "$cmd" in
   purge)
     shift; [ $# -gt 0 ] || die "usage: deploy.sh purge <full-url> [...]"
     [ -n "$FM_CF_ZONE_ID" ] || die "FM_CF_ZONE_ID is unset — set it in the ops env (\$FM_OPS_ENV, default ~/.config/fm-ops/env; see .claude/skills/_lib/ops-env.example)"
-    files=$(printf '"%s",' "$@"); files="[${files%,}]"
-    # Token lives in the cluster; it is purge/DNS-scoped and rejects requests
-    # arriving over IPv6, hence curl -4. Zone lookup may also fail auth — the
-    # zone id is supplied via the gitignored ops env (FM_CF_ZONE_ID) and used
-    # directly rather than looked up.
-    $SSH "TOKEN=\$($K -n cert-manager get secret cloudflare-api-token -o jsonpath='{.data.api-token}' | base64 -d)
-          curl -4 -sS -m 10 -X POST -H \"Authorization: Bearer \$TOKEN\" -H 'Content-Type: application/json' \
-            'https://api.cloudflare.com/client/v4/zones/$FM_CF_ZONE_ID/purge_cache' \
-            --data '{\"files\":$files}' | python3 -m json.tool"
+    [[ "$FM_CF_ZONE_ID" =~ ^[0-9a-fA-F]{32}$ ]] || die "FM_CF_ZONE_ID is malformed (expected a 32-hex Cloudflare zone id)"
+    for u in "$@"; do
+      [[ "$u" =~ ^https://[^[:space:]]+$ ]] || die "purge URL must be an https:// URL with no whitespace: '$u'"
+    done
+    # Build the JSON body LOCALLY (python json.dumps escapes every URL correctly)
+    # and stream it to the remote curl over ssh STDIN (curl --data @-). No caller
+    # string is ever spliced into the ssh remote-command shell, so a URL with
+    # shell metacharacters cannot inject — the earlier `--data '{...$files...}'`
+    # splice was a control-plane RCE, and it ran with the CF token live in scope.
+    # Token stays in-cluster; purge is DNS/IPv4-scoped (curl -4).
+    python3 -c 'import json,sys; sys.stdout.write(json.dumps({"files": sys.argv[1:]}))' "$@" \
+      | $SSH "TOKEN=\$($K -n cert-manager get secret cloudflare-api-token -o jsonpath='{.data.api-token}' | base64 -d)
+              curl -4 -sS -m 10 -X POST -H \"Authorization: Bearer \$TOKEN\" -H 'Content-Type: application/json' \
+                'https://api.cloudflare.com/client/v4/zones/$FM_CF_ZONE_ID/purge_cache' \
+                --data @- | python3 -m json.tool"
     ;;
   *) sed -n '11,19p' "$0"; exit 1 ;;
 esac

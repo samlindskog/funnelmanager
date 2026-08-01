@@ -13,10 +13,17 @@
  * client scope) to every service client that performs exchanges, so an
  * agent-initiated origin survives every downstream hop.
  *
- * SECURITY: it reads ONLY the `subject_token` being exchanged (the token
- * Keycloak already validated for this exchange) — never a caller-supplied
- * `fm_origin`/`claims` request parameter — so a client cannot forge origin.
- * On a normal login (no subject_token present) it returns "user".
+ * SECURITY: it reads the `subject_token` ONLY on an actual token-exchange grant
+ * (grant_type contains "token-exchange"). Keycloak validates the subject_token's
+ * signature as part of processing a token-exchange request, so during that grant
+ * the form's subject_token is the validated inbound token — never a
+ * caller-supplied `fm_origin`/`claims` parameter. The grant_type gate is
+ * load-bearing: the mapper pipeline also runs for authorization_code / password /
+ * refresh_token / client_credentials on any client carrying the fm-origin scope
+ * (incl. the public `frontend`), and WITHOUT this gate an attacker could stuff an
+ * unsigned `subject_token=<h>.<base64 {"fm_origin":"agent"}>.<s>` form field onto
+ * such a request and self-stamp fm_origin — i.e. the claim would be forgeable.
+ * On a normal login (non-exchange grant) it returns "user".
  *
  * Requires Keycloak feature `scripts` (preview) + this provider JAR in
  * /opt/keycloak/providers. The `agents` client keeps its own hardcoded
@@ -29,7 +36,14 @@
 var ORIGIN = "user";
 try {
     var form = keycloakSession.getContext().getHttpRequest().getDecodedFormParameters();
-    var subjectToken = form.getFirst("subject_token");
+    // Gate: only trust subject_token on a genuine token-exchange grant, where
+    // Keycloak has validated its signature. Excludes authorization_code /
+    // password / refresh_token / client_credentials (none contain
+    // "token-exchange"), closing the unsigned-param forgery vector. A too-broad
+    // miss here would only fail SAFE (origin resets to "user"), never forge.
+    var grantType = form.getFirst("grant_type");
+    var isExchange = grantType !== null && grantType.indexOf("token-exchange") >= 0;
+    var subjectToken = isExchange ? form.getFirst("subject_token") : null;
     if (subjectToken !== null && subjectToken.indexOf(".") > 0) {
         var parts = subjectToken.split(".");
         if (parts.length >= 2) {

@@ -7,6 +7,12 @@
   "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 86400,
   "ssoSessionMaxLifespan": 86400,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 10,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername",
   "roles": {
     "realm": [
       {

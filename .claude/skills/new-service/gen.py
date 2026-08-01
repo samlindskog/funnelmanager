@@ -473,14 +473,15 @@ spec:
 TPL_GW_CANARY = '''\
 # ARMED-IDLE gateway canary route for %%name%% (scaffolded by new-service) —
 # "canary-if-exists-else-stable". A SEPARATE HTTPRoute for the cookie-marked
-# canary path: it Exact-matches the secret `x-fm-canary` header the
-# canary-cookie-gate EnvoyFilter injects (non-forgeable — the gate strips any
-# client-supplied header and re-adds the secret only for a valid host-only
-# `fm_canary` cookie). It is listed in gateway/kustomization.yaml ONLY while
-# `%%name%%-canary` is scaled up (route presence == canary activation), so an
-# idle canary never 503s the marker — it falls through to the stable
-# /api/%%name%%/ rule. The canary tooling (build-canary.yml + canary.sh) owns
-# that toggle. The secret below is byte-identical to canary-cookie-gate.yaml.
+# canary path: it PRESENCE-matches `x-fm-canary` (RegularExpression `.+`, NEVER
+# the secret) — the canary-cookie-gate EnvoyFilter makes the marker non-forgeable
+# by stripping any client-supplied header and re-injecting the secret (from the
+# `fm-canary-token` k8s Secret, read via os.getenv) only for a valid host-only
+# `fm_canary` cookie, so presence is sufficient and NO secret lives in this file.
+# It is listed in gateway/kustomization.yaml ONLY while `%%name%%-canary` is
+# scaled up (route presence == canary activation), so an idle canary never 503s
+# the marker — it falls through to the stable /api/%%name%%/ rule. The canary
+# tooling (build-canary.yml + canary.sh) owns that toggle.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -495,8 +496,8 @@ spec:
         - path: { type: PathPrefix, value: /api/%%name%%/ }
           headers:
             - name: x-fm-canary
-              type: Exact
-              value: "%%cookie_secret%%"
+              type: RegularExpression
+              value: ".+"
       backendRefs:
         - name: %%name%%-canary
           namespace: prod
@@ -823,9 +824,30 @@ def load_spec(args) -> dict:
     spec["callers"] = [{"from": c["from"], "path_prefix": c.get("path_prefix")} for c in spec["callers"]]
     if not re.fullmatch(r"[a-z][a-z0-9]{1,15}", spec["name"]):
         raise SystemExit("name must be lowercase [a-z][a-z0-9]{1,15}")
+    # port is substituted RAW (%%port%%) into generated YAML/compose/nginx — a
+    # non-int (e.g. a multiline string) could inject extra config keys. Require
+    # an int in the unprivileged range.
+    try:
+        spec["port"] = int(spec["port"])
+    except (TypeError, ValueError):
+        raise SystemExit("port must be an integer")
+    if not (1024 <= spec["port"] <= 65535):
+        raise SystemExit("port must be in 1024..65535")
     for d in spec["deps"]:
         if d not in PORT_MAP:
             raise SystemExit(f"unknown dependency {d!r}; add its port to PORT_MAP")
+    # callers[].from is spliced RAW into deploy/policy/data.json (callers/azp_allow
+    # — the live OPA policy source), libs/fm_runtime/fm_runtime/grants.py, and
+    # netpol; callers[].path_prefix into data.json path_prefixes. Validate BOTH
+    # against strict allowlists BEFORE any template substitution so a crafted
+    # --spec cannot inject policy entries or break out of the JSON/Python
+    # structure (fm_runtime.export --check only catches DIVERGENCE, not a
+    # mutually-consistent malicious addition). name/deps are already validated.
+    for c in spec["callers"]:
+        if not re.fullmatch(r"[a-z][a-z0-9]{1,15}", c["from"] or ""):
+            raise SystemExit(f"caller 'from' must be a client id [a-z][a-z0-9]{{1,15}}: {c['from']!r}")
+        if c.get("path_prefix") is not None and not re.fullmatch(r"/[A-Za-z0-9/_.-]*", c["path_prefix"]):
+            raise SystemExit(f"caller path_prefix must be a safe path /[A-Za-z0-9/_.-]*: {c['path_prefix']!r}")
     if spec["ui"]:
         spec["browser"] = True
     return spec
@@ -837,13 +859,14 @@ def generate(spec: dict) -> None:
     up = name.upper()
     dev_secret, prod_secret = f"dev-{name}-secret", f"REPLACE-{name}-secret"
     pin = re.search(r"newTag: (sha-[0-9a-f]+)", _p("deploy/apps/overlays/prod/kustomization.yaml").read_text()).group(1)
-    cookie_secret = re.search(r'secret = "([0-9a-fA-F]+)"',
-                              _p("deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml").read_text()).group(1)
+    # NOTE: no cookie_secret extraction — the canary secret was externalized to
+    # the fm-canary-token k8s Secret (commit 09b739bb); canary routes presence-
+    # match `x-fm-canary` and carry no secret. See TPL_GW_CANARY / TPL_EW_CANARY.
     caller_clients = [c["from"] for c in spec["callers"]]
     azp = (["frontend"] if browser else []) + caller_clients
 
     ctx = dict(name=name, Name=name.capitalize(), NAME_UPPER=up, port=port,
-               DB_NAME=f"funnelmanager_{name}", pin=pin, cookie_secret=cookie_secret,
+               DB_NAME=f"funnelmanager_{name}", pin=pin,
                cpu_req=RES["cpu_req"], mem_req=RES["mem_req"], cpu_lim=RES["cpu_lim"], mem_lim=RES["mem_lim"])
 
     # ---- 1. source skeleton -------------------------------------------------
