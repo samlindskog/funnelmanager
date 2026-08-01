@@ -67,6 +67,41 @@ router = APIRouter(prefix="/api/mail", tags=["mail"])
 _STATE_TTL = timedelta(minutes=10)
 # Gmail label ids we accept as list filters (system labels + user label ids).
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+# Minimal well-formedness gate for a send recipient: local@domain.tld, no
+# whitespace. Deliberately conservative — it only rejects addresses Gmail is
+# certain to 400 (empty local/domain, no dot in domain); real delivery
+# validation stays Gmail's job. Bare addresses only; the UI strips display names
+# (extractEmail) before send.
+_RECIPIENT_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _gmail_http_error(exc: "GmailError") -> HTTPException:
+    """Map a GmailError to the right client-facing HTTPException.
+
+    Gmail's own status class decides ours: a 4xx (bad recipient/MIME, quota,
+    rate limit) is a caller/input condition — pass it through with Gmail's
+    reason so the user learns WHY; only a 5xx (or a non-HTTP failure) is a true
+    upstream 502. Never collapse a Gmail 4xx to 502 — that both mislabels an
+    unfixable-by-retry input error as transient AND, being a 5xx, gets replaced
+    by the edge's generic error page, hiding the reason.
+    """
+    code = exc.status_code
+    # 401 and 403 are RESERVED by this platform's own layers and must never carry
+    # an UPSTREAM (Gmail) meaning to a caller:
+    #   * 401 — mailui's request() force-clears tokens + redirects to Keycloak on
+    #     ANY 401 from /api/mail/* (a Gmail-side 401 would spuriously log the user
+    #     out), and the MCP client treats 401 as "token expired, refetch + retry"
+    #     — dangerous on the non-idempotent send path (a post-send get_message 401
+    #     would retry and duplicate the email).
+    #   * 403 — the MCP client maps ANY 403 to "FM policy denied; an admin can
+    #     adjust permissions", which misdiagnoses a Gmail scope/quota 403.
+    # So map both to 502 (matching the GmailAuthError branch). The other Gmail 4xx
+    # DO carry a user-actionable, non-colliding reason and pass through: bad
+    # recipient 400, not-found 404, conflict 409, unprocessable 422, rate-limit
+    # 429. Only a genuine Gmail 5xx (or a non-HTTP GmailError) is a plain 502.
+    if 400 <= code < 500 and code not in (401, 403):
+        return HTTPException(status_code=code, detail=exc.detail)
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.detail)
 
 
 def _backup_threshold() -> float:
@@ -570,7 +605,12 @@ async def do_send(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one recipient"
         )
     for addr in to + cc + bcc:
-        if "@" not in addr or " " in addr:
+        # Catch obviously-malformed recipients BEFORE the Gmail round-trip so the
+        # caller gets a precise 422 naming the bad address, rather than a generic
+        # Gmail 400 -> (previously) opaque 502. Requires local@domain.tld shape;
+        # the old check (`"@" in addr and " " not in addr`) let `foo@` / `@x.com`
+        # through to Gmail, which rejected them 400 (the reported send failure).
+        if not _RECIPIENT_RE.match(addr):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Invalid recipient: {addr}",
@@ -617,7 +657,14 @@ async def do_send(
             detail="Google rejected the mailbox credentials — reconnect the account",
         ) from exc
     except GmailError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.detail) from exc
+        # Honor Gmail's status class: a 4xx means Gmail rejected THIS message
+        # (bad recipient, malformed MIME, oversize) — a caller/input problem, so
+        # surface it as that 4xx with Gmail's reason, NOT a 502. Mapping it to
+        # 502 (the old behavior) told the user "server error, retry" for an
+        # unfixable-by-retry input problem, and a 5xx also gets replaced by
+        # Cloudflare's generic error page, hiding the reason entirely. Only a
+        # genuine Gmail 5xx is a bad-gateway condition.
+        raise _gmail_http_error(exc) from exc
     # Store the sent message immediately so it shows in SENT without waiting
     # for the next sync cycle.
     gmail_id = str(full.get("id") or "")
