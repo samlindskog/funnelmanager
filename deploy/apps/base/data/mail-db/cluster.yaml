@@ -39,11 +39,25 @@ spec:
     enablePodAntiAffinity: true
     podAntiAffinityType: preferred
     topologyKey: kubernetes.io/hostname
+  postgresql:
+    parameters:
+      # This DB is near-idle, but CNPG's default archive_timeout=5m was forcing a
+      # full 16MiB WAL segment upload every 5m — ~288 mostly-EMPTY segments/day
+      # (~4.6GB/day of near-zero padding) to the backups bucket. 30m cuts the
+      # forced switches ~6x; wal.compression below shrinks each remaining
+      # (mostly-zero) segment to a few KB. RPO becomes <=30m (fine — re-syncable).
+      archive_timeout: "30min"
   backup:
     retentionPolicy: "14d"
     barmanObjectStore:
       destinationPath: s3://${cluster_obj_bucket_backups}/mail-db
       endpointURL: https://${cluster_obj_host}
+      # Compress archived WAL + base backups. The near-empty forced segments are
+      # all zeros -> gzip takes them from 16MiB to a few KB.
+      wal:
+        compression: gzip
+      data:
+        compression: gzip
       s3Credentials:
         accessKeyId:
           name: objectstore-backups
