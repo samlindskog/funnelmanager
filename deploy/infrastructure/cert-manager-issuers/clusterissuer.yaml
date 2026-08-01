@@ -10,7 +10,7 @@ metadata:
   name: letsencrypt
 spec:
   acme:
-    email: sam@slindskog.net # PLACEHOLDERS.md
+    email: ${cluster_le_email} # substituted by Flux from the fm-cluster-vars ConfigMap (flux-system)
     server: https://acme-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
       name: letsencrypt-account-key
@@ -30,7 +30,7 @@ metadata:
   name: letsencrypt-staging
 spec:
   acme:
-    email: sam@slindskog.net # PLACEHOLDERS.md
+    email: ${cluster_le_email} # substituted by Flux from the fm-cluster-vars ConfigMap (flux-system)
     server: https://acme-staging-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
       name: letsencrypt-staging-account-key

@@ -62,6 +62,6 @@ spec:
             Match kube.*
             Host loki.monitoring.svc
             Port 3100
-            Labels job=fluent-bit, namespace=$kubernetes['namespace_name'], pod=$kubernetes['pod_name'], container=$kubernetes['container_name']
+            Labels job=fluent-bit, namespace=$$kubernetes['namespace_name'], pod=$$kubernetes['pod_name'], container=$$kubernetes['container_name']
             Auto_Kubernetes_Labels Off
             Line_Format json

@@ -1,5 +1,5 @@
 # Tempo single-binary: local 5Gi PVC is the WAL/cache; trace blocks live in
-# Linode Object Storage (bucket funnelmanager-2, prefix `tempo/` — reuses the
+# Linode Object Storage (bucket <cluster_obj_bucket>, prefix `tempo/` — reuses the
 # same bucket + `objectstore-loki` credentials as loki.yaml; see PLACEHOLDERS.md).
 # Receives OTLP/gRPC spans on :4317 (chart-default receiver) from the mesh
 # Envoy sidecars (Istio Telemetry -> provider `tempo`); serves the query API on
@@ -33,9 +33,9 @@ spec:
         trace:
           backend: s3
           s3:
-            bucket: funnelmanager-2
+            bucket: ${cluster_obj_bucket}
             prefix: tempo
-            endpoint: us-lax-4.linodeobjects.com
+            endpoint: ${cluster_obj_host}
             region: us-lax-4
       # Bound shared-bucket cost + forged-span flood surface (single tenant).
       overrides:

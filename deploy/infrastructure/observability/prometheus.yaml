@@ -93,7 +93,7 @@ spec:
           - source_labels: [__meta_kubernetes_pod_ip]
             regex: (.+)
             target_label: __address__
-            replacement: $1:9000
+            replacement: $$1:9000
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
 
@@ -126,7 +126,7 @@ spec:
           - source_labels: [__meta_kubernetes_pod_ip]
             regex: (.+)
             target_label: __address__
-            replacement: $1:9187
+            replacement: $$1:9187
           - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
             target_label: cnpg_cluster
           - source_labels: [__meta_kubernetes_namespace]

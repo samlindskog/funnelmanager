@@ -2,11 +2,13 @@
 
 Domain, Keycloak host, and Grafana host are now **filled in** for `x9bc433.win`
 (the ✅ items below). A few *decided* values are intentionally **redacted** to the
-gitignored ops config rather than printed here (the repo is public): the LE contact
-email and the node public IPs appear as `<…>` placeholders. What remains genuinely
-unset are cluster/credential values that cannot live in git — the only literal
-`REPLACE_` tokens left are the object-storage bucket names + region
-(`grep -rn REPLACE_ deploy`).
+gitignored ops config rather than printed here (the repo is public). The LE contact
+email and the object-storage host/bucket are referenced in tracked manifests as
+`${cluster_*}` and **Flux substitutes them at reconcile** from the `fm-cluster-vars`
+ConfigMap (flux-system, bootstrap-created — see `deploy/bootstrap/bootstrap.sh`
+`secrets`); node public IPs live in the gitignored ops config and appear as `<…>`
+here. What remains genuinely unset are the credential values that cannot live in
+git (bootstrap prompts create their Secrets).
 
 ## Domains & endpoints  ✅ (filled for x9bc433.win)
 
@@ -19,8 +21,9 @@ unset are cluster/credential values that cannot live in git — the only literal
       Grafana OIDC.
 - [x] **Grafana host** → `grafana.x9bc433.win` (own gateway listener/cert/
       route; OPA `grafana_host` bypass; Grafana enforces Keycloak OIDC).
-- [x] **Let's Encrypt email** → `<le-contact-email>` (cert-manager issuers; the
-      real address lives in the gitignored ops config, not this public repo).
+- [x] **Let's Encrypt email** → `${cluster_le_email}` in the cert-manager
+      ClusterIssuers; Flux substitutes it from the `fm-cluster-vars` ConfigMap
+      (bootstrap-created), so the real address stays out of this public repo.
 - [ ] **DNS records to create** — `A` for `x9bc433.win`, `kc.x9bc433.win`,
       `grafana.x9bc433.win` → the **edge** node's public IP
       (`<edge-public-ip>` — see the gitignored ops config / your infra records).
@@ -55,11 +58,15 @@ unset are cluster/credential values that cannot live in git — the only literal
       public IPs live in the gitignored ops config, not this public repo — the ssh
       aliases here are what the tooling uses. Private-network IPs + `PRIVATE_IFACE`
       are still needed for the k3s `--node-ip`/`--flannel-iface` flags.
-- [ ] **Linode Object Storage** — create two buckets and one access-key pair;
-      fill `REPLACE_BUCKET_CNPG`, `REPLACE_BUCKET_LOKI`, `REPLACE_REGION`
-      (endpoint `https://<REPLACE_REGION>.linodeobjects.com`) in
-      `deploy/apps/base/data/*/cluster.yaml`, `deploy/infrastructure/identity/cluster.yaml`,
-      `deploy/infrastructure/observability/loki.yaml`. Keys go into the
+- [ ] **Linode Object Storage** — create two buckets (observability + backups)
+      and one access-key pair. The host + bucket names are referenced as
+      `${cluster_obj_host}` (endpoint `https://${cluster_obj_host}`),
+      `${cluster_obj_bucket}` (Loki/Tempo) and `${cluster_obj_bucket_backups}`
+      (CNPG WAL + mongo dumps) in `deploy/apps/base/data/*/`,
+      `deploy/infrastructure/identity/cluster.yaml`, and
+      `deploy/infrastructure/observability/{loki,tempo}.yaml`; Flux substitutes
+      them from the `fm-cluster-vars` ConfigMap (bootstrap prompts), so the names
+      stay out of this public repo. The access KEYS go into the
       `objectstore-backups` / `objectstore-loki` Secrets (bootstrap prompts).
 - [ ] **GHCR read-only token** → `ghcr-pull` (prod ns; bootstrap prompts).
 - [ ] **App/identity secrets** (bootstrap prompts, prod ns):

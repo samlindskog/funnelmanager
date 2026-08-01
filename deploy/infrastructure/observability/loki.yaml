@@ -1,5 +1,5 @@
 # Loki single-binary: local 5Gi PVC is a working cache; chunks live in
-# Linode Object Storage (bucket funnelmanager-2 — see PLACEHOLDERS.md).
+# Linode Object Storage (bucket ${cluster_obj_bucket} — see PLACEHOLDERS.md).
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -41,11 +41,11 @@ spec:
       storage:
         type: s3
         bucketNames:
-          chunks: funnelmanager-2
-          ruler: funnelmanager-2
-          admin: funnelmanager-2
+          chunks: ${cluster_obj_bucket}
+          ruler: ${cluster_obj_bucket}
+          admin: ${cluster_obj_bucket}
         s3:
-          endpoint: https://us-lax-4.linodeobjects.com
+          endpoint: https://${cluster_obj_host}
           region: us-lax-4
           s3ForcePathStyle: false
           insecure: false

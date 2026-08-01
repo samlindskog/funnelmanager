@@ -188,6 +188,26 @@ YAML
     ensure monitoring objectstore-loki generic objectstore-loki \
       --from-literal=ACCESS_KEY_ID="$OSK" --from-literal=ACCESS_SECRET_KEY="$OSS"
 
+    # Cluster topology vars that tracked manifests reference as ${cluster_*} and
+    # Flux substitutes at reconcile (postBuild.substituteFrom on
+    # infra-cert-manager-issuers / infra-identity / infra-observability /
+    # apps-prod), so the real LE email + object-storage host/bucket stay OUT of
+    # the public repo. NON-secret, but topology — hence a ConfigMap in flux-system
+    # (the Kustomizations' namespace). Missing this ⇒ those Kustomizations fail to
+    # reconcile (safe: they don't apply, old resources persist) — create it BEFORE
+    # `flux`. Idempotent.
+    read -rp  "Let's Encrypt contact email: " LEEMAIL
+    read -rp  "Object storage host (e.g. <region>.linodeobjects.com): " OSHOST
+    read -rp  "Object storage bucket — observability (Loki/Tempo): " OSBUCKET
+    read -rp  "Object storage bucket — backups (CNPG WAL + mongo dumps): " OSBUCKETBK
+    kubectl -n flux-system get configmap fm-cluster-vars >/dev/null 2>&1 \
+      && echo "have flux-system/fm-cluster-vars" \
+      || kubectl -n flux-system create configmap fm-cluster-vars \
+           --from-literal=cluster_le_email="$LEEMAIL" \
+           --from-literal=cluster_obj_host="$OSHOST" \
+           --from-literal=cluster_obj_bucket="$OSBUCKET" \
+           --from-literal=cluster_obj_bucket_backups="$OSBUCKETBK"
+
     read -rsp "Grafana admin password: " GFPW; echo
     ensure monitoring grafana-admin generic grafana-admin \
       --from-literal=admin-user=admin --from-literal=admin-password="$GFPW"

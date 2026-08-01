@@ -49,9 +49,9 @@ spec:
                 - name: MONGO_POD
                   value: mongo-0
                 - name: BUCKET
-                  value: funnelmanager-1
+                  value: ${cluster_obj_bucket_backups}
                 - name: S3_ENDPOINT
-                  value: https://us-lax-4.linodeobjects.com
+                  value: https://${cluster_obj_host}
                 - name: RETENTION
                   value: 3d
                 - name: ACCESS_KEY_ID

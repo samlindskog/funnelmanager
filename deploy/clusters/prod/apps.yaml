@@ -13,6 +13,10 @@ spec:
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/apps/overlays/prod
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: fm-cluster-vars
   wait: true
   timeout: 2m
   healthChecks:

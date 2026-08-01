@@ -81,6 +81,10 @@ spec:
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/cert-manager-issuers
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: fm-cluster-vars
   wait: true
   timeout: 5m
 ---
@@ -167,6 +171,10 @@ spec:
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/identity
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: fm-cluster-vars
   wait: true
   timeout: 5m
   healthChecks:
@@ -205,5 +213,9 @@ spec:
   prune: true
   sourceRef: { kind: GitRepository, name: flux-system }
   path: ./deploy/infrastructure/observability
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: fm-cluster-vars
   wait: true
   timeout: 5m

@@ -42,8 +42,8 @@ spec:
   backup:
     retentionPolicy: "14d"
     barmanObjectStore:
-      destinationPath: s3://funnelmanager-1/agents-db
-      endpointURL: https://us-lax-4.linodeobjects.com
+      destinationPath: s3://${cluster_obj_bucket_backups}/agents-db
+      endpointURL: https://${cluster_obj_host}
       s3Credentials:
         accessKeyId:
           name: objectstore-backups
