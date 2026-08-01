@@ -38,6 +38,16 @@ spec:
 
     prometheus-node-exporter:
       enabled: true
+      # NOT hostNetwork: with it (the chart default) the scrape target is the
+      # node's public IP:9100, which every node's ufw (default-deny incoming,
+      # deploy/bootstrap/bootstrap.sh) rejects — all four targets sat at up=0.
+      # Without hostNetwork the exporter gets a pod IP and the scrape rides
+      # the pod network (already ufw-allowed), no per-node firewall change
+      # needed. Host CPU/mem/disk/fs stats still come from the /host/proc +
+      # /host/sys hostPath mounts; only the netdev collector now sees the pod
+      # netns — node NETWORK panels read cAdvisor's root cgroup (id="/")
+      # instead (see the k8s-cluster dashboard).
+      hostNetwork: false
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists

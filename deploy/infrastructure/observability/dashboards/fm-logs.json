@@ -1,0 +1,830 @@
+{
+ "uid": "fm-logs",
+ "title": "FM \u00b7 Logs & Errors",
+ "description": "Loki view across every service. Backend lines are fm_runtime structured JSON ({service_name=...} | json); browser RUM lands under {job=\"faro\"}. Log-line TraceIDs deep-link to Tempo.",
+ "tags": [
+  "funnelmanager",
+  "logs"
+ ],
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "fiscalYearStartMonth": 0,
+ "weekStart": "",
+ "refresh": "1m",
+ "time": {
+  "from": "now-3h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "links": [
+  {
+   "type": "dashboards",
+   "title": "Funnel Manager",
+   "tags": [
+    "funnelmanager"
+   ],
+   "asDropdown": true,
+   "includeVars": false,
+   "keepTime": true,
+   "icon": "external link",
+   "targetBlank": false,
+   "url": ""
+  }
+ ],
+ "templating": {
+  "list": [
+   {
+    "name": "logsvc",
+    "label": "service",
+    "type": "query",
+    "datasource": {
+     "type": "loki",
+     "uid": "loki"
+    },
+    "query": {
+     "refId": "LokiVariableQueryEditor-VariableQuery",
+     "type": 1,
+     "label": "service_name",
+     "stream": ""
+    },
+    "refresh": 2,
+    "regex": "",
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".+",
+    "options": [],
+    "current": {
+     "text": [
+      "All"
+     ],
+     "value": [
+      "$__all"
+     ],
+     "selected": true
+    }
+   }
+  ]
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Volume",
+   "collapsed": false,
+   "panels": [],
+   "id": 1,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Log lines by service",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (service_name) (count_over_time({job=\"fluent-bit\", service_name=~\"$logsvc\"} [$__auto]))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{service_name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 60,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 2,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 1
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Log throughput (bytes)",
+   "description": "Loki bills by bytes scanned \u2014 this is who is noisy.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (service_name) (bytes_over_time({job=\"fluent-bit\", service_name=~\"$logsvc\"} [$__auto]))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{service_name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 60,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 3,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 1
+   }
+  },
+  {
+   "type": "row",
+   "title": "Errors",
+   "collapsed": false,
+   "panels": [],
+   "id": 4,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 9
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "error-level lines by service (all namespaces)",
+   "description": "Uses Loki's detected_level (works for every log format, incl. non-JSON infra logs).",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (service_name) (count_over_time({job=\"fluent-bit\", service_name=~\"$logsvc\"} | detected_level=~\"error|critical\" [$__auto]))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{service_name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 5,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 10
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "prod backends by level (fm_runtime JSON)",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (level) (count_over_time({namespace=\"prod\"} | json | level != \"\" | __error__=\"\" [$__auto]))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{level}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 60,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "info"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "debug"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "warning"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "yellow"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "error"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "critical"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "dark-red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 6,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 10
+   }
+  },
+  {
+   "type": "table",
+   "title": "Noisiest pods (window total)",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "topk(15, sum by (pod) (count_over_time({job=\"fluent-bit\"} [$__range])))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "Value": "lines"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "lines",
+      "desc": true
+     }
+    ]
+   },
+   "id": 7,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 10
+   }
+  },
+  {
+   "type": "row",
+   "title": "Browser (Faro RUM)",
+   "collapsed": false,
+   "panels": [],
+   "id": 8,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 18
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Faro entries by kind",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (kind) (count_over_time({job=\"faro\"} | logfmt | kind != \"\" [$__auto]))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{kind}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 60,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "exception"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 19
+   }
+  },
+  {
+   "type": "logs",
+   "title": "Browser exceptions",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{job=\"faro\"} | logfmt | kind=\"exception\"",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
+    }
+   ],
+   "options": {
+    "showTime": true,
+    "showLabels": false,
+    "showCommonLabels": false,
+    "wrapLogMessage": true,
+    "prettifyLogMessage": false,
+    "enableLogDetails": true,
+    "dedupStrategy": "none",
+    "sortOrder": "Descending"
+   },
+   "id": 10,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 19
+   }
+  },
+  {
+   "type": "row",
+   "title": "Tail",
+   "collapsed": false,
+   "panels": [],
+   "id": 11,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 27
+   }
+  },
+  {
+   "type": "logs",
+   "title": "Errors \u2014 everything",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{job=\"fluent-bit\", service_name=~\"$logsvc\"} | detected_level=~\"error|critical\"",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
+    }
+   ],
+   "options": {
+    "showTime": true,
+    "showLabels": false,
+    "showCommonLabels": false,
+    "wrapLogMessage": true,
+    "prettifyLogMessage": false,
+    "enableLogDetails": true,
+    "dedupStrategy": "none",
+    "sortOrder": "Descending"
+   },
+   "id": 12,
+   "gridPos": {
+    "h": 12,
+    "w": 12,
+    "x": 0,
+    "y": 28
+   }
+  },
+  {
+   "type": "logs",
+   "title": "Raw tail \u2014 selected services",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{job=\"fluent-bit\", service_name=~\"$logsvc\"}",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
+    }
+   ],
+   "options": {
+    "showTime": true,
+    "showLabels": false,
+    "showCommonLabels": false,
+    "wrapLogMessage": true,
+    "prettifyLogMessage": false,
+    "enableLogDetails": true,
+    "dedupStrategy": "none",
+    "sortOrder": "Descending"
+   },
+   "id": 13,
+   "gridPos": {
+    "h": 12,
+    "w": 12,
+    "x": 12,
+    "y": 28
+   }
+  }
+ ]
+}

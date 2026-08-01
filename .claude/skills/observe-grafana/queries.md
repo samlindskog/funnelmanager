@@ -27,7 +27,7 @@ and bound every query to a window (`now-15m` default; UTC).
   - `event_data_userActionName=<testid>` — the Phase-3 `data-testid` of the clicked
     control (= Faro user-action name = Playwright selector).
   - `app_version=canary-<sha>` — canary bundle version (stable prod ships no Faro).
-- **Tempo** — mesh spans (1% baseline) + Faro-originated `sampled=1` canary traces,
+- **Tempo** — mesh spans (5% baseline) + Faro-originated `sampled=1` canary traces,
   keyed by `trace_id`. Loki `derivedFields` link `trace_id` → Tempo;
   `tracesToLogs` links a span back to its Loki lines.
 - **Prometheus** — `fm_http_*` request series, labeled
@@ -122,7 +122,7 @@ tools) with the Tempo datasource uid from `list_datasources`.
 
 Expected canary shape: a single trace spanning browser (Faro) → istio-ingress →
 `<svc>-canary` → stable upstreams, sampled because the canary SPA originated
-`sampled=1` (honor-incoming-sampled at the 1% mesh baseline).
+`sampled=1` (honor-incoming-sampled at the 5% mesh baseline).
 
 ---
 

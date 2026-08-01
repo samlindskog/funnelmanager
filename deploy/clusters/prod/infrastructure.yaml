@@ -200,6 +200,27 @@ spec:
   path: ./deploy/infrastructure/gateway
   wait: true
 ---
+# Grafana dashboard ConfigMaps. Separate from infra-observability ON PURPOSE:
+# this path must NOT get postBuild substitution — dashboard JSON is full of
+# Grafana's ${...}/$var syntax that envsubst would eat. Applied before
+# infra-observability (which dependsOn it) so the grafana pod's ConfigMap
+# volume mounts always resolve.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-dashboards
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra-namespaces
+  interval: 10m
+  retryInterval: 1m
+  prune: true
+  sourceRef: { kind: GitRepository, name: flux-system }
+  path: ./deploy/infrastructure/observability/dashboards
+  wait: true
+  timeout: 2m
+---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -208,6 +229,7 @@ metadata:
 spec:
   dependsOn:
     - name: infra-namespaces
+    - name: infra-dashboards
   interval: 10m
   retryInterval: 1m
   prune: true

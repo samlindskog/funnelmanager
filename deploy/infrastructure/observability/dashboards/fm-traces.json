@@ -1,0 +1,255 @@
+{
+ "uid": "fm-traces",
+ "title": "FM \u00b7 Traces (Tempo)",
+ "description": "TraceQL search panels over the mesh spans. Baseline sampling is 5% of unmarked prod traffic; canary flows are fully traced (Faro originates sampled=1 and every sidecar honors it).",
+ "tags": [
+  "funnelmanager",
+  "traces"
+ ],
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "fiscalYearStartMonth": 0,
+ "weekStart": "",
+ "refresh": "",
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "links": [
+  {
+   "type": "dashboards",
+   "title": "Funnel Manager",
+   "tags": [
+    "funnelmanager"
+   ],
+   "asDropdown": true,
+   "includeVars": false,
+   "keepTime": true,
+   "icon": "external link",
+   "targetBlank": false,
+   "url": ""
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "How to use this",
+   "collapsed": false,
+   "panels": [],
+   "id": 1,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "type": "text",
+   "title": "",
+   "transparent": true,
+   "options": {
+    "mode": "markdown",
+    "code": {
+     "language": "plaintext"
+    },
+    "content": "**Pivots beat searching.** A backend log line's `TraceID` derived field opens the trace; any span links back to its Loki lines (trace\u2192logs). `http.url` is deliberately redacted mesh-wide (secret-bearing paths) \u2014 identify requests by route/span name.\n\n- **Sampling:** ~5% baseline on unmarked prod traffic; canary requests are always fully traced end-to-end.\n- Span service names look like `search.prod`, `search-canary.prod`, `istio-ingress.istio-ingress`."
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "id": 2,
+   "gridPos": {
+    "h": 3,
+    "w": 24,
+    "x": 0,
+    "y": 1
+   }
+  },
+  {
+   "type": "row",
+   "title": "Slow & broken",
+   "collapsed": false,
+   "panels": [],
+   "id": 3,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 4
+   }
+  },
+  {
+   "type": "traces",
+   "title": "Slowest traces (>1s)",
+   "description": "Any span over a second, newest first.",
+   "datasource": {
+    "type": "tempo",
+    "uid": "tempo"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "tempo",
+      "uid": "tempo"
+     },
+     "queryType": "traceql",
+     "query": "{duration > 1s}",
+     "limit": 20,
+     "tableType": "traces"
+    }
+   ],
+   "options": {},
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "id": 4,
+   "gridPos": {
+    "h": 10,
+    "w": 12,
+    "x": 0,
+    "y": 5
+   }
+  },
+  {
+   "type": "traces",
+   "title": "Error traces",
+   "description": "Spans Envoy marked as errored (5xx & resets).",
+   "datasource": {
+    "type": "tempo",
+    "uid": "tempo"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "tempo",
+      "uid": "tempo"
+     },
+     "queryType": "traceql",
+     "query": "{status = error}",
+     "limit": 20,
+     "tableType": "traces"
+    }
+   ],
+   "options": {},
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "id": 5,
+   "gridPos": {
+    "h": 10,
+    "w": 12,
+    "x": 12,
+    "y": 5
+   }
+  },
+  {
+   "type": "row",
+   "title": "Canary & ingress",
+   "collapsed": false,
+   "panels": [],
+   "id": 6,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 15
+   }
+  },
+  {
+   "type": "traces",
+   "title": "Canary traces",
+   "description": "Every span that touched a canary workload \u2014 these are always sampled.",
+   "datasource": {
+    "type": "tempo",
+    "uid": "tempo"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "tempo",
+      "uid": "tempo"
+     },
+     "queryType": "traceql",
+     "query": "{resource.service.name =~ \".*-canary.*\"}",
+     "limit": 20,
+     "tableType": "traces"
+    }
+   ],
+   "options": {},
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "id": 7,
+   "gridPos": {
+    "h": 10,
+    "w": 12,
+    "x": 0,
+    "y": 16
+   }
+  },
+  {
+   "type": "traces",
+   "title": "Ingress roots",
+   "description": "Traces as they entered the mesh at the gateway.",
+   "datasource": {
+    "type": "tempo",
+    "uid": "tempo"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "tempo",
+      "uid": "tempo"
+     },
+     "queryType": "traceql",
+     "query": "{resource.service.name = \"istio-ingress.istio-ingress\" && kind = server}",
+     "limit": 20,
+     "tableType": "traces"
+    }
+   ],
+   "options": {},
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "id": 8,
+   "gridPos": {
+    "h": 10,
+    "w": 12,
+    "x": 12,
+    "y": 16
+   }
+  }
+ ]
+}

@@ -1,0 +1,1520 @@
+{
+ "uid": "cnpg-postgres",
+ "title": "Postgres \u00b7 CNPG clusters",
+ "description": "CloudNativePG fleet: app-db, mail-db, jobs-db, agents-db (prod) and kc-db (identity). Transactions, connections, cache hits, WAL & archiving, database sizes.",
+ "tags": [
+  "funnelmanager",
+  "postgres",
+  "cnpg",
+  "database"
+ ],
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "fiscalYearStartMonth": 0,
+ "weekStart": "",
+ "refresh": "1m",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "links": [
+  {
+   "type": "dashboards",
+   "title": "Funnel Manager",
+   "tags": [
+    "funnelmanager"
+   ],
+   "asDropdown": true,
+   "includeVars": false,
+   "keepTime": true,
+   "icon": "external link",
+   "targetBlank": false,
+   "url": ""
+  }
+ ],
+ "templating": {
+  "list": [
+   {
+    "name": "cluster",
+    "label": "cluster",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(cnpg_collector_up, cnpg_cluster)",
+    "refresh": 2,
+    "regex": "",
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "options": [],
+    "current": {
+     "text": [
+      "All"
+     ],
+     "value": [
+      "$__all"
+     ],
+     "selected": true
+    },
+    "allValue": ".*"
+   }
+  ]
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Fleet health",
+   "collapsed": false,
+   "panels": [],
+   "id": 1,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Instances up",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(cnpg_collector_up{cnpg_cluster=~\"$cluster\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "red"
+       },
+       {
+        "value": 5,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 2,
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 0,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Total DB size",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(cnpg_pg_database_size_bytes{cnpg_cluster=~\"$cluster\", datname!~\"template.*\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "blue"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 3,
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 3,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Backends (connections)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(cnpg_backends_total{cnpg_cluster=~\"$cluster\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "blue"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 4,
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 7,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "WAL archiving \u2014 time since last success",
+   "description": "Continuous archiving to object storage backs PITR; this growing means backups are stale.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max(cnpg_pg_stat_archiver_seconds_since_last_archival{cnpg_cluster=~\"$cluster\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 600,
+        "color": "yellow"
+       },
+       {
+        "value": 1800,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 5,
+   "gridPos": {
+    "h": 4,
+    "w": 5,
+    "x": 10,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Last base backup age",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "time() - max(cnpg_collector_last_available_backup_timestamp{cnpg_cluster=~\"$cluster\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 172800,
+        "color": "yellow"
+       },
+       {
+        "value": 345600,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 6,
+   "gridPos": {
+    "h": 4,
+    "w": 5,
+    "x": 15,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Deadlocks (1h)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(increase(cnpg_pg_stat_database_deadlocks{cnpg_cluster=~\"$cluster\"}[1h])) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 1,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 7,
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 20,
+    "y": 1
+   }
+  },
+  {
+   "type": "row",
+   "title": "Throughput",
+   "collapsed": false,
+   "panels": [],
+   "id": 8,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 5
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Transactions \u2014 commits vs rollbacks",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_xact_commit{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "commit {{cnpg_cluster}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_xact_rollback{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "rollback {{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^rollback .*/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 6
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Buffer cache hit ratio",
+   "description": "Sustained <99% on these small DBs usually means shared_buffers is too small or a seq-scan storm.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_blks_hit{cnpg_cluster=~\"$cluster\"}[$__rate_interval])) / (sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_blks_hit{cnpg_cluster=~\"$cluster\"}[$__rate_interval])) + sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_blks_read{cnpg_cluster=~\"$cluster\"}[$__rate_interval])))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 10,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 6
+   }
+  },
+  {
+   "type": "row",
+   "title": "Activity",
+   "collapsed": false,
+   "panels": [],
+   "id": 11,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 14
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Tuple activity",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_tup_fetched{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "fetched {{cnpg_cluster}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_tup_inserted{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "inserted {{cnpg_cluster}}"
+    },
+    {
+     "refId": "C",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_tup_updated{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "updated {{cnpg_cluster}}"
+    },
+    {
+     "refId": "D",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_tup_deleted{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "deleted {{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 12,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 15
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Connections by cluster",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (cnpg_backends_total{cnpg_cluster=~\"$cluster\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 13,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 15
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Longest transaction",
+   "description": "Long-running transactions block vacuum and bloat the WAL.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "max by (cnpg_cluster) (cnpg_backends_max_tx_duration_seconds{cnpg_cluster=~\"$cluster\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 14,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 15
+   }
+  },
+  {
+   "type": "row",
+   "title": "WAL & storage",
+   "collapsed": false,
+   "panels": [],
+   "id": 15,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 23
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "WAL generated",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_collector_wal_bytes{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 16,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 24
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "WAL archiver \u2014 archived vs failed",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_archiver_archived_count{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "archived {{cnpg_cluster}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_archiver_failed_count{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "failed {{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^failed .*/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 17,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 24
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Database size",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster, datname) (cnpg_pg_database_size_bytes{cnpg_cluster=~\"$cluster\", datname!~\"template.*|postgres\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{cnpg_cluster}}/{{datname}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 18,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 24
+   }
+  },
+  {
+   "type": "row",
+   "title": "Instance pods",
+   "collapsed": false,
+   "panels": [],
+   "id": 19,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 32
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU by database pod",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"prod|identity\", pod=~\"(app|mail|jobs|agents|kc)-db-.*\", container!=\"\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "cores",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 3
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 20,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 33
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Memory by database pod",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"prod|identity\", pod=~\"(app|mail|jobs|agents|kc)-db-.*\", container!=\"\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 21,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 33
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Temp files spilled to disk",
+   "description": "Queries exceeding work_mem spill here \u2014 sustained traffic means a query needs tuning.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (cnpg_cluster) (rate(cnpg_pg_stat_database_temp_bytes{cnpg_cluster=~\"$cluster\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{cnpg_cluster}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 22,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 33
+   }
+  }
+ ]
+}

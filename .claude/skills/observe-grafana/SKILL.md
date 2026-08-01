@@ -36,7 +36,7 @@ hard-coding, because uids can differ from the type name:
 
 - **Loki** (logs) — uid is typically `loki`. Backend structured logs + Faro RUM
   logs/events land here.
-- **Tempo** (traces) — spans from the Istio mesh (1% forensic baseline) plus every
+- **Tempo** (traces) — spans from the Istio mesh (5% forensic baseline) plus every
   Faro-originated `sampled=1` canary trace. Loki `derivedFields` link a `trace_id`
   straight to it.
 - **Prometheus** (metrics) — the `fm_http_*` request series, labeled

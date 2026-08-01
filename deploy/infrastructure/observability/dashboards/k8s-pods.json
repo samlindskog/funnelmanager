@@ -1,0 +1,1529 @@
+{
+ "uid": "k8s-pods",
+ "title": "Kubernetes \u00b7 Pods & Resources",
+ "description": "Per-pod CPU/memory vs requests & limits (kubernetes-mixin shape), throttling, network, restarts, OOM kills.",
+ "tags": [
+  "funnelmanager",
+  "kubernetes",
+  "pods"
+ ],
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "fiscalYearStartMonth": 0,
+ "weekStart": "",
+ "refresh": "1m",
+ "time": {
+  "from": "now-3h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "links": [
+  {
+   "type": "dashboards",
+   "title": "Funnel Manager",
+   "tags": [
+    "funnelmanager"
+   ],
+   "asDropdown": true,
+   "includeVars": false,
+   "keepTime": true,
+   "icon": "external link",
+   "targetBlank": false,
+   "url": ""
+  }
+ ],
+ "templating": {
+  "list": [
+   {
+    "name": "namespace",
+    "label": "namespace",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(kube_pod_info, namespace)",
+    "refresh": 2,
+    "regex": "",
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "options": [],
+    "current": {
+     "text": [
+      "prod"
+     ],
+     "value": [
+      "prod"
+     ],
+     "selected": true
+    },
+    "allValue": ".*"
+   },
+   {
+    "name": "pod",
+    "label": "pod",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(kube_pod_info{namespace=~\"$namespace\"}, pod)",
+    "refresh": 2,
+    "regex": "",
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "options": [],
+    "current": {
+     "text": [
+      "All"
+     ],
+     "value": [
+      "$__all"
+     ],
+     "selected": true
+    },
+    "allValue": ".*"
+   }
+  ]
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Health",
+   "collapsed": false,
+   "panels": [],
+   "id": 1,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Pods running",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "blue"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 2,
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Restarts (1h)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", pod=~\"$pod\"}[1h])) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 1,
+        "color": "yellow"
+       },
+       {
+        "value": 5,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 3,
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Containers whose last exit was OOMKilled",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\", namespace=~\"$namespace\", pod=~\"$pod\"}) or vector(0)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 1,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 4,
+   "gridPos": {
+    "h": 4,
+    "w": 5,
+    "x": 8,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "CPU used / requested",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}[5m])) / sum(kube_pod_container_resource_requests{resource=\"cpu\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 0.9,
+        "color": "yellow"
+       },
+       {
+        "value": 1.2,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 5,
+   "gridPos": {
+    "h": 4,
+    "w": 5,
+    "x": 13,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Memory used / requested",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}) / sum(kube_pod_container_resource_requests{resource=\"memory\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 0.9,
+        "color": "yellow"
+       },
+       {
+        "value": 1.2,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 6,
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 1
+   }
+  },
+  {
+   "type": "row",
+   "title": "CPU",
+   "collapsed": false,
+   "panels": [],
+   "id": 7,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 5
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU usage by pod",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "cores",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 3
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 8,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 6
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "CPU throttling % by pod",
+   "description": "Sustained throttling = the CPU limit is too low for this workload.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "100 * sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\"}[$__rate_interval])) / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "max": 100
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 6
+   }
+  },
+  {
+   "type": "row",
+   "title": "Quota tables",
+   "collapsed": false,
+   "panels": [],
+   "id": 10,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 14
+   }
+  },
+  {
+   "type": "table",
+   "title": "CPU quota \u2014 usage vs requests & limits",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}[5m]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (pod) (kube_pod_container_resource_requests{resource=\"cpu\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_requests{resource=\"cpu\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "expr": "sum by (pod) (kube_pod_container_resource_limits{resource=\"cpu\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "E",
+     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_limits{resource=\"cpu\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "pod",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "Time 2": true,
+       "Time 3": true,
+       "Time 4": true,
+       "Time 5": true
+      },
+      "renameByName": {
+       "Value #A": "usage (cores)",
+       "Value #B": "requests",
+       "Value #C": "usage/requests",
+       "Value #D": "limits",
+       "Value #E": "usage/limits"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "usage (cores)"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 3
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "requests"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 2
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "limits"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 2
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^usage\\//"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percentunit"
+       },
+       {
+        "id": "decimals",
+        "value": 2
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background",
+         "mode": "basic"
+        }
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "value": null,
+           "color": "green"
+          },
+          {
+           "value": 0.9,
+           "color": "yellow"
+          },
+          {
+           "value": 1.1,
+           "color": "red"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "usage (cores)",
+      "desc": true
+     }
+    ]
+   },
+   "id": 11,
+   "gridPos": {
+    "h": 10,
+    "w": 12,
+    "x": 0,
+    "y": 15
+   }
+  },
+  {
+   "type": "table",
+   "title": "Memory quota \u2014 working set vs requests & limits",
+   "description": "working_set is what the OOM killer accounts against the limit.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (pod) (kube_pod_container_resource_requests{resource=\"memory\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}) / sum by (pod) (kube_pod_container_resource_requests{resource=\"memory\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "D",
+     "expr": "sum by (pod) (kube_pod_container_resource_limits{resource=\"memory\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "E",
+     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"}) / sum by (pod) (kube_pod_container_resource_limits{resource=\"memory\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "pod",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "Time 1": true,
+       "Time 2": true,
+       "Time 3": true,
+       "Time 4": true,
+       "Time 5": true
+      },
+      "renameByName": {
+       "Value #A": "working set",
+       "Value #B": "requests",
+       "Value #C": "usage/requests",
+       "Value #D": "limits",
+       "Value #E": "usage/limits"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "working set"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "requests"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "limits"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "bytes"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^usage\\//"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percentunit"
+       },
+       {
+        "id": "decimals",
+        "value": 2
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-background",
+         "mode": "basic"
+        }
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "value": null,
+           "color": "green"
+          },
+          {
+           "value": 0.9,
+           "color": "yellow"
+          },
+          {
+           "value": 1.05,
+           "color": "red"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "working set",
+      "desc": true
+     }
+    ]
+   },
+   "id": 12,
+   "gridPos": {
+    "h": 10,
+    "w": 12,
+    "x": 12,
+    "y": 15
+   }
+  },
+  {
+   "type": "row",
+   "title": "Memory & network",
+   "collapsed": false,
+   "panels": [],
+   "id": 13,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 25
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Memory working set by pod",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$pod\", container!=\"\", image!=\"\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 14,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 26
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Pod network (rx +, tx \u2212)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (rate(container_network_receive_bytes_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "rx {{pod}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (pod) (rate(container_network_transmit_bytes_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "tx {{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^tx .*/"
+      },
+      "properties": [
+       {
+        "id": "custom.transform",
+        "value": "negative-Y"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 15,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 26
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Restarts by pod (1h window)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", pod=~\"$pod\"}[1h]))",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "legendFormat": "{{pod}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 16,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 26
+   }
+  },
+  {
+   "type": "row",
+   "title": "Placement",
+   "collapsed": false,
+   "panels": [],
+   "id": 17,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 34
+   }
+  },
+  {
+   "type": "table",
+   "title": "Pods \u2014 placement & age",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "kube_pod_info{namespace=~\"$namespace\", pod=~\"$pod\"}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "expr": "(time() - kube_pod_start_time{namespace=~\"$namespace\", pod=~\"$pod\"})",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "joinByField",
+     "options": {
+      "byField": "pod",
+      "mode": "outer"
+     }
+    },
+    {
+     "id": "filterFieldsByName",
+     "options": {
+      "include": {
+       "names": [
+        "namespace 1",
+        "pod",
+        "node",
+        "created_by_kind",
+        "Value #B"
+       ]
+      }
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "renameByName": {
+       "namespace 1": "namespace",
+       "created_by_kind": "kind",
+       "Value #B": "age"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "age"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "s"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "age",
+      "desc": false
+     }
+    ]
+   },
+   "id": 18,
+   "gridPos": {
+    "h": 10,
+    "w": 24,
+    "x": 0,
+    "y": 35
+   }
+  }
+ ]
+}

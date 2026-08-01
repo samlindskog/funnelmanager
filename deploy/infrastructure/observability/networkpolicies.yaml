@@ -1,7 +1,10 @@
 # monitoring namespace network policy: default-deny both directions, then
-# narrow allows. Note: node-exporter runs hostNetwork, so policies do not
-# apply to it; the API-server egress rule uses an ipBlock because the
-# k3s apiserver endpoint is a node IP, not a pod.
+# narrow allows. Note: node-exporter runs WITHOUT hostNetwork (prometheus.yaml
+# — the node ufw rejects node-IP scrapes), so its pods ARE subject to these
+# policies: scrape ingress is admitted by allow-prometheus-scrape-ingress and
+# additionally by the explicit node-exporter rule below (load-bearing if the
+# catch-all is ever narrowed). The API-server egress rule uses an ipBlock
+# because the k3s apiserver endpoint is a node IP, not a pod.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -108,6 +111,33 @@ spec:
               app.kubernetes.io/component: server
       ports:
         - protocol: TCP
+---
+# node-exporter scrape ingress, explicitly. Today the catch-all
+# allow-prometheus-scrape-ingress (podSelector {}) also covers this; this
+# named rule exists so narrowing that catch-all can never silently kill the
+# node metrics (node-exporter is pod-networked here — see prometheus.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: node-exporter-ingress-prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: 9100
 ---
 # Loki and Tempo both push blocks to Linode Object Storage over HTTPS.
 apiVersion: networking.k8s.io/v1

@@ -1,0 +1,1013 @@
+{
+ "uid": "fm-rum",
+ "title": "FM \u00b7 Browser RUM (Faro)",
+ "description": "Grafana Faro browser telemetry from telemetry-enabled SPA bundles (dev, canary, and any bundle built with VITE_TELEMETRY). Web vitals at p75 (the industry aggregation), user actions by data-testid, JS exceptions.",
+ "tags": [
+  "funnelmanager",
+  "rum",
+  "frontend"
+ ],
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "timezone": "browser",
+ "fiscalYearStartMonth": 0,
+ "weekStart": "",
+ "refresh": "5m",
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "links": [
+  {
+   "type": "dashboards",
+   "title": "Funnel Manager",
+   "tags": [
+    "funnelmanager"
+   ],
+   "asDropdown": true,
+   "includeVars": false,
+   "keepTime": true,
+   "icon": "external link",
+   "targetBlank": false,
+   "url": ""
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Core Web Vitals \u2014 p75 over the dashboard window",
+   "collapsed": false,
+   "panels": [],
+   "id": 1,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   }
+  },
+  {
+   "type": "stat",
+   "title": "LCP",
+   "description": "Largest Contentful Paint. good <2.5s, poor >4s.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_lcp | __error__=\"\" [$__range]) by ()",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 2500,
+        "color": "yellow"
+       },
+       {
+        "value": 4000,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 2,
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 0,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "INP",
+   "description": "Interaction to Next Paint. good <200ms, poor >500ms. Needs real interactions to emit.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_inp | __error__=\"\" [$__range]) by ()",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 200,
+        "color": "yellow"
+       },
+       {
+        "value": 500,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 3,
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 5,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "CLS",
+   "description": "Cumulative Layout Shift. good <0.1, poor >0.25.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_cls | __error__=\"\" [$__range]) by ()",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 0.1,
+        "color": "yellow"
+       },
+       {
+        "value": 0.25,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": [],
+     "decimals": 3
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 4,
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 10,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "FCP",
+   "description": "First Contentful Paint. good <1.8s, poor >3s.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_fcp | __error__=\"\" [$__range]) by ()",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 1800,
+        "color": "yellow"
+       },
+       {
+        "value": 3000,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 5,
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 14,
+    "y": 1
+   }
+  },
+  {
+   "type": "stat",
+   "title": "TTFB",
+   "description": "Time To First Byte. good <0.8s, poor >1.8s.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_time_to_first_byte | __error__=\"\" [$__range]) by ()",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       },
+       {
+        "value": 800,
+        "color": "yellow"
+       },
+       {
+        "value": 1800,
+        "color": "red"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "wideLayout": true,
+    "percentChangeColorMode": "standard",
+    "showPercentChange": false
+   },
+   "id": 6,
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 19,
+    "y": 1
+   }
+  },
+  {
+   "type": "row",
+   "title": "Over time",
+   "collapsed": false,
+   "panels": [],
+   "id": 7,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 6
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "LCP p75 by app",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_lcp | __error__=\"\" [$__auto]) by (app_name)",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{app_name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 8,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "TTFB p75 by app",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "quantile_over_time(0.75, {job=\"faro\"} | logfmt | kind=\"measurement\" | unwrap value_time_to_first_byte | __error__=\"\" [$__auto]) by (app_name)",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{app_name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 9,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 7
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "JS exceptions",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (app_name) (count_over_time({job=\"faro\"} | logfmt | kind=\"exception\" [$__auto]))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "{{app_name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 60,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 10,
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 7
+   }
+  },
+  {
+   "type": "row",
+   "title": "Sessions & actions",
+   "collapsed": false,
+   "panels": [],
+   "id": 11,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 15
+   }
+  },
+  {
+   "type": "timeseries",
+   "title": "Active sessions",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "count(sum by (session_id) (count_over_time({job=\"faro\"} [$__auto])))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "legendFormat": "sessions"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "gradientMode": "none",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": false,
+      "insertNulls": false,
+      "barAlignment": 0,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "sessions"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "id": 12,
+   "gridPos": {
+    "h": 9,
+    "w": 8,
+    "x": 0,
+    "y": 16
+   }
+  },
+  {
+   "type": "table",
+   "title": "User actions by data-testid (window total)",
+   "description": "The data-testid is both the Faro user-action name and the Playwright selector (drive-canary).",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "topk(20, sum by (event_data_userActionName) (count_over_time({job=\"faro\"} | logfmt | kind=\"event\" | event_data_userActionName != \"\" [$__range])))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "event_data_userActionName": "testid",
+       "Value": "count"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "count",
+      "desc": true
+     }
+    ]
+   },
+   "id": 13,
+   "gridPos": {
+    "h": 9,
+    "w": 8,
+    "x": 8,
+    "y": 16
+   }
+  },
+  {
+   "type": "table",
+   "title": "Events by name (window total)",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "topk(20, sum by (event_name) (count_over_time({job=\"faro\"} | logfmt | kind=\"event\" [$__range])))",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "event_name": "event",
+       "Value": "count"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false,
+      "filterable": true
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "value": null,
+        "color": "green"
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "count",
+      "desc": true
+     }
+    ]
+   },
+   "id": 14,
+   "gridPos": {
+    "h": 9,
+    "w": 8,
+    "x": 16,
+    "y": 16
+   }
+  },
+  {
+   "type": "row",
+   "title": "Recent browser errors",
+   "collapsed": false,
+   "panels": [],
+   "id": 15,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 25
+   }
+  },
+  {
+   "type": "logs",
+   "title": "Exceptions \u2014 full detail",
+   "description": "",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "{job=\"faro\"} | logfmt | kind=\"exception\"",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     }
+    }
+   ],
+   "options": {
+    "showTime": true,
+    "showLabels": false,
+    "showCommonLabels": false,
+    "wrapLogMessage": true,
+    "prettifyLogMessage": false,
+    "enableLogDetails": true,
+    "dedupStrategy": "none",
+    "sortOrder": "Descending"
+   },
+   "id": 16,
+   "gridPos": {
+    "h": 10,
+    "w": 24,
+    "x": 0,
+    "y": 26
+   }
+  }
+ ]
+}

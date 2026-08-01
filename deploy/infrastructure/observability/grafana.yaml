@@ -1,6 +1,13 @@
-# Grafana: stateless (no persistence — datasources are provisioned, dashboards
-# to follow the same way), admin creds from the bootstrap-provided
-# `grafana-admin` Secret. ClusterIP only; exposed later via the ingress gateway.
+# Grafana: stateless (no persistence — datasources AND dashboards are
+# provisioned; anything clicked together in the UI dies with the pod), admin
+# creds from the bootstrap-provided `grafana-admin` Secret. ClusterIP only;
+# exposed later via the ingress gateway.
+#
+# Dashboards are generated + packed into the grafana-dashboards-* ConfigMaps
+# by deploy/infrastructure/observability/dashboards/ (its own Flux
+# Kustomization, infra-dashboards, applied WITHOUT postBuild substitution so
+# Grafana's $-syntax survives). Each provider below maps one ConfigMap to one
+# Grafana folder.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -80,6 +87,42 @@ spec:
         enabled: false
       datasources:
         enabled: false
+
+    # File-provisioned dashboards (dashboards-as-code). allowUiUpdates stays
+    # off: with no persistence a UI edit would silently die with the pod —
+    # the generator in dashboards/ is the only source of truth.
+    dashboardProviders:
+      dashboardproviders.yaml:
+        apiVersion: 1
+        providers:
+          - name: funnelmanager
+            orgId: 1
+            folder: Funnel Manager
+            type: file
+            disableDeletion: false
+            allowUiUpdates: false
+            options:
+              path: /var/lib/grafana/dashboards/funnelmanager
+          - name: kubernetes
+            orgId: 1
+            folder: Kubernetes
+            type: file
+            disableDeletion: false
+            allowUiUpdates: false
+            options:
+              path: /var/lib/grafana/dashboards/kubernetes
+          - name: infrastructure
+            orgId: 1
+            folder: Infrastructure
+            type: file
+            disableDeletion: false
+            allowUiUpdates: false
+            options:
+              path: /var/lib/grafana/dashboards/infrastructure
+    dashboardsConfigMaps:
+      funnelmanager: grafana-dashboards-fm
+      kubernetes: grafana-dashboards-k8s
+      infrastructure: grafana-dashboards-infra
 
     testFramework:
       enabled: false
