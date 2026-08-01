@@ -32,18 +32,19 @@
 # HTTPRoute. If that ever regressed, it fails SAFE: the request stays on stable
 # `search` (never fail-open, never 503).
 #
-# The secret `x-fm-canary` value is the SAME token as the canary-cookie-gate
-# EnvoyFilter injects and as httproutes.yaml matched before — the gate strips any
-# client-supplied header and re-injects it only for a valid host-only `fm_canary`
-# cookie, so it is non-forgeable and fails safe to stable if the filter detaches.
-# ROTATE the token in ALL these files that must stay byte-identical (one gateway
-# route file per browser-facing canary, so this list grows as canaries are armed;
-# east-west VS files stay secret-free and are NOT in this set):
-#   1. deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml (EnvoyFilter Lua)
-#   2. deploy/infrastructure/gateway/canary/search-canary.yaml    (this file)
-#   3. deploy/infrastructure/gateway/canary/frontend-canary.yaml  (sibling route)
-#   4. deploy/infrastructure/gateway/canary/searchui-canary.yaml  (sibling route)
-#   5. PLACEHOLDERS.md (Canary access)
+# This route PRESENCE-matches `x-fm-canary` (regex .+), NOT the secret value —
+# consistent with the east-west leads VS. The secret lives in ONE place only: the
+# `fm-canary-token` Secret (istio-ingress), delivered to the gateway as the
+# FM_CANARY_SECRET env var and injected by the canary-cookie-gate EnvoyFilter for
+# a valid host-only `fm_canary` cookie. The gate strips any client-supplied
+# `x-fm-canary` and re-injects the secret only from the cookie, so the marker is
+# non-forgeable at the edge; by the time it reaches route matching it can only be
+# gateway-set, and presence is sufficient. There is NO secret in this file, so
+# there is nothing here to rotate — rotation is `kubectl` on the Secret + a
+# gateway restart (see PLACEHOLDERS.md "Canary access"). Non-forgeability here
+# depends on the cookie-gate filter being ATTACHED (it does the strip); the bounded
+# fail-open-on-detach failure mode is documented in
+# mesh-policies/canary-cookie-gate.yaml "DETACH FAILURE MODE".
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -58,8 +59,8 @@ spec:
         - path: { type: PathPrefix, value: /api/search/ }
           headers:
             - name: x-fm-canary
-              type: Exact
-              value: "8640c2f1285bf39d0323bbe540e51694"
+              type: RegularExpression
+              value: ".+"
       backendRefs:
         - name: search-canary
           namespace: prod

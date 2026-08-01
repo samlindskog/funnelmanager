@@ -79,63 +79,64 @@ unset are cluster/credential values that cannot live in git — the only literal
 
 ## Canary access
 
-- [x] **Canary cookie token** — `8640c2f1285bf39d0323bbe540e51694`.
-      The canary is gated by a **host-only cookie** `fm_canary=<token>` on
-      `x9bc433.win`, NOT a client-sent header. The `canary-cookie-gate`
-      EnvoyFilter (`deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml`)
-      validates the cookie at the gateway, strips any client-supplied
-      `x-fm-canary` header, and re-injects `x-fm-canary: <token>` (the SAME
-      secret) on a match; each active canary's dedicated route (see below) still
-      matches that secret header value and routes it to `<svc>-canary`. To reach
-      the canary, set the cookie (no `Domain` attribute, so it is host-only and is
-      NOT sent to `kc.`/`grafana.` subdomains).
+- [x] **Canary cookie secret** — lives in **exactly one place**: the
+      `fm-canary-token` Secret in the **`istio-ingress`** namespace (key `token`).
+      It is **not** in git. The value is delivered to the gateway's Envoy container
+      as the env var **`FM_CANARY_SECRET`** (`secretKeyRef` in
+      `deploy/infrastructure/istio/gateway-deployment.yaml`), and the
+      `canary-cookie-gate` EnvoyFilter
+      (`deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml`) reads it via
+      `os.getenv("FM_CANARY_SECRET")`.
 
-      **Easy toggle (preferred).** The same EnvoyFilter now answers two
-      server-side cookie-setter endpoints entirely at the gateway (INSERT_BEFORE
-      jwt_authn, so they never hit OPA or the app):
-      - `https://x9bc433.win/canary/on?t=8640c2f1285bf39d0323bbe540e51694`
-        sets the cookie and 302-redirects to `/` (a wrong/absent `t` fails closed:
+      The canary is gated by a **host-only cookie** `fm_canary=<secret>` on
+      `x9bc433.win`, NOT a client-sent header. The EnvoyFilter validates the cookie
+      at the gateway, **always strips** any client-supplied `x-fm-canary` header,
+      and re-injects `x-fm-canary: <secret>` only on a valid cookie. Every canary
+      route/VS then **presence-matches** `x-fm-canary` (regex `.+`) — the secret is
+      NOT in any route — and routes the request to `<svc>-canary`. Set the cookie
+      with no `Domain` attribute, so it is host-only and is NOT sent to
+      `kc.`/`grafana.` subdomains.
+
+      **Fail-safe.** If `FM_CANARY_SECRET` is unset/empty the filter degrades
+      safely: it never injects `x-fm-canary`, `/canary/on` sets no cookie, and it
+      never errors — normal traffic flows to stable. The client-header strip stays
+      unconditional. The filter is purely additive: if it detaches, no route
+      injects the marker and callers fall through to stable (never fail-open).
+
+      **Easy toggle (preferred).** The same EnvoyFilter answers two server-side
+      cookie-setter endpoints entirely at the gateway (INSERT_BEFORE jwt_authn, so
+      they never hit OPA or the app):
+      - `https://x9bc433.win/canary/on?t=<secret>` sets the cookie and
+        302-redirects to `/` (a wrong/absent/missing-secret `t` fails closed:
         redirects with NO cookie set).
       - `https://x9bc433.win/canary/off` clears the cookie and redirects to `/`.
-      The cookie is set SERVER-SIDE, so it is **HttpOnly** (JS cannot read it,
-      closing the XSS-harvest exposure of the `document.cookie` approach); it stays
-      `Secure` + `SameSite=Lax`.
+      The cookie is set SERVER-SIDE, so it is **HttpOnly** (JS cannot read it); it
+      stays `Secure` + `SameSite=Lax`. The `enter-canary` launcher automates this,
+      reading the secret from `~/.config/fm-e2e/creds.env` (`FM_CANARY_TOKEN`).
 
-      The manual way still works but the endpoint is preferred — e.g. in the
-      browser console on `https://x9bc433.win/`:
-      `document.cookie = 'fm_canary=8640c2f1285bf39d0323bbe540e51694; path=/; secure; samesite=lax'`
-      then reload; anyone without the cookie stays on stable.
+      **Getting the secret value** (to set the cookie manually or drive E2E):
+      read it from the `fm-canary-token` Secret
+      (`kubectl -n istio-ingress get secret fm-canary-token -o
+      jsonpath='{.data.token}' | base64 -d`) or from `~/.config/fm-e2e/creds.env`.
 
-      **The secret value appears in these files that must stay byte-identical:**
-      1. `deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml` (the EnvoyFilter Lua),
-      2. `deploy/infrastructure/gateway/canary/search-canary.yaml` (the search-canary route match),
-      3. `deploy/infrastructure/gateway/canary/frontend-canary.yaml` (the frontend-canary route match),
-      4. `deploy/infrastructure/gateway/canary/searchui-canary.yaml` (the searchui-canary route match),
-      5. this doc.
+      **Rotation** — the secret is in ONE place, not five:
+      1. `kubectl -n istio-ingress create secret generic fm-canary-token
+         --from-literal=token=<new> --dry-run=client -o yaml | kubectl apply -f -`
+      2. `kubectl -n istio-ingress rollout restart deploy/istio-ingress`
+         (so Envoy re-reads the env var), and update `~/.config/fm-e2e/creds.env`.
+      No manifest edit — the routes presence-match and carry no secret.
 
-      Note: `leads-canary` is INTERNAL (east-west) and its route
-      (`deploy/infrastructure/mesh-policies/canary/leads-canary-eastwest.yaml`)
-      deliberately does **not** carry the secret — it presence-matches
-      `x-fm-canary` (regex `.+`), because the marker is already non-forgeable in
-      the mesh (the gateway injects it only for a valid cookie). So east-west VS
-      route files are NOT part of this byte-identical set.
+      Each `canary/<svc>-canary.yaml` is a separate HTTPRoute present in the
+      gateway kustomization **only while that canary is active**
+      (`canary-if-exists-else-stable`), so an idle canary never 503s the cookie.
+      Only ever build the canary from a TRUSTED branch — the canary serves
+      feature-branch JS same-origin and can read the prod Keycloak session of
+      anyone who reaches it (see the frontend-canary deployment trust-boundary
+      note).
 
-      There is **one route file per canaried service** (`canary/<svc>-canary.yaml`),
-      so the count grows by one for every service armed as a canary — that
-      duplication is the deliberate cost of the fail-safe **secret-in-route**
-      design: keeping the secret in each route is the floor, so if the EnvoyFilter
-      detaches, the route still requires the secret header and external callers
-      fail safe to stable (never fail-open). Each `canary/<svc>-canary.yaml` is a
-      separate HTTPRoute present in the gateway kustomization **only while that
-      canary is active** (`canary-if-exists-else-stable`), so an idle canary never
-      503s the cookie. The token is a capability/obscurity value (same class as the
-      Apollo webhook secret-in-path), committed in-manifest and **rotatable** by
-      editing all the files listed above (and any future gateway
-      `canary/<svc>-canary.yaml`; east-west VS files stay secret-free and are NOT
-      in this set), then re-deploying. Only ever build the canary from a TRUSTED branch — the
-      canary serves feature-branch JS same-origin and can read the prod Keycloak
-      session of anyone who reaches it (see the frontend-canary deployment
-      trust-boundary note).
+- [ ] **`fm-canary-token` Secret** (`istio-ingress` ns, key `token`) — the canary
+      cookie secret; provisioned by the `secrets` bootstrap stage (prompts, or
+      auto-generates a random 32-hex value). Rotate as above.
 
 ## Deferred hardening
 

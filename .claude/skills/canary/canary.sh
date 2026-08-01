@@ -27,7 +27,7 @@
 set -uo pipefail   # NOT -e: a failed remote read must not abort list/status
 
 # Shared ops config + invocation prefixes (FM_CP_HOST from the gitignored ops
-# env; SSH/K/FLUX; the fm_canary_secret helper). See .claude/skills/_lib/common.sh.
+# env; SSH/K/FLUX). See .claude/skills/_lib/common.sh.
 . "$(cd "$(dirname "$0")/../_lib" && pwd)/common.sh"
 
 BASE=deploy/apps/base
@@ -38,11 +38,11 @@ GW_CANARY_DIR=deploy/infrastructure/gateway/canary
 # not a gateway HTTPRoute — the in-mesh analogue of the gateway canary routes.
 EW_KUSTOMIZATION=deploy/infrastructure/mesh-policies/kustomization.yaml
 EW_CANARY_DIR=deploy/infrastructure/mesh-policies/canary
-# The canary-cookie secret every canary route must carry lives in exactly the
-# four files listed in PLACEHOLDERS.md "Canary access". To avoid a stray 5th copy
-# here, DERIVE it from its canonical source (the EnvoyFilter Lua) rather than
-# hardcoding it, and assert each route file matches that same value.
-COOKIE_GATE=deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml
+# The canary-cookie secret is NO LONGER in git: it lives only in the
+# `fm-canary-token` Secret (istio-ingress) and is injected at the gateway by the
+# canary-cookie-gate EnvoyFilter. ALL canary routes/VS now PRESENCE-match
+# `x-fm-canary` (regex .+) and must carry NO secret-looking literal — so there is
+# no secret to derive here.
 DEPLOY=.claude/skills/deploy-funnelmanager/deploy.sh
 HEALTH=.claude/skills/prod-health/check.sh
 
@@ -145,44 +145,38 @@ ew_gateways_only_mesh() {
   ' "$1"
 }
 
-# The canary secret, read from its canonical source (the EnvoyFilter Lua) via the
-# shared _lib helper so it is never re-hardcoded here. Empty if not found.
-canary_secret() { fm_canary_secret "$COOKIE_GATE"; }
-
 # Armed = ALL legs of the canary contract present on main (mirrors the
 # build-canary.yml preflight guard): the base Deployment + the overlay images
 # entry + the toggled route/VS, and that artifact must actually GATE correctly on
 # the `x-fm-canary` marker. Fail closed if any leg is missing or the gate is
 # wrong. The route/VS leg is what makes "canary-if-exists-else-stable" work.
 #
-# Correctness is CLASS-SPECIFIC:
-#   * gateway  — the HTTPRoute must Exact-match x-fm-canary AND carry the SAME
-#     secret the EnvoyFilter injects (a missing/widened gate would serve the
-#     canary to unmarked EDGE traffic — fail-open).
-#   * eastwest — the VirtualService must PRESENCE-match x-fm-canary (regex .+) on
-#     gateways:[mesh], AND — CRITICAL fail-closed assertion — must NOT contain the
-#     secret. The marker is already non-forgeable in-mesh (the gateway strips
-#     client-supplied headers and re-injects the secret only for a valid cookie),
-#     so the secret must live ONLY at the edge; if it ever leaks into a mesh VS,
-#     arming FAILS.
+# Correctness (now UNIFORM across classes): the route/VS must PRESENCE-match
+# x-fm-canary (regex .+) and must carry NO secret-looking literal — the secret
+# lives only in the fm-canary-token Secret and is injected at the gateway, so
+# neither a gateway HTTPRoute nor a mesh VS may contain it. The marker is
+# non-forgeable at the edge (the gateway strips any client-supplied header and
+# re-injects the secret only for a valid cookie), so presence is sufficient.
+#   * gateway  — Gateway API HTTPRoute: type RegularExpression, value ".+".
+#   * eastwest — Istio VS: header regex ".+" on gateways EXACTLY [mesh] (no
+#     ingress/fm-gateway leak). Both fail closed if a 32-hex secret literal shows.
 armed() {
-  local svc=$1 rf secret rc; rc=$(routing_class "$svc")
+  local svc=$1 rf rc; rc=$(routing_class "$svc")
   [ "$rc" = unknown ] && return 1
   rf=$(canary_route_file "$svc") || return 1
   [ -f "$BASE/${svc}-canary/deployment.yaml" ] || return 1
   grep -q "funnelmanager/${svc}-canary" "$OVERLAY" || return 1
   [ -f "$rf" ] || return 1
   grep -q 'x-fm-canary' "$rf" || return 1
-  secret=$(canary_secret)
-  [ -n "$secret" ] || return 1
+  # A secret-looking 32-hex literal must NEVER appear in a route/VS anymore.
+  grep -qE '[0-9a-fA-F]{32}' "$rf" && return 1
   if [ "$rc" = gateway ]; then
-    grep -q 'Exact' "$rf" || return 1
-    grep -qF "$secret" "$rf" || return 1
+    grep -Eq 'type:[[:space:]]*RegularExpression' "$rf" || return 1
+    grep -Eq 'value:[[:space:]]*"?\.\+' "$rf" || return 1
   else
-    # east-west VS: presence regex, gateways EXACTLY [mesh], and NO secret.
+    # east-west VS: presence regex, gateways EXACTLY [mesh].
     grep -Eq 'regex:[[:space:]]*"?\.\+' "$rf" || return 1
     ew_gateways_only_mesh "$rf" || return 1   # no ingress/fm-gateway leak
-    grep -qF "$secret" "$rf" && return 1      # secret must NEVER be in a mesh VS
   fi
   return 0
 }
@@ -354,11 +348,13 @@ case "$cmd" in
       echo "'$svc' is INTERNAL — it has NO gateway route. Reach ${svc}-canary via a marked request that"
       echo "propagates the x-fm-canary marker IN-MESH (fm_runtime carries it across hops). Concretely, for leads:"
       echo "run a cookie-gated canary SEARCH (search-canary must be active) whose search->${svc} hop carries the"
-      echo "marker onto ${svc}-canary. Set the host-only cookie on https://x9bc433.win (token in PLACEHOLDERS.md):"
+      echo "marker onto ${svc}-canary. Preferred: the enter-canary launcher (reads the token from ~/.config/fm-e2e/creds.env)."
+      echo "Manual: set the host-only cookie on https://x9bc433.win (token = the fm-canary-token Secret / creds.env FM_CANARY_TOKEN):"
       echo "    document.cookie = 'fm_canary=<token>; path=/; secure; samesite=lax'"
       echo "Then exercise a search via drive-canary; its internal ${svc} call lands on ${svc}-canary."
     else
-      echo "Set the host-only cookie on https://x9bc433.win (token in PLACEHOLDERS.md 'Canary access'):"
+      echo "Preferred: the enter-canary launcher (reads the token from ~/.config/fm-e2e/creds.env and hits /canary/on)."
+      echo "Manual: set the host-only cookie on https://x9bc433.win (token = the fm-canary-token Secret / creds.env FM_CANARY_TOKEN):"
       echo "    document.cookie = 'fm_canary=<token>; path=/; secure; samesite=lax'"
       echo "Then load the app; requests carrying the cookie route to ${svc}-canary. Exercise it via drive-canary."
     fi

@@ -150,13 +150,23 @@ YAML
       kubectl -n "$n" get secret "$s" >/dev/null 2>&1 && { echo "have $n/$s"; return; }
       kubectl -n "$n" create secret "$@"
     }
-    for n in identity prod monitoring flux-system cert-manager; do ns "$n"; done
+    for n in identity prod monitoring flux-system cert-manager istio-ingress; do ns "$n"; done
 
     # cert-manager DNS-01 solver: Cloudflare API token (Zone:DNS Edit +
     # Zone:Zone Read on the domain zone). Lives in the cert-manager namespace.
     read -rsp "Cloudflare API token (DNS-01): " CFT; echo
     ensure cert-manager cloudflare-api-token generic cloudflare-api-token \
       --from-literal=api-token="$CFT"
+
+    # Canary cookie secret: the gateway Envoy reads it as FM_CANARY_SECRET (via
+    # secretKeyRef in infrastructure/istio/gateway-deployment.yaml) and the
+    # canary-cookie-gate EnvoyFilter injects it for a valid `fm_canary` cookie.
+    # The routes presence-match `x-fm-canary`, so this Secret is the ONE place the
+    # value lives. Blank = generate a random 32-hex value.
+    read -rsp "Canary cookie secret (istio-ingress, blank = generate): " CANTOK; echo
+    [ -n "$CANTOK" ] || CANTOK="$(openssl rand -hex 16)"
+    ensure istio-ingress fm-canary-token generic fm-canary-token \
+      --from-literal=token="$CANTOK"
 
     read -rsp "Keycloak console admin password: " KCPW; echo
     ensure identity keycloak-admin generic keycloak-admin \

@@ -50,6 +50,13 @@ spec:
           - target:
               kind: Deployment
               name: istio-ingress
+            # container 0 is the `istio-proxy` (Envoy) — same container the ports
+            # patch below targets. The chart renders NO `env:` list on this
+            # container (verified live: containers[0].env is absent), so we SET
+            # the whole array (like the ports patch does) rather than append with
+            # `/env/-` — an append to a missing array would fail the postRender and
+            # break the front-door reconcile. If the chart ever ships its own env
+            # entries, switch this to a strategic-merge (merge by name).
             patch: |
               - op: add
                 path: /spec/template/spec/containers/0/ports
@@ -63,3 +70,16 @@ spec:
                   - containerPort: 15090
                     protocol: TCP
                     name: http-envoy-prom
+              # Canary-cookie secret, delivered from the `fm-canary-token` Secret
+              # (istio-ingress ns, key `token`) as env var FM_CANARY_SECRET. The
+              # canary-cookie-gate EnvoyFilter Lua reads it via os.getenv — the
+              # secret is NO LONGER hardcoded in any manifest. Rotate by updating
+              # the Secret and `kubectl rollout restart` this Deployment.
+              - op: add
+                path: /spec/template/spec/containers/0/env
+                value:
+                  - name: FM_CANARY_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: fm-canary-token
+                        key: token

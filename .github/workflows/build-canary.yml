@@ -31,13 +31,17 @@
 # ROUTING TAXONOMY. How the canary marker is steered depends on the service:
 #   * gateway  (frontend/searchui/mailui/agentsui/search/mail/agents) — a
 #     cookie-gated gateway HTTPRoute under gateway/canary/<svc>-canary.yaml that
-#     Exact-matches the secret x-fm-canary header, toggled in the gateway
-#     kustomization (anchor `- referencegrants.yaml`).
+#     PRESENCE-matches the x-fm-canary header (regex .+, NEVER the secret),
+#     toggled in the gateway kustomization (anchor `- referencegrants.yaml`). The
+#     secret lives ONLY in the fm-canary-token Secret (istio-ingress) and is
+#     injected at the gateway by the canary-cookie-gate EnvoyFilter for a valid
+#     cookie; the routes are secret-free, exactly like the east-west VS.
 #   * eastwest (leads/mcp/jobs) — INTERNAL-only: an in-mesh Istio VirtualService
 #     under mesh-policies/canary/<svc>-canary-eastwest.yaml that PRESENCE-matches
 #     x-fm-canary (regex .+, NEVER the secret), toggled in the mesh-policies
-#     kustomization (anchor `- canary-cookie-gate.yaml`). The preflight+pin guards
-#     assert the secret is ABSENT from an east-west VS (fail closed if present).
+#     kustomization (anchor `- canary-cookie-gate.yaml`).
+# The preflight+pin guards assert BOTH classes presence-match and that NO
+# secret-looking literal is present in either route/VS (fail closed if present).
 #
 # ACTIVATION APPROVAL GATE (now EXISTS). The `pin` job — the one that flips
 # replicas 0->1 and commits the activation — runs under the GitHub
@@ -114,26 +118,30 @@ jobs:
             echo "::error::No '${SVC}-canary' images entry in $overlay — arm it on main first."
             exit 1
           fi
-          # The canary secret, from its canonical source (the EnvoyFilter Lua). Used
-          # to assert PRESENCE (gateway) or ABSENCE (east-west) — never hardcoded.
-          cookie_gate="deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml"
-          secret="$(grep -oE 'secret = "[0-9a-fA-F]+"' "$cookie_gate" | grep -oE '[0-9a-fA-F]{8,}' | head -1)"
-          if [ -z "$secret" ]; then
-            echo "::error::could not read the canary secret from $cookie_gate — cannot verify the route gate."
-            exit 1
-          fi
+          # The secret is NO LONGER derivable from git — it lives only in the
+          # fm-canary-token Secret (istio-ingress) and is injected at the gateway.
+          # Both classes therefore PRESENCE-match x-fm-canary and must contain NO
+          # secret-looking literal (a 32-hex token would be a leaked/stale secret).
           if [ "$rc" = gateway ]; then
             # GATEWAY: the cookie-marked route lives in its own toggled HTTPRoute
-            # (canary-if-exists-else-stable). It must Exact-match x-fm-canary AND
-            # carry the SAME secret the EnvoyFilter injects, or it would serve the
-            # canary to unmarked EDGE traffic (fail-open).
+            # (canary-if-exists-else-stable). It must PRESENCE-match x-fm-canary
+            # (RegularExpression .+). The gateway strips any client-set header and
+            # re-injects the secret only for a valid cookie, so the marker is
+            # non-forgeable at the edge and presence is sufficient; the secret must
+            # NOT be duplicated into the route.
             route="deploy/infrastructure/gateway/canary/${SVC}-canary.yaml"
             if [ ! -f "$route" ]; then
               echo "::error::No canary route for '$SVC' (expected $route) — arm it on main first (see deploy/infrastructure/gateway/canary/)."
               exit 1
             fi
-            if ! grep -q 'x-fm-canary' "$route" || ! grep -q 'Exact' "$route" || ! grep -qF "$secret" "$route"; then
-              echo "::error::Canary route $route lacks the Exact x-fm-canary secret header gate — refusing (a widened/missing gate would serve the canary to unmarked traffic)."
+            if ! grep -q 'x-fm-canary' "$route" \
+               || ! grep -Eq 'type:[[:space:]]*RegularExpression' "$route" \
+               || ! grep -Eq 'value:[[:space:]]*"?\.\+' "$route"; then
+              echo "::error::Canary route $route lacks a PRESENCE x-fm-canary match (RegularExpression '.+') — refusing (a missing gate would serve the canary to unmarked traffic)."
+              exit 1
+            fi
+            if grep -qE '[0-9a-fA-F]{32}' "$route"; then
+              echo "::error::Canary route $route CONTAINS a secret-looking 32-hex literal — refusing (the secret lives in the fm-canary-token Secret; routes presence-match only)."
               exit 1
             fi
           else
@@ -167,8 +175,8 @@ jobs:
               echo "::error::East-west VS $route lacks a PRESENCE x-fm-canary regex (.+) on gateways EXACTLY [mesh] — refusing (no ingress/fm-gateway leak)."
               exit 1
             fi
-            if grep -qF "$secret" "$route"; then
-              echo "::error::East-west VS $route CONTAINS the canary secret — refusing (a mesh VS must presence-match only; the secret lives at the edge)."
+            if grep -qE '[0-9a-fA-F]{32}' "$route"; then
+              echo "::error::East-west VS $route CONTAINS a secret-looking 32-hex literal — refusing (a mesh VS must presence-match only; the secret lives in the fm-canary-token Secret)."
               exit 1
             fi
           fi
@@ -295,21 +303,23 @@ jobs:
           fi
           # Re-assert the route gate correctness (preflight already checked this on
           # main; this is the job that ACTIVATES, so re-verify before flipping
-          # replicas). Secret derived from the EnvoyFilter — no hardcoded copy.
-          cookie_gate="deploy/infrastructure/mesh-policies/canary-cookie-gate.yaml"
-          secret="$(grep -oE 'secret = "[0-9a-fA-F]+"' "$cookie_gate" | grep -oE '[0-9a-fA-F]{8,}' | head -1)"
-          if [ -z "$secret" ]; then
-            echo "could not read the canary secret from $cookie_gate — refusing to activate." >&2
-            exit 1
-          fi
+          # replicas). The secret is NOT in git — it lives in the fm-canary-token
+          # Secret and is injected at the gateway; routes presence-match and must
+          # carry NO secret-looking literal.
           if [ "$rc" = gateway ]; then
-            if ! grep -q 'x-fm-canary' "$route_file" || ! grep -q 'Exact' "$route_file" || ! grep -qF "$secret" "$route_file"; then
-              echo "Canary route $route_file lacks the Exact x-fm-canary secret header gate — refusing to activate." >&2
+            if ! grep -q 'x-fm-canary' "$route_file" \
+               || ! grep -Eq 'type:[[:space:]]*RegularExpression' "$route_file" \
+               || ! grep -Eq 'value:[[:space:]]*"?\.\+' "$route_file"; then
+              echo "Canary route $route_file lacks a PRESENCE x-fm-canary match (RegularExpression '.+') — refusing to activate." >&2
+              exit 1
+            fi
+            if grep -qE '[0-9a-fA-F]{32}' "$route_file"; then
+              echo "Canary route $route_file CONTAINS a secret-looking 32-hex literal — refusing to activate (the secret lives in the fm-canary-token Secret; routes presence-match)." >&2
               exit 1
             fi
           else
             # east-west VS: PRESENCE regex, gateways EXACTLY [mesh] (no ingress/
-            # fm-gateway leak), and the secret must be ABSENT — all fail-closed.
+            # fm-gateway leak), and no secret literal — all fail-closed.
             gw_only_mesh='
               /^[[:space:]]*gateways:[[:space:]]*\[/ {
                 l=$0; sub(/.*\[/,"",l); sub(/\].*/,"",l); gsub(/[[:space:]"]/,"",l);
@@ -329,8 +339,8 @@ jobs:
               echo "East-west VS $route_file lacks a PRESENCE x-fm-canary regex (.+) on gateways EXACTLY [mesh] — refusing to activate." >&2
               exit 1
             fi
-            if grep -qF "$secret" "$route_file"; then
-              echo "East-west VS $route_file CONTAINS the canary secret — refusing to activate (mesh VS must presence-match only)." >&2
+            if grep -qE '[0-9a-fA-F]{32}' "$route_file"; then
+              echo "East-west VS $route_file CONTAINS a secret-looking 32-hex literal — refusing to activate (mesh VS must presence-match only)." >&2
               exit 1
             fi
           fi

@@ -66,11 +66,13 @@ labels/taints; `kubectl get pods -A` has no traefik/svclb pods.
 ./bootstrap.sh secrets
 ```
 
-Creates (names fixed, values prompted): `identity/keycloak-admin`,
-`identity/keycloak-realm` (hardened export), `objectstore-backups`
-(prod/dev/identity), `monitoring/objectstore-loki`,
+Creates (names fixed, values prompted): `cert-manager/cloudflare-api-token`,
+`identity/keycloak-admin`, `identity/keycloak-realm` (hardened export),
+`objectstore-backups` (prod/dev/identity), `monitoring/objectstore-loki`,
 `monitoring/grafana-admin`, `fm-oidc-<svc>` + `apollo` + `openai` +
-`google-oauth` + `milvus-minio` (prod/dev), `ghcr-pull` (prod/dev).
+`google-oauth` + `milvus-minio` (prod/dev), `ghcr-pull` (prod/dev), and
+`istio-ingress/fm-canary-token` (the canary cookie secret the gateway Envoy
+reads as `FM_CANARY_SECRET`; blank prompt auto-generates a random 32-hex value).
 If adopting SOPS later, these become encrypted manifests; the bootstrap
 key would be created here.
 

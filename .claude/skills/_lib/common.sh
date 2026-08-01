@@ -8,9 +8,9 @@
 #       the shape is _lib/ops-env.example; copy it to ~/.config/fm-ops/env (outside
 #       the repo, so it is never committed).
 #
-#   (b) Exports the shared SSH / K / FLUX remote-invocation prefixes, the single
-#       FM_SERVICES list (the ten deployed services), and the canary-secret helper,
-#       so the three drivers stop re-declaring the same consts/lists five times.
+#   (b) Exports the shared SSH / K / FLUX remote-invocation prefixes and the
+#       single FM_SERVICES list (the ten deployed services), so the three drivers
+#       stop re-declaring the same consts/lists five times.
 #
 # Only FM_CF_ZONE_ID is genuinely required (no default; the Cloudflare purge path
 # errors without it). FM_CP_HOST / FM_KUBECONFIG carry working defaults for the
@@ -51,10 +51,9 @@ SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 $FM_CP_HOST"
 K="sudo -n kubectl"
 FLUX="sudo -n env KUBECONFIG=$FM_KUBECONFIG flux"
 
-# The canary-cookie secret, read from its canonical source (the EnvoyFilter Lua)
-# so it is never re-hardcoded in a driver. Takes the cookie-gate file path as $1;
-# echoes the hex token, or nothing if the filter/token can't be found.
-fm_canary_secret() {
-  grep -oE 'secret = "[0-9a-fA-F]+"' "${1:?fm_canary_secret: cookie-gate file path required}" 2>/dev/null \
-    | grep -oE '[0-9a-fA-F]{8,}' | head -1
-}
+# NOTE: the former `fm_canary_secret` helper (which derived the canary-cookie
+# secret from the EnvoyFilter Lua) was RETIRED — the secret is no longer in git.
+# It lives only in the `fm-canary-token` Secret (istio-ingress ns), delivered to
+# the gateway as the FM_CANARY_SECRET env var and injected by the cookie-gate
+# EnvoyFilter. Canary routes/VS presence-match `x-fm-canary`; nothing derives the
+# value from the tree. E2E callers read it from ~/.config/fm-e2e/creds.env.
