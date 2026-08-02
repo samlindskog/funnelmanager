@@ -24,6 +24,11 @@ metadata:
 # No RBAC: this job never touches the apiserver (unlike mongo-backup, which
 # execs into the mongo pod). Don't mount a token it cannot use.
 automountServiceAccountToken: false
+# ghcr-pull: the `backup` image is a PRIVATE GHCR package; monitoring gets the
+# same bootstrap-provisioned pull secret as the app namespaces (added to
+# bootstrap.sh). Referenced on the SA so pods using it inherit it.
+imagePullSecrets:
+  - name: ghcr-pull
 ---
 apiVersion: batch/v1
 kind: CronJob

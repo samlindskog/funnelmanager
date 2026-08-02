@@ -249,12 +249,14 @@ YAML
     # GHCR pull secret (read-only token) for the app namespaces.
     read -rp  "GHCR username: " GU
     read -rsp "GHCR read-only token: " GT; echo
-    for n in prod; do
+    # prod: all app pods pull the private images; monitoring: only the
+    # objstore-metrics CronJob does (its SA references ghcr-pull in-manifest).
+    for n in prod monitoring; do
       ensure "$n" ghcr-pull docker-registry ghcr-pull \
         --docker-server=ghcr.io --docker-username="$GU" --docker-password="$GT"
-      kubectl -n "$n" patch serviceaccount default \
-        -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' || true
     done
+    kubectl -n prod patch serviceaccount default \
+      -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}' || true
     echo "NOTE: app ServiceAccounts also reference ghcr-pull via the overlays."
     ;;
 
