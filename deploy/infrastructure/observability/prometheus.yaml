@@ -1,6 +1,8 @@
-# Prometheus single server (no alertmanager/pushgateway). Envoy sidecars are
-# scraped by the chart's default kubernetes-pods job (prometheus.io/scrape
-# annotations) — no extra config needed for them here.
+# Prometheus single server (no alertmanager). The pushgateway IS enabled — it
+# is the sink for the objstore-metrics CronJob (objstore-metrics.yaml), which
+# measures the two Linode buckets every 30m and pushes fm_objstore_bucket_*.
+# Envoy sidecars are scraped by the chart's default kubernetes-pods job
+# (prometheus.io/scrape annotations) — no extra config needed for them here.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -22,7 +24,24 @@ spec:
     alertmanager:
       enabled: false
     prometheus-pushgateway:
-      enabled: false
+      # Sink for the objstore-metrics CronJob (measure bucket size/count ->
+      # push every 30m). fullnameOverride pins the Service to
+      # `prometheus-pushgateway`; the chart default would be the doubled
+      # `prometheus-prometheus-pushgateway` (release name + subchart name),
+      # which would break the scrape target + netpol selectors below. The
+      # `app.kubernetes.io/name: prometheus-pushgateway` pod label is
+      # unaffected by fullnameOverride, so netpol selectors stay stable.
+      enabled: true
+      fullnameOverride: prometheus-pushgateway
+      nodeSelector:
+        role: worker
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
 
     kube-state-metrics:
       enabled: true
@@ -143,6 +162,17 @@ spec:
             target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+
+      # The objstore-metrics CronJob pushes fm_objstore_bucket_bytes/_objects
+      # here (job/objstore-size). honor_labels: true is REQUIRED so the pushed
+      # bucket/role labels — and the pushgateway-synthesized job="objstore-size"
+      # — survive verbatim instead of being overwritten by this scrape job's
+      # own job/instance target labels. The dashboard keys purely on role/bucket.
+      - job_name: pushgateway
+        honor_labels: true
+        static_configs:
+          - targets:
+              - prometheus-pushgateway.monitoring.svc:9091
 
       # No custom job for the fm services: STRICT mTLS rejects direct scrapes
       # of the app ports from this (non-mesh) namespace. Their deployments

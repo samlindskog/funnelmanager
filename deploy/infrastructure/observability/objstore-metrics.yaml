@@ -1,0 +1,152 @@
+# Linode Object Storage bucket-size exporter. Every 30m a batch Job measures
+# BOTH external buckets (size + object count via `mc du --json`) and pushes
+# fm_objstore_bucket_bytes/_objects to the pushgateway (prometheus.yaml scrapes
+# it back with honor_labels so the bucket/role labels survive). Gives Prometheus
+# a metric for storage that lives OUTSIDE the cluster (CNPG WAL + mongo dumps in
+# ${cluster_obj_bucket_backups}; Loki chunks + Tempo blocks in ${cluster_obj_bucket}).
+#
+# Image: the existing `backup` runner (ghcr.io/samlindskog/funnelmanager/backup)
+# — alpine + `mc` + bash. `mc du --json` gives size+objects in one server-side
+# walk; the push uses busybox `wget --post-file` (the image has no curl —
+# Dockerfile does `apk del curl` — but busybox wget supports POST, verified
+# against a live pushgateway responder). No rebuild required.
+#
+# Creds: the account-wide `objectstore-loki` Secret already in `monitoring`
+# (Loki/Tempo use it) can list BOTH buckets, so no cross-namespace secret ref.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: objstore-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: objstore-metrics
+    app.kubernetes.io/part-of: funnelmanager
+# No RBAC: this job never touches the apiserver (unlike mongo-backup, which
+# execs into the mongo pod). Don't mount a token it cannot use.
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: objstore-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: objstore-metrics
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: objstore-metrics
+            app.kubernetes.io/part-of: funnelmanager
+          annotations:
+            # monitoring is out of the mesh anyway (see CONVENTIONS.md); this
+            # batch job talks only to object storage + the pushgateway.
+            sidecar.istio.io/inject: "false"
+        spec:
+          serviceAccountName: objstore-metrics
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          nodeSelector:
+            role: worker
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: objstore-metrics
+              image: ghcr.io/samlindskog/funnelmanager/backup
+              env:
+                - name: S3_ENDPOINT
+                  value: https://${cluster_obj_host}
+                - name: BUCKET_BACKUPS
+                  value: ${cluster_obj_bucket_backups}
+                - name: BUCKET_LOGS
+                  value: ${cluster_obj_bucket}
+                - name: PUSHGATEWAY_URL
+                  value: http://prometheus-pushgateway.monitoring.svc:9091/metrics/job/objstore-size
+                - name: ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: objectstore-loki
+                      key: ACCESS_KEY_ID
+                - name: ACCESS_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: objectstore-loki
+                      key: ACCESS_SECRET_KEY
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  : "${S3_ENDPOINT:?}" "${ACCESS_KEY_ID:?}" "${ACCESS_SECRET_KEY:?}"
+                  : "${BUCKET_BACKUPS:?}" "${BUCKET_LOGS:?}" "${PUSHGATEWAY_URL:?}"
+                  export MC_CONFIG_DIR=/tmp/.mc
+                  PAYLOAD=/tmp/objstore-metrics.prom
+
+                  mc alias set obj "${S3_ENDPOINT}" "${ACCESS_KEY_ID}" "${ACCESS_SECRET_KEY}" >/dev/null
+
+                  {
+                    echo "# HELP fm_objstore_bucket_bytes Total bytes stored in a Linode Object Storage bucket."
+                    echo "# TYPE fm_objstore_bucket_bytes gauge"
+                    echo "# HELP fm_objstore_bucket_objects Object count in a Linode Object Storage bucket."
+                    echo "# TYPE fm_objstore_bucket_objects gauge"
+                  } > "${PAYLOAD}"
+
+                  measure() {
+                    bucket="$1"; role="$2"
+                    # `mc du --json` -> one line: {"prefix":..,"size":<bytes>,"objects":<n>,..}
+                    # Preferred over `aws s3 ls --recursive --summarize`: du is a single
+                    # server-side walk. ${cluster_obj_bucket} (Loki) holds thousands of
+                    # small chunk objects — still ~seconds every 30m, acceptable for a batch job.
+                    json="$(mc du --json "obj/${bucket}")"
+                    size="$(printf '%s' "$json" | sed -n 's/.*"size":\([0-9]*\).*/\1/p')"
+                    objects="$(printf '%s' "$json" | sed -n 's/.*"objects":\([0-9]*\).*/\1/p')"
+                    : "${size:?mc du returned no size for ${bucket}}"
+                    : "${objects:?mc du returned no objects for ${bucket}}"
+                    printf 'fm_objstore_bucket_bytes{bucket="%s",role="%s"} %s\n'   "${bucket}" "${role}" "${size}"    >> "${PAYLOAD}"
+                    printf 'fm_objstore_bucket_objects{bucket="%s",role="%s"} %s\n' "${bucket}" "${role}" "${objects}" >> "${PAYLOAD}"
+                    echo "measured ${bucket} role=${role}: size=${size} bytes objects=${objects}"
+                  }
+
+                  measure "${BUCKET_BACKUPS}" backups
+                  measure "${BUCKET_LOGS}"    logs-traces
+
+                  echo "pushing to ${PUSHGATEWAY_URL}"
+                  # busybox wget --post-file: pushgateway parses the body as text
+                  # exposition. One push replaces the whole objstore-size group
+                  # atomically, so both buckets refresh together. Fails the Job
+                  # (non-zero exit) on any push error.
+                  wget -q -T 30 -O- --post-file="${PAYLOAD}" \
+                    --header="Content-Type: text/plain; version=0.0.4" \
+                    "${PUSHGATEWAY_URL}"
+                  echo "push ok"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

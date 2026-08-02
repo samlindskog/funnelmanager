@@ -8,4 +8,5 @@ resources:
   - grafana.yaml
   - tempo.yaml
   - alloy.yaml
+  - objstore-metrics.yaml
   - networkpolicies.yaml

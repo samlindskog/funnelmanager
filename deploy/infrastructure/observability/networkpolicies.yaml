@@ -165,6 +165,68 @@ spec:
         - protocol: TCP
           port: 443
 ---
+# objstore-metrics CronJob egress: Linode Object Storage over HTTPS (mirrors
+# objectstore-egress) to `mc du` both buckets, plus the pushgateway (:9091) to
+# POST the measured metrics. DNS is covered by allow-dns-egress (podSelector {}).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: objstore-metrics-egress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: objstore-metrics
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus-pushgateway
+      ports:
+        - protocol: TCP
+          port: 9091
+---
+# pushgateway ingress: pushes from the objstore-metrics CronJob and scrapes
+# from Prometheus, both on :9091. The catch-all allow-prometheus-scrape-ingress
+# (podSelector {}) already admits the Prometheus scrape; this explicit rule
+# exists so a future narrowing of that catch-all can never silently break the
+# push OR the scrape of the pushgateway (same intent as node-exporter-ingress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pushgateway-ingress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-pushgateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: objstore-metrics
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: 9091
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

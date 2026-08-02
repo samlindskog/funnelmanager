@@ -1036,9 +1036,12 @@ def k8s_cluster():
         "k8s-cluster", "Kubernetes · Cluster & Nodes", ["kubernetes"],
         time_from="now-3h", refresh="1m",
         desc="USE view of the k3s cluster: node CPU/memory/disk/network, "
-             "commitment vs allocatable, pod placement per node, PVC fill. "
-             "Node network graphs come from cAdvisor's root cgroup (host-"
-             "accurate); the rest is node-exporter.",
+             "commitment vs allocatable, pod placement per node, and Linode "
+             "object-storage bucket sizes. NOTE: every PVC here is local-path "
+             "(a dir on the node disk), so kubelet per-PVC 'fill' just reports "
+             "the whole node filesystem — watch node disk (below) + the "
+             "object-storage row instead. Node network is cAdvisor's root "
+             "cgroup (host-accurate); the rest is node-exporter.",
     )
     d.row("Cluster", [
         (stat("Nodes ready",
@@ -1127,15 +1130,14 @@ def k8s_cluster():
         desc="Every pod with its node. Sort/filter by any column.",
     )
     d.row("Placement & pressure", [
-        (placement, 12, 12),
+        (placement, 14, 12),
         (timeseries("Pods per node",
                     [t('count by (node) (kube_pod_info)', "{{node}}")],
-                    decimals=0), 6, 12),
-        (bargauge("PVC fill",
-                  [t('100 * kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes',
-                     "{{namespace}}/{{persistentvolumeclaim}}", instant=True)],
-                  unit="percent", max_=100,
-                  thr=steps((None, C_OK), (70, C_WARN), (85, C_ERR))), 6, 12),
+                    decimals=0,
+                    desc="Per-PVC fill is intentionally omitted: every volume "
+                         "is local-path (shares the node disk), so kubelet "
+                         "reports the node filesystem for all of them. Use the "
+                         "node root-fs panel above for disk pressure."), 10, 12),
     ])
     nodes_info = table(
         "Nodes",
@@ -1172,6 +1174,39 @@ def k8s_cluster():
         (timeseries("Container restarts cluster-wide (1h window)",
                     [t('sum by (namespace) (increase(kube_pod_container_status_restarts_total[1h]))',
                        "{{namespace}}")], decimals=0), 10, 8),
+    ])
+    # Linode Object Storage buckets are EXTERNAL (no native metric); a
+    # bucket-size CronJob measures them ~every 30m and pushes fm_objstore_*
+    # to the pushgateway. `max(...)` collapses the pushgateway job/instance
+    # labels; the `role` label (backups | logs-traces) keeps this portable.
+    d.row("Object storage — Linode buckets (measured ~every 30m)", [
+        (stat("Backups bucket",
+              [t('max(fm_objstore_bucket_bytes{role="backups"})')],
+              unit="bytes",
+              desc="CNPG Postgres WAL + base backups + Mongo dumps "
+                   "(cluster_obj_bucket_backups)."), 6, 6),
+        (stat("Backups growth / 24h",
+              [t('max(delta(fm_objstore_bucket_bytes{role="backups"}[24h]))')],
+              unit="bytes", thr=steps((None, C_OK), (2e9, C_WARN), (5e9, C_ERR)),
+              desc="Day-over-day change of the backups bucket — this is what "
+                   "flagged the empty-WAL growth."), 6, 6),
+        (stat("Logs + traces bucket",
+              [t('max(fm_objstore_bucket_bytes{role="logs-traces"})')],
+              unit="bytes",
+              desc="Loki chunks + Tempo blocks (cluster_obj_bucket); 7-day "
+                   "retention, so bounded."), 6, 6),
+        (stat("Backups objects",
+              [t('max(fm_objstore_bucket_objects{role="backups"})')],
+              decimals=0, graph_mode="none"), 6, 6),
+    ])
+    d.add([
+        (timeseries("Bucket size over time",
+                    [t('max by (role) (fm_objstore_bucket_bytes)', "{{role}}")],
+                    unit="bytes",
+                    overrides=[override_color("backups", C_CANARY),
+                               override_color("logs-traces", C_STABLE)],
+                    desc="Both Linode buckets; the CronJob refreshes it every "
+                         "~30m so the line is stepped, not smooth."), 24, 8),
     ])
     return d
 

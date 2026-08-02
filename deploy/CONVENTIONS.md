@@ -106,6 +106,7 @@ istiod values (64Mi/256Mi). The summed budget lives in
 | keycloak (edge) | 200m / 640Mi | 1000m / 1Gi |
 | opa (per node) | 25m / 64Mi | 200m / 256Mi |
 | prometheus | 100m / 512Mi | 500m / 1Gi |
+| prometheus-pushgateway | 25m / 64Mi | 100m / 128Mi |
 | loki | 100m / 256Mi | 500m / 512Mi |
 | grafana | 50m / 128Mi | 300m / 256Mi |
 | fluent-bit (per node) | 25m / 64Mi | 100m / 128Mi |
