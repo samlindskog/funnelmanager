@@ -98,47 +98,47 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  : "${S3_ENDPOINT:?}" "${ACCESS_KEY_ID:?}" "${ACCESS_SECRET_KEY:?}"
-                  : "${BUCKET_BACKUPS:?}" "${BUCKET_LOGS:?}" "${PUSHGATEWAY_URL:?}"
+                  : "$${S3_ENDPOINT:?}" "$${ACCESS_KEY_ID:?}" "$${ACCESS_SECRET_KEY:?}"
+                  : "$${BUCKET_BACKUPS:?}" "$${BUCKET_LOGS:?}" "$${PUSHGATEWAY_URL:?}"
                   export MC_CONFIG_DIR=/tmp/.mc
                   PAYLOAD=/tmp/objstore-metrics.prom
 
-                  mc alias set obj "${S3_ENDPOINT}" "${ACCESS_KEY_ID}" "${ACCESS_SECRET_KEY}" >/dev/null
+                  mc alias set obj "$${S3_ENDPOINT}" "$${ACCESS_KEY_ID}" "$${ACCESS_SECRET_KEY}" >/dev/null
 
                   {
                     echo "# HELP fm_objstore_bucket_bytes Total bytes stored in a Linode Object Storage bucket."
                     echo "# TYPE fm_objstore_bucket_bytes gauge"
                     echo "# HELP fm_objstore_bucket_objects Object count in a Linode Object Storage bucket."
                     echo "# TYPE fm_objstore_bucket_objects gauge"
-                  } > "${PAYLOAD}"
+                  } > "$${PAYLOAD}"
 
                   measure() {
-                    bucket="$1"; role="$2"
+                    bucket="$$1"; role="$$2"
                     # `mc du --json` -> one line: {"prefix":..,"size":<bytes>,"objects":<n>,..}
                     # Preferred over `aws s3 ls --recursive --summarize`: du is a single
-                    # server-side walk. ${cluster_obj_bucket} (Loki) holds thousands of
+                    # server-side walk. $${cluster_obj_bucket} (Loki) holds thousands of
                     # small chunk objects — still ~seconds every 30m, acceptable for a batch job.
-                    json="$(mc du --json "obj/${bucket}")"
-                    size="$(printf '%s' "$json" | sed -n 's/.*"size":\([0-9]*\).*/\1/p')"
-                    objects="$(printf '%s' "$json" | sed -n 's/.*"objects":\([0-9]*\).*/\1/p')"
-                    : "${size:?mc du returned no size for ${bucket}}"
-                    : "${objects:?mc du returned no objects for ${bucket}}"
-                    printf 'fm_objstore_bucket_bytes{bucket="%s",role="%s"} %s\n'   "${bucket}" "${role}" "${size}"    >> "${PAYLOAD}"
-                    printf 'fm_objstore_bucket_objects{bucket="%s",role="%s"} %s\n' "${bucket}" "${role}" "${objects}" >> "${PAYLOAD}"
-                    echo "measured ${bucket} role=${role}: size=${size} bytes objects=${objects}"
+                    json="$$(mc du --json "obj/$${bucket}")"
+                    size="$$(printf '%s' "$$json" | sed -n 's/.*"size":\([0-9]*\).*/\1/p')"
+                    objects="$$(printf '%s' "$$json" | sed -n 's/.*"objects":\([0-9]*\).*/\1/p')"
+                    : "$${size:?mc du returned no size for $${bucket}}"
+                    : "$${objects:?mc du returned no objects for $${bucket}}"
+                    printf 'fm_objstore_bucket_bytes{bucket="%s",role="%s"} %s\n'   "$${bucket}" "$${role}" "$${size}"    >> "$${PAYLOAD}"
+                    printf 'fm_objstore_bucket_objects{bucket="%s",role="%s"} %s\n' "$${bucket}" "$${role}" "$${objects}" >> "$${PAYLOAD}"
+                    echo "measured $${bucket} role=$${role}: size=$${size} bytes objects=$${objects}"
                   }
 
-                  measure "${BUCKET_BACKUPS}" backups
-                  measure "${BUCKET_LOGS}"    logs-traces
+                  measure "$${BUCKET_BACKUPS}" backups
+                  measure "$${BUCKET_LOGS}"    logs-traces
 
-                  echo "pushing to ${PUSHGATEWAY_URL}"
+                  echo "pushing to $${PUSHGATEWAY_URL}"
                   # busybox wget --post-file: pushgateway parses the body as text
                   # exposition. One push replaces the whole objstore-size group
                   # atomically, so both buckets refresh together. Fails the Job
                   # (non-zero exit) on any push error.
-                  wget -q -T 30 -O- --post-file="${PAYLOAD}" \
+                  wget -q -T 30 -O- --post-file="$${PAYLOAD}" \
                     --header="Content-Type: text/plain; version=0.0.4" \
-                    "${PUSHGATEWAY_URL}"
+                    "$${PUSHGATEWAY_URL}"
                   echo "push ok"
               securityContext:
                 allowPrivilegeEscalation: false
