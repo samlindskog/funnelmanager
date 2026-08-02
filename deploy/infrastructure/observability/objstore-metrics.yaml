@@ -65,7 +65,11 @@ spec:
               type: RuntimeDefault
           containers:
             - name: objstore-metrics
-              image: ghcr.io/samlindskog/funnelmanager/backup
+              # Pinned by SHA: this manifest is in infra-observability, which
+              # (unlike the apps-prod overlay) has NO kustomize images: transformer,
+              # so an untagged ref resolves to :latest (nonexistent) -> ImagePullBackOff.
+              # The backup image only needs `mc` (stable); bump this if that changes.
+              image: ghcr.io/samlindskog/funnelmanager/backup:sha-a54372e6f9e78681551adc165cb2643ecd1fcff3
               env:
                 - name: S3_ENDPOINT
                   value: https://${cluster_obj_host}
