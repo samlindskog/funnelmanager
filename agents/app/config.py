@@ -19,6 +19,20 @@ class Settings(BaseSettings):
     # Identity/authz plumbing (JWT parsing, audience=agents checks, token
     # exchange for the agents->mcp hop) is configured via the FM_* env vars read
     # by fm_runtime, not here.
+    #
+    # Phase 1 telemetry is likewise env-driven and read directly by
+    # fm_runtime/logfire (NOT fields here — nothing in this Settings reads them):
+    #   FM_LOGFIRE                   opt-in flag; "1" turns tracing on. Unset in
+    #                                prod (logfire is then never imported).
+    #                                `agents` is the ONE service that sets it.
+    #   LOGFIRE_TOKEN                Logfire-cloud write token. Spans ship to the
+    #                                cloud only when set (send_to_logfire=
+    #                                'if-token-present'); unset in prod.
+    #   OTEL_EXPORTER_OTLP_ENDPOINT  OTLP/gRPC collector (Tempo) for dual export
+    #                                so app + mesh spans share one trace id, no
+    #                                Logfire-cloud dependency. Optional.
+    # fm_runtime.install() -> configure_tracing() wires these; app/main.py then
+    # adds logfire.instrument_pydantic_ai() (fm_runtime can't depend on it).
 
     # This service owns a dedicated database (funnelmanager_agents). The database
     # is also created at startup if missing (see database.init_db), so pointing

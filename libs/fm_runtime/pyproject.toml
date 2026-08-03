@@ -15,5 +15,19 @@ dependencies = [
     "starlette>=0.40",
 ]
 
+[project.optional-dependencies]
+# Opt-in tracing (Phase 1 telemetry). NOT a base dependency: services that do
+# not set FM_LOGFIRE=1 must never be forced to install logfire. Enable with
+#   pip install 'fm-runtime[tracing]'   AND   FM_LOGFIRE=1
+# logfire bundles a matching opentelemetry-{api,sdk}; the OTLP gRPC exporter
+# (dual export to Tempo via OTEL_EXPORTER_OTLP_ENDPOINT) is pinned to the same
+# 1.42.x line logfire 4.37 ships to avoid an api/sdk/exporter version skew.
+# logfire[fastapi,httpx] pulls the opentelemetry-instrumentation-{fastapi,httpx}
+# packages that instrument_fastapi()/instrument_httpx() require.
+tracing = [
+    "logfire[fastapi,httpx]>=4.37,<5",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.42,<1.43",
+]
+
 [tool.setuptools.packages.find]
 include = ["fm_runtime*"]

@@ -1,10 +1,11 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from fm_runtime import anonymous, install
+from fm_runtime import anonymous, install, tracing_enabled
 
 from app import models  # noqa: F401 — register ORM metadata
 from app.config import get_settings
@@ -32,6 +33,26 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 # fm_runtime installs PrincipalMiddleware (audience `agents`), structured
 # logging, /healthz, /readyz, /metrics, and /api/agents/whoami.
 install(app, service="agents", ready_checks={"postgres": _db_ready})
+
+# Phase 1 telemetry: fm_runtime.install() already configured Logfire/OTel and
+# instrumented FastAPI + httpx (a no-op unless FM_LOGFIRE=1). fm_runtime cannot
+# depend on pydantic-ai, so `agents` — the one service that opts in — adds the
+# pydantic-ai instrumentation itself: the runtime Agent's model calls, tool
+# calls, and token usage become spans stitched under the same trace id. The
+# `logfire` import is lazy and gated on the exact predicate configure_tracing
+# used, so with FM_LOGFIRE unset (prod) logfire is never imported here.
+if tracing_enabled():
+    try:
+        import logfire  # noqa: PLC0415 — lazy: keep logfire out of the prod import path
+
+        logfire.instrument_pydantic_ai()
+    except ImportError:
+        # Mirror configure_tracing's contract: FM_LOGFIRE=1 but the
+        # fm-runtime[tracing] extra absent -> warn and degrade, never crash boot.
+        logging.getLogger("app.telemetry").warning(
+            "FM_LOGFIRE=1 but logfire is not installed (fm-runtime[tracing]); "
+            "skipping pydantic-ai instrumentation",
+        )
 
 app.add_middleware(
     CORSMiddleware,

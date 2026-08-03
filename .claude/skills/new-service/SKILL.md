@@ -111,6 +111,15 @@ that caller. An internal-only service also gets an **armed-idle** east-west VS
 `mesh-policies/canary/<svc>-canary-eastwest.yaml` (PRESENCE-matches
 `x-fm-canary`, regex `.+`, secret-free, `gateways: [mesh]`).
 
+**If a JOBS PRODUCER** (surfaces running/long-running/scheduled work to `jobs`) —
+implement the two `/internal/jobs/v1` routes via one `fm_runtime.JobProducer`
+(supply `apply_control`; add `enumerate_active_jobs` only if the service has
+durable out-of-band jobs to resurface after a restart), per
+**`docs/jobs-producer-api.md`**; add the service to `JOBS_PRODUCERS`; and register
+the `jobs→<svc>` **internal caller** (the block above, `from=jobs,
+path_prefix=/internal/jobs`) so `jobs` can read the stream + proxy control. Obey
+*idle emits no job*.
+
 **Per DEPENDENCY (`deps`)** — the `<svc>-access` role also grants `/api/<dep>`;
 the `<svc>` realm client gets `svc-<dep>` optional scope; `SVC_EXCHANGE_SCOPES +=
 (<svc>,dep)`; `azp_allow[dep] += <svc>` + `callers[dep] += <svc>`; netpol egress

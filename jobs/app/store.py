@@ -115,8 +115,12 @@ async def apply_event(session: AsyncSession, app: str, event: JobEvent) -> Job |
     elif job.meta is None:
         job.meta = {}
 
-    if job.started_at is None and status not in {JobStatus.QUEUED}:
-        # First time we see it doing anything past queued — record a start.
+    if job.started_at is None and status not in {JobStatus.QUEUED, JobStatus.SCHEDULED}:
+        # First time we see it doing anything past not-yet-running — record a
+        # start. QUEUED and SCHEDULED are both pre-execution (a SCHEDULED job is
+        # a persisted schedule awaiting its next_run_at); real work has not begun,
+        # so do not stamp started_at. A later RUNNING event stamps it when the
+        # schedule fires.
         job.started_at = applied_ts
     if status in TERMINAL_STATUSES and job.ended_at is None:
         job.ended_at = applied_ts
