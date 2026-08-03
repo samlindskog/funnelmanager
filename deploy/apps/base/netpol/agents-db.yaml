@@ -21,6 +21,13 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agents
+        # agents-canary reuses the agents SA and connects to the SAME prod
+        # agents-db; the DB-side ingress must admit it too (mirrors the
+        # leads/leads-canary -> mongo/milvus ingress precedent). Without this the
+        # canary pod's Postgres connection is reset by the sidecar and it CrashLoops.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agents-canary
       ports:
         - protocol: TCP
           port: 5432
