@@ -96,7 +96,7 @@ images:
   # build-canary.yml (seds only `newTag: canary-*`); never pulled while `replicas: 0`.
   - name: ghcr.io/samlindskog/funnelmanager/agents-canary
     newName: ghcr.io/samlindskog/funnelmanager/agents
-    newTag: canary-1b1fd6f1
+    newTag: canary-294d67f9
   # Telemetry-enabled agentsui (SPA) canary — the browser-originating half of the
   # full-stack agents trace (VITE_TELEMETRY baked in by build-canary.yml). Same
   # remap pattern: base uses `.../agentsui-canary`; remap to the real `agentsui`
