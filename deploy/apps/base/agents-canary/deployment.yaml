@@ -1,0 +1,263 @@
+# Header-routed canary of the `agents` BACKEND (Phase 1b of the canary program).
+# A SEPARATE workload beside stable `agents`: the stable Deployment/Service/labels
+# are never touched, so there is no routing gap. It is a faithful copy of stable
+# `agents` (same SA, env, ConfigMap/Secret refs, DB URL, MCP_URL, JWT/OIDC config,
+# container port 8006, probes, resources) so it talks to the stack EXACTLY like
+# prod — PLUS the Logfire/OTLP telemetry env (see TELEMETRY below).
+#
+# Routing (cookie-gated, browser hop only): to reach the canary the browser sets a
+# host-only `fm_debug=<secret>|canary` session cookie (the single value-encoded
+# cookie) on x9bc433.win; the debug-session-gate EnvoyFilter validates it at the
+# gateway, strips any client-supplied `x-fm-canary` header, and injects the secret
+# `x-fm-canary` token that the app-prod HTTPRoute's /api/agents/ canary rule
+# matches (gateway/canary/agents-canary.yaml). Everyone without the cookie keeps
+# hitting stable `agents`.
+#
+# The BROWSER hop: browser(cookie) -> agentsui-canary -> agents-canary. agents'
+# ONLY downstream is the MCP tool surface (agents->mcp RFC 8693 exchange); there is
+# no mcp-canary today, so a canary agent's agents->mcp hop falls through to stable
+# mcp (and, past that, stable search/leads/jobs/mail). The east-west INBOUND-to-
+# agents-canary route (routing an internal caller e.g. jobs->agents to the canary)
+# remains DEFERRED — not needed for the browser proof. Any such route MUST match
+# marker PRESENCE (regex), NOT the secret cookie value, so the secret stays out of
+# mesh VirtualServices.
+#
+# TRUST MODEL (READ — this is a BACKEND canary, NOT a frontend canary):
+# This pod runs feature-branch BACKEND code under the SAME ServiceAccount ->
+# SAME SPIFFE identity (`spiffe://cluster.local/ns/prod/sa/agents`), SAME token
+# audience, and SAME OPA verdict as stable prod `agents`, and it talks to the REAL
+# shared datastores — the prod Postgres (`agents-db-app`) and, via
+# `MCP_URL=http://mcp:8003/mcp`, the real MCP tool surface (which fans out to the
+# real search/leads/jobs/mail -> real Apollo spend). The frontend-canary
+# justification for reusing the stable SA ("safe because frontend is a pure ingress
+# target: static nginx, no egress, in no caller/azp_allow allowlist") DOES NOT
+# TRANSFER to a backend: `agents` DOES egress (it exchanges tokens and drives MCP
+# tools) and IS a source in the exchange topology. Same-identity-as-prod is the
+# INTENDED design here — the canary must interact with the stack exactly like prod
+# to be a faithful proof — so this is deliberate, not an oversight. The containment
+# is threefold and explicit:
+#   1. Build ONLY reviewed/trusted refs into the `agents-canary` image, AND gate
+#      ACTIVATION (security-review REQUIRED pre-activation control): before this
+#      backend canary is ever activated, the build-canary auto-activate — it flips
+#      replicas 0->1 in the same run from an arbitrary `ref`, with NO review gate —
+#      MUST itself be gated. This is mandatory BECAUSE a backend canary attaches
+#      FULL prod-agents identity + the real prod Postgres + real MCP/Apollo spend
+#      (via mcp), unlike the static, egress-less frontend canary. (The
+#      build-canary.yml change itself is a later pass — this comment records the
+#      requirement; do not activate until it lands.)
+#   2. The secret `fm_debug` cookie gate: a request reaches this workload only if it
+#      carries the `fm_debug=<secret>|canary` capability-token cookie (an
+#      unaware/induced user cannot be routed here), and the EnvoyFilter strips any
+#      forged header.
+#   3. `replicas: 0` by default: nothing serves until a deliberate test scales it
+#      up; the placeholder `canary-PINME` tag is never pulled while idle.
+# Because it shares prod's identity + datastores, treat activation as running
+# unreleased code AS prod agents — only ever from a trusted branch.
+#
+# SHARED-DB DDL ACTIVATION HAZARD: on startup this canary runs stable agents'
+# schema DDL against the SAME prod Postgres (`agents-db`) as stable agents.
+# ACTIVATION CONSTRAINT: only activate branches whose schema is COMPATIBLE with
+# stable's — a destructive/renaming migration will alter columns stable agents
+# depends on and break prod agents for ALL users; and two agents pods (stable +
+# canary) starting near-simultaneously can race the check-then-ALTER. For any
+# schema-changing work, point the canary at a SCRATCH DB before activating.
+#
+# TELEMETRY (why this canary carries extra env vs stable agents): stable agents
+# ships telemetry-free. This canary turns on Logfire/pydantic-ai instrumentation
+# (`FM_LOGFIRE=1`), exports OTLP spans to in-cluster Tempo
+# (`OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo.monitoring.svc:4317`), and reads its
+# Logfire write token from the out-of-band `fm-logfire-token` Secret (created in
+# the cluster like `fm-canary-token`; NEVER committed — only referenced here). This
+# is the backend half of the browser->agents canary trace.
+#
+# IDENTITY (why no OPA/data.json change is needed): reuses the STABLE `agents`
+# ServiceAccount, so OPA's ext_authz resolves `service := dst.sa = agents`,
+# identical to stable agents — no grants/azp_allow/audience change, so
+# fm_runtime.export --check is unaffected.
+#
+# IMAGE: the base uses the canary-logical name
+# `ghcr.io/samlindskog/funnelmanager/agents-canary`; the prod overlay's `images:`
+# transformer remaps it to the real `.../agents` repo with an INDEPENDENT
+# `canary-<sha>` tag (see overlays/prod/kustomization.yaml). The distinct name
+# keeps the stable `agents` sha-pin from clobbering the canary tag.
+#
+# ACTIVATION (chicken-egg): the committed default is `replicas: 0` so the
+# placeholder `canary-PINME` tag is never pulled and `apps-prod` stays Ready while
+# idle. The `build-canary.yml` workflow pins a real `canary-<sha>` tag AND scales
+# this up in the same commit — that is how the canary goes live. To retire it, set
+# `replicas: 0` again (a one-line GitOps commit).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents-canary
+  labels:
+    app.kubernetes.io/name: agents-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default (see ACTIVATION above). build-canary.yml scales up.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agents-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agents-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+      annotations:
+        # Istio's metrics merge (enablePrometheusMerge, on by default)
+        # rewrites these to the sidecar's plaintext :15020, serving app
+        # + Envoy metrics together — STRICT mTLS blocks scraping the app
+        # port directly. The chart's kubernetes-pods job picks them up.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8006"
+        prometheus.io/path: /metrics
+    spec:
+      # Reuse the stable agents identity (see IDENTITY/TRUST MODEL notes above).
+      serviceAccountName: agents
+      # Must land on a worker (never edge/cp); PREFER worker2 — the headroom
+      # node — but stay soft so a full/absent worker2 can't make the canary
+      # unschedulable (falls back to worker1). Both workers share `role=worker`,
+      # so worker2 is singled out by its hostname label.
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # Throwaway variant — drop to the LOWER fm-dev PriorityClass so it is
+      # first-to-evict under the tight fm-quota and never competes with real
+      # prod pods (the prod overlay's blanket fm-prod patch is overridden back
+      # to fm-dev by the version=canary label-selected patch).
+      priorityClassName: fm-dev
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agents
+          # Canary-logical name; remapped to the real `.../agents` repo +
+          # `canary-<sha>` tag by the prod overlay images transformer. Never
+          # `:latest`.
+          image: ghcr.io/samlindskog/funnelmanager/agents-canary
+          ports:
+            - name: http
+              containerPort: 8006
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: agents
+            # Per-pod telemetry stamp: marks emissions from this workload as the
+            # canary variant so dashboards/queries can split canary vs stable.
+            # Does NOT change identity or the service name.
+            - name: FM_DEPLOYMENT_VARIANT
+              value: canary
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            # In-cluster token endpoint (split horizon) — agents performs the
+            # RFC 8693 agents->mcp exchange, and the public issuer host is
+            # unreachable under the namespace's default-deny egress.
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
+            - name: FM_OIDC_CLIENT_ID
+              value: agents
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-agents
+                  key: client-secret
+            # Principle-4 human-approval HMAC secret (MINT side). agents signs
+            # the approval token a human grants out-of-band; leads/mail verify
+            # it. Shared value across agents/leads/mail — if unset, agent
+            # over-threshold actions fail closed. See fm_runtime/confirmation.py.
+            - name: FM_CONFIRM_APPROVAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-approval
+                  key: secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            # CNPG's generated `agents-db-app` secret has key `uri` (plain
+            # postgresql://); the app forces the asyncpg driver itself.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agents-db-app
+                  key: uri
+            # The runtime agent's ONLY capability surface — the in-cluster MCP
+            # streamable-HTTP mount. It acts exclusively through these tools.
+            - name: MCP_URL
+              value: http://mcp:8003/mcp
+            # Runtime-agent LLM (OpenAI) — key from the shared `openai` secret
+            # (same one leads uses); model is plain config.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai
+                  key: api-key
+            - name: AGENTS_LLM_MODEL
+              value: gpt-4o-mini
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-web
+                  key: cors-origins
+            # --- TELEMETRY (canary-only; stable agents ships without these) ---
+            # Turn on Logfire / pydantic-ai instrumentation in the app.
+            - name: FM_LOGFIRE
+              value: "1"
+            # Logfire write token — from the out-of-band `fm-logfire-token` Secret
+            # (created in-cluster like `fm-canary-token`; NEVER committed, only
+            # referenced here). If the Secret is absent the pod won't start, which
+            # is the intended fail-closed for an un-provisioned canary.
+            - name: LOGFIRE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fm-logfire-token
+                  key: token
+            # OTLP spans also go to in-cluster Tempo (the same store the mesh
+            # sidecars export to). Egress opened in netpol/agents-canary.yaml.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://tempo.monitoring.svc:4317

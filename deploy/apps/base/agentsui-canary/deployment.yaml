@@ -1,0 +1,120 @@
+# Header-routed canary of the `agentsui` SPA (the browser-originating half of the
+# full-stack agents canary trace: browser → agentsui-canary → agents-canary → mcp,
+# all one trace). SEPARATE workload beside stable `agentsui`; the stable
+# Deployment/Service/labels are never touched, so there is no routing gap. Mirrors
+# base/searchui-canary — read that file's headers for the full rationale; only the
+# agentsui-specific deltas are noted here.
+#
+# WHY AN agentsui CANARY AT ALL: telemetry (Grafana Faro RUM) is DEV/CANARY-ONLY —
+# it is baked into the bundle only when built with VITE_TELEMETRY=1
+# (build-canary.yml passes it; the build-arg already lives in agentsui's
+# Dockerfile). Stable agentsui ships telemetry-free. So the browser can only
+# originate a SAMPLED traceparent (the head of the browser→backend trace) when it
+# is served the agentsui CANARY bundle. This is the SPA that makes the
+# `/api/agents/*` calls, so it is the essential browser-side piece of the agents
+# trace. (No FM_LOGFIRE here — SPA telemetry is the Faro build-arg, not a runtime
+# env var; that lives on agents-canary, the backend.)
+#
+# Routing (cookie-gated, canary-if-exists-else-stable): the browser sets the
+# host-only `fm_debug=<secret>|canary` session cookie (the single value-encoded
+# cookie); the debug-session-gate EnvoyFilter validates it and injects the secret
+# `x-fm-canary` header the /agents/ canary HTTPRoute
+# (gateway/canary/agentsui-canary.yaml) matches. No cookie → stable agentsui.
+# Same prod namespace, same Keycloak session, same OPA policy.
+#
+# BROWSER-SESSION TRUST BOUNDARY (security): served SAME-ORIGIN at x9bc433.win,
+# so its feature-branch JS runs in the hub's origin and can read the prod Keycloak
+# session (`fm_oidc_*` localStorage) of any user routed here — which is exactly why
+# reaching it requires the secret `fm_debug=<secret>|canary` capability cookie (the
+# single value-encoded cookie) and the EnvoyFilter strips any forged `x-fm-canary`.
+# Build only from TRUSTED branches; rotate the token if it leaks.
+#
+# IDENTITY (why no OPA/data.json change is needed): reuses the STABLE `agentsui`
+# ServiceAccount, so its SPIFFE id is identical to stable agentsui and OPA's
+# verdict (service := dst.sa = agentsui) is unchanged. The edge gateway resolves
+# the logical service by PATH (/agents/ → agentsui), not backend Service name.
+# agentsui is a pure ingress target (static nginx, no egress, not a source in any
+# caller/azp allowlist), so sharing its identity grants the canary nothing beyond
+# serving the SPA shell. (Deliberate, narrow exception to one-SA-per-workload.)
+#
+# ACTIVATION: committed default `replicas: 0` (idle → the canary-PINME tag is
+# never pulled). build-canary.yml pins a real canary-<sha> tag AND scales to 1 in
+# the same commit; the canary skill scales back to 0 + removes the route on retire.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentsui-canary
+  labels:
+    app.kubernetes.io/name: agentsui-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default (see ACTIVATION above). build-canary.yml scales to 1.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentsui-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentsui-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+    spec:
+      # Reuse the stable agentsui identity (see IDENTITY note above).
+      serviceAccountName: agentsui
+      # Must land on a worker; PREFER worker2 (headroom node) but stay soft so a
+      # full/absent worker2 can't make the canary unschedulable.
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # Stock nginx starts as root (see stable agentsui), so no runAsNonRoot.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agentsui
+          # Canary-logical name; remapped to the real `agentsui` repo + the
+          # `canary-<sha>` tag by the prod overlay images transformer. Never :latest.
+          image: ghcr.io/samlindskog/funnelmanager/agentsui-canary
+          ports:
+            - name: http
+              containerPort: 80
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /agents/
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /agents/
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FRONTEND_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            - name: FRONTEND_OIDC_CLIENT_ID
+              value: frontend

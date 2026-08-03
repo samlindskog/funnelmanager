@@ -13,10 +13,12 @@ resources:
   - mcp.yaml
   - jobs.yaml
   - agents.yaml
+  - agents-canary.yaml
   - frontend.yaml
   - frontend-canary.yaml
   - mailui.yaml
   - agentsui.yaml
+  - agentsui-canary.yaml
   - searchui.yaml
   - searchui-canary.yaml
   - app-db.yaml

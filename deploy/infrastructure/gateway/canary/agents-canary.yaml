@@ -1,0 +1,61 @@
+# BACKEND agents canary route (Phase 1b) — "canary-if-exists-else-stable".
+#
+# WHY THIS IS A SEPARATE, TOGGLED FILE (the idle-canary 503 fix).
+# A canary-marked `/api/agents/` request must route to `agents-canary` ONLY while
+# that workload has healthy endpoints, and fall back to stable `agents` otherwise.
+# Gateway API has no health-based failover (weighted backendRefs still send their
+# share to a 0-endpoint Service and 503 "no healthy upstream"), so we tie ROUTE
+# PRESENCE to canary ACTIVATION instead: this route exists ⇔ `agents-canary` is
+# scaled up. When the canary is idle (`replicas: 0`), this file is NOT in the
+# gateway kustomization `resources:` list, so the ONLY `/api/agents/` route left is
+# the stable one in httproutes.yaml — the `x-fm-canary` cookie is then always safe
+# (it simply matches nothing canary and falls through to stable `agents`).
+#
+# WHO TOGGLES IT (route presence == replicas, in the SAME commit):
+#   * ACTIVATE  — build-canary.yml `pin` job: after flipping replicas 0→1 it adds
+#                 `- canary/agents-canary.yaml` to gateway/kustomization.yaml.
+#   * RETIRE    — canary skill (.claude/skills/canary/canary.sh retire): after
+#                 flipping replicas 1→0 it removes that line.
+# Both are GitOps commits Flux reconciles.
+#
+# ARMED-IDLE: this file is committed but is NOT yet listed in
+# gateway/kustomization.yaml — activation (build-canary.yml) adds the line. So the
+# route is inert until the first activation.
+#
+# PRECEDENCE: this route's single `x-fm-canary` header match makes it strictly
+# MORE specific than stable `/api/agents/` (0 headers). Gateway API sorts ALL
+# routes attached to a listener by specificity across HTTPRoutes, and Istio
+# implements it, so this route wins for correctly-marked requests. If that ever
+# regressed, it fails SAFE: the request stays on stable `agents` (never
+# fail-open, never 503).
+#
+# This route PRESENCE-matches `x-fm-canary` (regex .+), NOT the secret value —
+# consistent with the search-canary route. The secret lives in ONE place only: the
+# `fm-canary-token` Secret (istio-ingress), injected by the debug-session-gate
+# EnvoyFilter for a valid host-only `fm_debug=<secret>|canary` cookie. The gate
+# strips any client-supplied `x-fm-canary` and re-injects the secret only for that
+# cookie, so the marker is non-forgeable at the edge; by the time it reaches route
+# matching it can only be gateway-set, and presence is sufficient. There is NO
+# secret in this file.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agents-canary
+  namespace: istio-ingress
+spec:
+  parentRefs:
+    - name: fm-gateway
+      sectionName: https-app
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /api/agents/ }
+          headers:
+            - name: x-fm-canary
+              type: RegularExpression
+              value: ".+"
+      backendRefs:
+        - name: agents-canary
+          namespace: prod
+          port: 8006
+      timeouts:
+        request: 300s # NDJSON streams (matches the stable /api/agents rule)

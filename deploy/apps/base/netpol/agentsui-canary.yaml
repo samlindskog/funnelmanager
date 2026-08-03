@@ -1,0 +1,27 @@
+# agentsui-canary: same posture as stable agentsui — a static SPA the gateway
+# fetches assets from; the pod initiates nothing (DNS via allow-dns, mesh
+# control-plane via allow-istio-control). NetworkPolicies select by POD LABEL
+# (not ServiceAccount), so the canary needs its own policy even though it shares
+# the `agentsui` SA (default-deny would leave it L3-dead on activation).
+# Mirrors agentsui.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentsui-canary
+  labels:
+    app.kubernetes.io/name: agentsui-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentsui-canary
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 80

@@ -1,0 +1,19 @@
+# Distinct Service so the /agents/ canary HTTPRoute header-match rule can target
+# the canary explicitly. Its selector is `agentsui-canary`, so the stable
+# `agentsui` Service (selector `agentsui`) never picks up canary pods and
+# vice-versa — this is what guarantees no routing gap on the stable path.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentsui-canary
+  labels:
+    app.kubernetes.io/name: agentsui-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: agentsui-canary
+  ports:
+    # Conventions port 8080; stock nginx still listens on 80 (see deployment).
+    - name: http
+      port: 8080
+      targetPort: 80
