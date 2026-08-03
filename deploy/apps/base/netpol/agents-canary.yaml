@@ -1,0 +1,110 @@
+# agents-canary: the header-routed BACKEND agents canary. NetworkPolicies select
+# by POD LABEL (not ServiceAccount), so the canary needs its own policy even
+# though it shares the stable `agents` SA — its pods are labeled `agents-canary`
+# and match none of the additive per-pod policies otherwise (default-deny would
+# leave it L3-dead on activation).
+#
+# INGRESS is INTENTIONALLY NARROWER than stable agents: gateway-only on 8006.
+# stable agents also admits the in-mesh `jobs` caller (jobs subscribes to agents'
+# /internal/jobs/v1 stream), but the east-west route that would send an internal
+# caller to the canary is DEFERRED (see agents-canary/deployment.yaml), so nothing
+# legitimately calls the canary in-mesh yet. Keeping ingress gateway-only is a
+# defense-in-depth backstop: the cookie gate is enforced only at the edge, and the
+# `agents-canary` Service is otherwise freely addressable in-mesh while carrying
+# full prod-agents identity — so we do NOT open jobs ingress here. When east-west
+# routing is added, this policy grows the corresponding source (matched on marker
+# PRESENCE, per the deferred note), never a broadened selector.
+#
+# EGRESS mirrors stable agents (mcp:8003, agents-db:5432, Keycloak:8080,
+# 0.0.0.0/0:443 for OpenAI) so the canary reaches the same dependencies as prod,
+# PLUS the telemetry egress this canary needs:
+#   - Tempo OTLP (:4317, monitoring) for the app-level Logfire/OTLP span exporter
+#     (OTEL_EXPORTER_OTLP_ENDPOINT). NOTE: allow-istio-control already opens
+#     tempo:4317 for every pod's SIDECAR export; this explicit rule documents the
+#     APP-process exporter's dependency and is harmless if redundant.
+#   - Logfire cloud ingest (logfire-us.pydantic.dev:443) rides the SAME
+#     0.0.0.0/0:443 egress rule that already permits OpenAI — no separate rule
+#     needed (both are external HTTPS on 443).
+# DNS (allow-dns) and the mesh control plane / OPA / Tempo-sidecar-export
+# (allow-istio-control) come from the blanket podSelector:{} policies; monitoring
+# scrape from allow-monitoring-scrape (part-of label).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents-canary
+  labels:
+    app.kubernetes.io/name: agents-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agents-canary
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Gateway only (browser->agents canary hop). NO jobs ingress — the east-west
+    # route to the canary is deferred (see above).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - protocol: TCP
+          port: 8006
+  egress:
+    # mcp: the runtime agent acts exclusively through MCP tools (OPA gates on
+    # the agents->mcp exchange edge + workload identity). No mcp-canary today, so
+    # this hop lands on stable mcp.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - protocol: TCP
+          port: 8003
+    # Dedicated Postgres (agents-db). CNPG labels instance pods with
+    # cnpg.io/cluster, not app.kubernetes.io/name.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: agents-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Keycloak (in-cluster token endpoint for RFC 8693 exchange).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080
+    # OpenAI (the pydantic-ai agent's LLM) AND Logfire cloud ingest
+    # (logfire-us.pydantic.dev) both live on the public internet over 443. Same
+    # pattern as stable agents/leads/mail: 0.0.0.0/0:443 also matches in-cluster
+    # 443 targets, which is acceptable — everything sensitive in-cluster is
+    # further gated by its own ingress policy + mesh authz.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    # Tempo OTLP (app-level Logfire/OTLP span export from the agents process).
+    # Redundant with allow-istio-control's blanket tempo:4317 egress (which
+    # exists for the sidecar's own OTLP export), but kept explicit to document
+    # this canary's app-process telemetry dependency.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - protocol: TCP
+          port: 4317

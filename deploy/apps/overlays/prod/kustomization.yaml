@@ -13,6 +13,8 @@ resources:
   - ../../base/search-canary
   - ../../base/searchui-canary
   - ../../base/leads-canary
+  - ../../base/agents-canary
+  - ../../base/agentsui-canary
   - ../../base/mailui
   - ../../base/agentsui
   - ../../base/searchui
@@ -86,6 +88,24 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/leads-canary
     newName: ghcr.io/samlindskog/funnelmanager/leads
     newTag: canary-8b78014d
+  # Telemetry-enabled BACKEND agents canary (Phase 1b — Logfire/OTLP wired). Same
+  # remap pattern as search-canary: the base uses the canary-logical name
+  # `.../agents-canary`; this entry remaps it to the real `agents` repo with an
+  # INDEPENDENT `canary-<sha>` tag, kept separate from the stable `agents` entry so
+  # the stable sha-pin never clobbers the canary tag. `canary-PINME` is rewritten by
+  # build-canary.yml (seds only `newTag: canary-*`); never pulled while `replicas: 0`.
+  - name: ghcr.io/samlindskog/funnelmanager/agents-canary
+    newName: ghcr.io/samlindskog/funnelmanager/agents
+    newTag: canary-PINME
+  # Telemetry-enabled agentsui (SPA) canary — the browser-originating half of the
+  # full-stack agents trace (VITE_TELEMETRY baked in by build-canary.yml). Same
+  # remap pattern: base uses `.../agentsui-canary`; remap to the real `agentsui`
+  # repo with an INDEPENDENT `canary-<sha>` tag, kept separate from the stable
+  # `agentsui` entry. `canary-PINME` rewritten by build-canary.yml; never pulled
+  # while `replicas: 0`.
+  - name: ghcr.io/samlindskog/funnelmanager/agentsui-canary
+    newName: ghcr.io/samlindskog/funnelmanager/agentsui
+    newTag: canary-PINME
 
 generatorOptions:
   disableNameSuffixHash: true

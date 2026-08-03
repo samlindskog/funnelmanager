@@ -1,0 +1,54 @@
+# agentsui (SPA) canary route (/agents/) — "canary-if-exists-else-stable".
+#
+# Same idle-canary 503 fix as canary/searchui-canary.yaml (read that header for the
+# full rationale): a canary-marked `/agents/` request routes to `agentsui-canary`
+# ONLY while it has healthy endpoints, else to stable `agentsui`. Route PRESENCE is
+# tied to canary ACTIVATION — this file is in the gateway kustomization `resources:`
+# list ⇔ `agentsui-canary` is scaled up. When idle, the only `/agents/` route left
+# is the stable rule in httproutes.yaml, so the `fm_debug` session cookie is always
+# safe.
+#
+# ARMED-IDLE: committed but NOT yet listed in gateway/kustomization.yaml —
+# activation (build-canary.yml) adds the line.
+#
+# WHO TOGGLES IT: build-canary.yml `pin` job adds `- canary/agentsui-canary.yaml`
+# on activate (replicas 0→1); the canary skill removes it on retire (replicas 1→0).
+#
+# PRECEDENCE: the `x-fm-canary` header match makes this route strictly more
+# specific than the stable `/agents/` rule (0 headers); Gateway API specificity
+# ordering puts it first across HTTPRoutes, and it fails SAFE to stable `agentsui`
+# if that ever regressed. Only the /agents/ SPA route is duplicated for the canary;
+# /api/agents/* is steered separately by canary/agents-canary.yaml (the backend
+# canary), so a full browser trace can span agentsui-canary AND agents-canary
+# independently. The marker is the gateway-managed, non-forgeable `x-fm-canary` from
+# debug-session-gate.yaml.
+#
+# SECURITY: reaching the canary requires the host-only `fm_debug=<secret>|canary`
+# session cookie (the single value-encoded cookie whose value is the secret plus the
+# `|canary` route selector — un-plantable because the selection is part of the
+# secret value); the gateway strips any client-supplied `x-fm-canary` and re-injects
+# the secret only for that valid cookie, so an unaware/induced user cannot be served
+# unreviewed feature-branch JS same-origin.
+#
+# NO SECRET IN THIS FILE. This route PRESENCE-matches `x-fm-canary` (regex .+). The
+# secret lives ONLY in the `fm-canary-token` Secret (istio-ingress).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agentsui-canary
+  namespace: istio-ingress
+spec:
+  parentRefs:
+    - name: fm-gateway
+      sectionName: https-app
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /agents/ }
+          headers:
+            - name: x-fm-canary
+              type: RegularExpression
+              value: ".+"
+      backendRefs:
+        - name: agentsui-canary
+          namespace: prod
+          port: 8080

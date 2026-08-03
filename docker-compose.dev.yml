@@ -438,6 +438,14 @@ services:
       # is plain config.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AGENTS_LLM_MODEL: ${AGENTS_LLM_MODEL:-gpt-4o-mini}
+      # Telemetry opt-in (Logfire / pydantic-ai instrumentation). Default OFF —
+      # a dev sets these in .env to mirror the canary's telemetry locally
+      # (see .env.example). FM_LOGFIRE gates the app; LOGFIRE_TOKEN is the
+      # Logfire write token; OTEL_EXPORTER_OTLP_ENDPOINT can point at a local
+      # collector/Tempo. All unset by default.
+      FM_LOGFIRE: ${FM_LOGFIRE:-}
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
       - ./agents:/app
       - ./libs/fm_runtime:/libs/fm_runtime
