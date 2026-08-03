@@ -23,10 +23,14 @@ Load-bearing safety properties (P6/P10 — this ships into every backend):
   token, Logfire is configured but exports nothing. Combined with the
   ``FM_LOGFIRE`` gate, prod would have to *both* set the flag and hold a token
   to ever ship a span off-box.
-- **Dual export to the existing Tempo.** When ``OTEL_EXPORTER_OTLP_ENDPOINT`` is
-  set (e.g. ``http://tempo.monitoring.svc:4317``), spans are additionally batched
-  to that OTLP/gRPC collector, so LLM+HTTP app spans and the mesh spans share one
-  trace id in Tempo without any Logfire-cloud dependency.
+- **Dual export to the existing Tempo (gRPC only).** When
+  ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set (e.g. ``http://tempo.monitoring.svc:4317``),
+  *spans* are additionally batched to that OTLP/**gRPC** collector, so LLM+HTTP app
+  spans and the mesh spans share one trace id in Tempo. We **pop** the env var
+  before ``logfire.configure`` so Logfire does not *also* auto-add its own OTLP/
+  **HTTP** exporter (traces AND metrics) to the same endpoint — Tempo's ingress
+  admits only the gRPC port :4317, so an HTTP export there 415s and Tempo ingests
+  no metrics at all. Only our explicit gRPC *span* processor talks to Tempo.
 
 This module intentionally does NOT instrument ``pydantic-ai``: ``fm_runtime``
 must not depend on it. The ``agents`` service calls
@@ -76,20 +80,31 @@ def configure_tracing(app: Any, *, service_name: str, variant: str) -> bool:
         return False
 
     additional_span_processors: list[Any] = []
-    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    # POP, not get: removing this before logfire.configure() stops Logfire from
+    # ALSO auto-configuring its own OTLP/HTTP exporter (for traces AND metrics) to
+    # this endpoint from the standard OTEL_* env. Tempo's ingress admits only the
+    # gRPC port :4317 (HTTP there 415s) and Tempo takes no metrics — we want exactly
+    # one gRPC *span* exporter, added explicitly below.
+    otlp_endpoint = os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
     if otlp_endpoint:
-        # Dual export: also ship spans to the existing Tempo (or any OTLP/gRPC
-        # collector) so app spans share a trace id with the mesh spans without
-        # relying on Logfire cloud. Imported lazily alongside logfire; both are
-        # in the 'tracing' extra.
+        # Dual export: ship spans to the existing Tempo over OTLP/gRPC so app spans
+        # share a trace id with the mesh spans without relying on Logfire cloud.
+        # Imported lazily alongside logfire; both are in the 'tracing' extra.
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
                 OTLPSpanExporter,
             )
             from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+            # gRPC target is host:port; strip any scheme and force insecure
+            # (in-cluster plaintext to Tempo:4317, same transport the mesh uses).
+            grpc_target = otlp_endpoint.removeprefix("http://").removeprefix(
+                "https://"
+            )
             additional_span_processors.append(
-                BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint))
+                BatchSpanProcessor(
+                    OTLPSpanExporter(endpoint=grpc_target, insecure=True)
+                )
             )
         except ImportError:
             logger.warning(
