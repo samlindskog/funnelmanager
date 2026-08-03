@@ -44,6 +44,8 @@ from app.schemas import (
     BackupStartOut,
     CampaignCreate,
     CampaignOut,
+    CampaignSettingsOut,
+    CampaignSettingsUpdate,
     CampaignSourceIn,
     ContactedOut,
     ContactOut,
@@ -958,10 +960,38 @@ async def create_campaign(
         body_text=body.body_text,
         body_html=body.body_html,
         send_strategy=body.send_strategy,
-        per_domain_daily=body.throttle.per_domain_daily,
         sources=body.sources,
     )
     return await campaigns.serialize_campaign(db, campaign)
+
+
+# NOTE: the /campaigns/settings routes MUST be registered BEFORE the
+# /campaigns/{campaign_id} route below — FastAPI matches in registration order,
+# so a bare {campaign_id} route defined first would shadow "settings" (and 422
+# trying to coerce it to int).
+@router.get("/campaigns/settings", response_model=CampaignSettingsOut)
+async def get_campaign_settings(
+    _: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignSettingsOut:
+    """Read the campaign-manager-wide GLOBAL anti-spam per-domain daily send cap.
+    mail-access gated (not anonymous)."""
+    value = await campaigns.get_global_per_domain_cap(db)
+    return CampaignSettingsOut(per_domain_daily=value)
+
+
+@router.put("/campaigns/settings", response_model=CampaignSettingsOut)
+async def update_campaign_settings(
+    body: CampaignSettingsUpdate,
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignSettingsOut:
+    """Set the campaign-manager-wide GLOBAL per-domain daily send cap (applies to
+    the campaign pacer AND the one-off direct-send path). mail-access gated."""
+    value = await campaigns.set_global_per_domain_cap(
+        db, body.per_domain_daily, updated_by=user.username
+    )
+    return CampaignSettingsOut(per_domain_daily=value)
 
 
 @router.get("/campaigns/{campaign_id}", response_model=CampaignOut)

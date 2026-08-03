@@ -146,8 +146,22 @@ class CampaignCreate(BaseModel):
     body_text: str = ""
     body_html: str = ""
     send_strategy: str = Field(default="balanced")
-    throttle: CampaignThrottle = Field(default_factory=CampaignThrottle)
+    # Legacy per-campaign throttle. The per-domain daily cap is now a single
+    # campaign-manager-wide GLOBAL setting (see the /campaigns/settings API), so
+    # this is optional and IGNORED for the cap; kept only for backward-compatible
+    # request payloads.
+    throttle: CampaignThrottle | None = Field(default=None)
     sources: list[CampaignSourceIn] = []
+
+
+class CampaignSettingsOut(BaseModel):
+    """The campaign-manager-wide GLOBAL anti-spam per-domain daily send cap."""
+
+    per_domain_daily: int
+
+
+class CampaignSettingsUpdate(BaseModel):
+    per_domain_daily: int = Field(ge=1, le=10000)
 
 
 class CampaignSourceOut(BaseModel):

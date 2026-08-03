@@ -4,14 +4,16 @@ A campaign draws recipients from one or more search result lists (``campaign_sou
 the caller supplies the resolved recipients — ``mail`` never calls search). Recipients
 are merged into a deduped pool (``campaign_recipients``, unique per ``(campaign, email)``)
 and sent from the **initiating user's own** connected mailboxes across possibly multiple
-domains, paced by the campaign throttle.
+domains, paced by a single campaign-manager-wide per-domain daily cap (``CampaignSettings``).
 
 Suppression is **authoritative and server-side at send time** (never trust a pre-filter):
 
 1. within-campaign dedupe — never message the same person twice in one campaign;
 2. cross-campaign per-person suppression — a global contacted set built from
    ``campaign_messages`` (optionally within a cooldown window);
-3. per-domain daily cap — the throttle's ``per_domain_daily`` (default 20).
+3. per-domain daily cap — a single campaign-manager-wide GLOBAL ``per_domain_daily``
+   setting (``CampaignSettings``; default 20), counted globally across every
+   campaign and one-off send.
 
 ``send_strategy``:
 
@@ -32,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -48,6 +51,7 @@ from app.models import (
     Campaign,
     CampaignMessage,
     CampaignRecipient,
+    CampaignSettings,
     CampaignSource,
     MailAccount,
     MailMessage,
@@ -73,17 +77,6 @@ def _domain_of(email: str) -> str:
 def _today_start() -> datetime:
     now = datetime.now(timezone.utc)
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def _per_domain_daily(campaign: Campaign) -> int:
-    throttle = campaign.throttle if isinstance(campaign.throttle, dict) else {}
-    try:
-        value = int(throttle.get("per_domain_daily"))
-    except (TypeError, ValueError):
-        value = 0
-    if value <= 0:
-        value = get_settings().campaign_per_domain_daily_default
-    return value
 
 
 def _render(template: str, recipient: CampaignRecipient) -> str:
@@ -265,12 +258,14 @@ async def create_campaign(
     body_text: str,
     body_html: str,
     send_strategy: str,
-    per_domain_daily: int,
     sources: list,
 ) -> Campaign:
     """Create a draft campaign and merge its initial source lists (dedupe +
     suppression applied). ``sources`` items expose ``search_id``, ``label`` and
-    ``recipients`` (each ``{email, apollo_id, name}``)."""
+    ``recipients`` (each ``{email, apollo_id, name}``).
+
+    The per-domain daily cap is NOT set here: it is a single campaign-manager-wide
+    GLOBAL setting (``CampaignSettings``), so ``throttle`` starts empty."""
     if send_strategy not in SEND_STRATEGIES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -283,7 +278,7 @@ async def create_campaign(
         name=name,
         status=CAMPAIGN_DRAFT,
         send_strategy=send_strategy,
-        throttle={"per_domain_daily": int(per_domain_daily)},
+        throttle={},
         subject=subject,
         body_text=body_text,
         body_html=body_html,
@@ -342,7 +337,7 @@ async def serialize_campaign(session, campaign: Campaign) -> CampaignOut:
         .scalars()
         .all()
     )
-    stats = await campaign_stats(session, campaign.id)
+    stats = await campaign_stats(session, campaign)
     return CampaignOut(
         id=campaign.id,
         owner=campaign.owner,
@@ -377,7 +372,8 @@ async def serialize_campaign(session, campaign: Campaign) -> CampaignOut:
 # --- stats -----------------------------------------------------------------
 
 
-async def campaign_stats(session, campaign_id: int) -> dict:
+async def campaign_stats(session, campaign: Campaign) -> dict:
+    campaign_id = campaign.id
     rows = await session.execute(
         select(CampaignRecipient.status, func.count())
         .where(CampaignRecipient.campaign_id == campaign_id)
@@ -394,15 +390,29 @@ async def campaign_stats(session, campaign_id: int) -> dict:
             )
         )
     ).scalar() or 0
+    # ``sent_today_by_domain`` reports the GLOBAL cap-relevant count — today's
+    # sends across ALL campaigns AND one-off sends from the campaign OWNER's
+    # active sending domains — i.e. the exact numbers the per-domain daily cap
+    # checks, not just this campaign's own sends. One query: count today's sends
+    # grouped by domain, scoped (subquery) to the owner's active sending domains.
+    owner_domains = (
+        select(func.distinct(MailAccount.domain))
+        .where(
+            MailAccount.connected_by == campaign.owner,
+            MailAccount.status == "active",
+        )
+        .scalar_subquery()
+    )
     today_rows = await session.execute(
         select(CampaignMessage.domain, func.count())
         .where(
-            CampaignMessage.campaign_id == campaign_id,
             CampaignMessage.status == "sent",
             CampaignMessage.sent_at >= _today_start(),
+            CampaignMessage.domain.in_(owner_domains),
         )
         .group_by(CampaignMessage.domain)
     )
+    sent_today_by_domain = {domain: count for domain, count in today_rows.all()}
     return {
         "recipients_total": sum(by_status.values()),
         "pending": by_status.get(RECIPIENT_PENDING, 0),
@@ -410,7 +420,7 @@ async def campaign_stats(session, campaign_id: int) -> dict:
         "suppressed": by_status.get(RECIPIENT_SUPPRESSED, 0),
         "failed": by_status.get(RECIPIENT_FAILED, 0),
         "messages_sent": messages_sent,
-        "sent_today_by_domain": {domain: count for domain, count in today_rows.all()},
+        "sent_today_by_domain": sent_today_by_domain,
     }
 
 
@@ -447,10 +457,44 @@ async def contacted_contacts(session, campaign_id: int | None = None) -> list[di
 # --- global per-domain cap + cumulative volume (Principle-4 growth gate) ----
 
 
-def global_per_domain_cap() -> int:
+async def get_global_per_domain_cap(session) -> int:
     """The anti-spam per-domain daily send cap, counted GLOBALLY across every
-    campaign and every one-off send from a given sending domain."""
+    campaign and every one-off send from a given sending domain.
+
+    Read from the singleton ``CampaignSettings`` row. When no row exists yet (or
+    it holds a non-positive value), fall back to the config seed default
+    (``campaign_per_domain_daily_default``) — the row is not required to exist."""
+    row = await session.get(CampaignSettings, 1)
+    if row is not None and row.per_domain_daily and row.per_domain_daily > 0:
+        return int(row.per_domain_daily)
     return get_settings().campaign_per_domain_daily_default
+
+
+async def set_global_per_domain_cap(session, value: int, updated_by: str | None) -> int:
+    """Atomically upsert the singleton ``CampaignSettings`` row (``id=1``) with the
+    new GLOBAL per-domain daily cap. Commits and returns the stored value. Applies
+    to both the campaign pacer and the one-off direct-send path.
+
+    A single ``INSERT ... ON CONFLICT DO UPDATE`` avoids the find-then-insert race
+    on first write — two concurrent writers can't both insert ``id=1`` and leave
+    the loser with an unhandled ``IntegrityError``."""
+    value = int(value)
+    now = datetime.now(timezone.utc)
+    stmt = (
+        pg_insert(CampaignSettings)
+        .values(id=1, per_domain_daily=value, updated_at=now, updated_by=updated_by)
+        .on_conflict_do_update(
+            index_elements=[CampaignSettings.id],
+            set_={
+                "per_domain_daily": value,
+                "updated_at": now,
+                "updated_by": updated_by,
+            },
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+    return value
 
 
 async def global_domain_sent_today(session, domain: str) -> int:
@@ -522,7 +566,7 @@ async def enforce_direct_send(session, account: MailAccount, recipients: list[st
                 + ", ".join(sorted(contacted))
             ),
         )
-    cap = global_per_domain_cap()
+    cap = await get_global_per_domain_cap(session)
     sent_today = await global_domain_sent_today(session, account.domain)
     if sent_today + len(normalized) > cap:
         raise HTTPException(
@@ -616,7 +660,7 @@ class CampaignManager:
         """Remaining sends allowed this cycle per domain, honoring the daily cap
         and the strategy (sequential fills one domain before the next)."""
         settings = get_settings()
-        cap = _per_domain_daily(campaign)
+        cap = await get_global_per_domain_cap(session)
         per_cycle = settings.campaign_sends_per_domain_per_cycle
         # GLOBAL per-domain budget: count today's sends from each domain across
         # ALL campaigns and one-off sends, not just this campaign. Otherwise N

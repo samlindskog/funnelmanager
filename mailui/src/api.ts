@@ -12,6 +12,7 @@ import type {
   BackupStart,
   Campaign,
   CampaignCreate,
+  CampaignSettings,
   CampaignSourceIn,
   ConfirmationRequired,
   MailAccount,
@@ -277,6 +278,21 @@ export async function createCampaign(body: CampaignCreate): Promise<Campaign> {
   return request<Campaign>('/api/mail/campaigns', {
     method: 'POST',
     body: JSON.stringify(body),
+  })
+}
+
+/**
+ * The per-domain daily send cap is a single GLOBAL setting applied to every
+ * campaign (not a per-campaign field). Read/write it from the manager page.
+ */
+export async function fetchCampaignSettings(): Promise<CampaignSettings> {
+  return request<CampaignSettings>('/api/mail/campaigns/settings')
+}
+
+export async function updateCampaignSettings(perDomainDaily: number): Promise<CampaignSettings> {
+  return request<CampaignSettings>('/api/mail/campaigns/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ per_domain_daily: perDomainDaily }),
   })
 }
 

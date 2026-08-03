@@ -36,11 +36,13 @@ import {
   createCampaign,
   fetchCampaign,
   fetchCampaigns,
+  fetchCampaignSettings,
   fetchSavedSearches,
   fetchSearchRecipients,
   pauseCampaign,
   resumeCampaign,
   startCampaign,
+  updateCampaignSettings,
 } from './api'
 import { ConfirmationDialog } from './ConfirmationDialog'
 import { slug } from './slug'
@@ -98,6 +100,56 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
   const [createOpen, setCreateOpen] = useState(false)
   const [continueOpen, setContinueOpen] = useState(false)
   const [pending, setPending] = useState<Pending | null>(null)
+
+  // The per-domain daily cap is a single GLOBAL setting applied to every
+  // campaign (get/set on this manager page), not a per-campaign field.
+  const [globalCap, setGlobalCap] = useState<number | null>(null)
+  const [capDraft, setCapDraft] = useState<string>('')
+  // Settled once the initial GET resolves OR rejects — so a transient fetch
+  // blip doesn't lock the editor forever (a failed load still lets you set one).
+  const [capLoaded, setCapLoaded] = useState(false)
+  const [savingCap, setSavingCap] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchCampaignSettings()
+      .then((settings) => {
+        if (cancelled) return
+        setGlobalCap(settings.per_domain_daily)
+        setCapDraft(String(settings.per_domain_daily))
+      })
+      .catch((err) => {
+        if (!cancelled) notify(errorMessage(err), 'error')
+      })
+      .finally(() => {
+        if (!cancelled) setCapLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [notify])
+
+  const saveCap = useCallback(async () => {
+    // Guard an empty/invalid draft explicitly — never coerce "" to 1 and
+    // silently slam the platform-wide cap down (e.g. clear-field + Enter).
+    const parsed = Math.round(Number(capDraft))
+    if (capDraft.trim() === '' || !Number.isFinite(parsed) || parsed < 1) {
+      notify('Enter a per-domain daily cap of at least 1', 'error')
+      return
+    }
+    const value = Math.min(10000, Math.max(1, parsed))
+    setSavingCap(true)
+    try {
+      const settings = await updateCampaignSettings(value)
+      setGlobalCap(settings.per_domain_daily)
+      setCapDraft(String(settings.per_domain_daily))
+      notify(`Per-domain daily cap set to ${settings.per_domain_daily}`, 'success')
+    } catch (err) {
+      notify(errorMessage(err), 'error')
+    } finally {
+      setSavingCap(false)
+    }
+  }, [capDraft, notify])
 
   const owners = useMemo(() => {
     const set = new Set<string>()
@@ -245,6 +297,30 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
                 </MenuItem>
               ))}
           </TextField>
+          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+            <TextField
+              label="Per-domain daily cap (global)"
+              type="number"
+              size="small"
+              fullWidth
+              value={capDraft}
+              disabled={!capLoaded || savingCap}
+              onChange={(event) => setCapDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !savingCap) void saveCap()
+              }}
+              slotProps={{ htmlInput: { min: 1, max: 10000, 'data-testid': 'mail-campaign-cap-input' } }}
+            />
+            <Button
+              data-testid="mail-campaign-cap-save"
+              size="small"
+              variant="outlined"
+              onClick={() => void saveCap()}
+              disabled={savingCap || !capLoaded || capDraft.trim() === ''}
+            >
+              Save
+            </Button>
+          </Stack>
         </Stack>
         <Divider />
         <Box sx={{ flex: 1, overflowY: 'auto' }}>
@@ -306,6 +382,7 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
           <CampaignDetail
             campaign={detail}
             busy={busy}
+            globalCap={globalCap ?? undefined}
             onStart={() => void runGated((opts) => startCampaign(detail.id, opts))}
             onResume={() => void runGated((opts) => resumeCampaign(detail.id, opts))}
             onPause={() => void handleSimple(() => pauseCampaign(detail.id))}
@@ -369,6 +446,7 @@ function StatCell({ label, value }: { label: string; value: number | string }) {
 function CampaignDetail({
   campaign,
   busy,
+  globalCap,
   onStart,
   onResume,
   onPause,
@@ -377,6 +455,7 @@ function CampaignDetail({
 }: {
   campaign: Campaign
   busy: boolean
+  globalCap?: number
   onStart: () => void
   onResume: () => void
   onPause: () => void
@@ -397,7 +476,7 @@ function CampaignDetail({
           <Typography variant="body2" color="text.secondary">
             {campaign.owner}
             {campaign.origin === 'agent' && ` (via agent${campaign.actor ? ` ${campaign.actor}` : ''})`} ·{' '}
-            {campaign.send_strategy} · cap {campaign.throttle.per_domain_daily ?? '—'}/domain/day · created{' '}
+            {campaign.send_strategy} · cap {globalCap ?? '—'}/domain/day · created{' '}
             {formatDate(campaign.created_at)}
           </Typography>
         </Box>
@@ -466,11 +545,16 @@ function CampaignDetail({
       {domainCounts.length > 0 && (
         <Box sx={{ mt: 3 }}>
           <Typography variant="subtitle2" gutterBottom>
-            Sent today by domain
+            Sent today by domain (all campaigns)
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }} useFlexGap>
             {domainCounts.map(([domain, count]) => (
-              <Chip key={domain} size="small" variant="outlined" label={`${domain}: ${count}`} />
+              <Chip
+                key={domain}
+                size="small"
+                variant="outlined"
+                label={globalCap != null ? `${domain}: ${count} / ${globalCap}` : `${domain}: ${count}`}
+              />
             ))}
           </Stack>
         </Box>
@@ -598,7 +682,6 @@ function CreateCampaignDialog({
   const [subject, setSubject] = useState('')
   const [body, setBody] = useState('')
   const [strategy, setStrategy] = useState<string>('balanced')
-  const [perDomain, setPerDomain] = useState(20)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [submitting, setSubmitting] = useState(false)
 
@@ -608,7 +691,6 @@ function CreateCampaignDialog({
       setSubject('')
       setBody('')
       setStrategy('balanced')
-      setPerDomain(20)
       setSelected(new Set())
     }
   }, [open])
@@ -642,7 +724,6 @@ function CreateCampaignDialog({
         subject,
         body_text: body,
         send_strategy: strategy,
-        throttle: { per_domain_daily: perDomain },
         sources,
       })
       await onCreated(campaign)
@@ -659,31 +740,20 @@ function CreateCampaignDialog({
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
           <TextField label="Name" size="small" fullWidth value={name} onChange={(e) => setName(e.target.value)} />
-          <Stack direction="row" spacing={2}>
-            <TextField
-              select
-              label="Send strategy"
-              size="small"
-              fullWidth
-              value={strategy}
-              onChange={(e) => setStrategy(e.target.value)}
-            >
-              {STRATEGIES.map((option) => (
-                <MenuItem key={option.value} data-testid={`mail-campaign-strategy-${option.value}`} value={option.value}>
-                  {option.label}
-                </MenuItem>
-              ))}
-            </TextField>
-            <TextField
-              label="Per-domain daily cap"
-              type="number"
-              size="small"
-              sx={{ width: 200 }}
-              value={perDomain}
-              onChange={(e) => setPerDomain(Math.max(1, Number(e.target.value) || 1))}
-              slotProps={{ htmlInput: { min: 1, max: 10000 } }}
-            />
-          </Stack>
+          <TextField
+            select
+            label="Send strategy"
+            size="small"
+            fullWidth
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+          >
+            {STRATEGIES.map((option) => (
+              <MenuItem key={option.value} data-testid={`mail-campaign-strategy-${option.value}`} value={option.value}>
+                {option.label}
+              </MenuItem>
+            ))}
+          </TextField>
           <TextField label="Subject" size="small" fullWidth value={subject} onChange={(e) => setSubject(e.target.value)} />
           <TextField
             label="Message"

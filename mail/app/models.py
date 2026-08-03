@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -116,6 +117,30 @@ class MailOauthState(Base):
 
 
 # --- Campaigns -------------------------------------------------------------
+
+
+class CampaignSettings(Base):
+    """Singleton (``id`` always 1) row holding campaign-manager-wide settings.
+
+    Currently just the GLOBAL anti-spam per-domain daily send cap, which
+    replaces the former PER-CAMPAIGN ``Campaign.throttle["per_domain_daily"]``
+    value: the cap is now ONE setting for the whole campaign manager (and the
+    one-off direct-send path), editable via the settings API. A missing row is
+    treated as "use the config default" (``campaign_per_domain_daily_default``),
+    so the row need not exist for the cap to resolve.
+    """
+
+    __tablename__ = "mail_campaign_settings"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_campaign_settings_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    per_domain_daily: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 # Campaign lifecycle states.
 CAMPAIGN_DRAFT = "draft"
 CAMPAIGN_RUNNING = "running"
@@ -157,7 +182,10 @@ class Campaign(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=CAMPAIGN_DRAFT)
     send_strategy: Mapped[str] = mapped_column(String(16), nullable=False, default="balanced")
-    # {"per_domain_daily": int, ...}
+    # Retained JSONB pacing bag. The per-domain daily cap is NO LONGER read from
+    # here — it is a single campaign-manager-wide GLOBAL setting
+    # (``CampaignSettings``). The column is kept (additive-only migrations, never
+    # dropped); any legacy ``per_domain_daily`` value here is simply ignored.
     throttle: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     # Message template. Not in the plan's field list but required to actually
     # send; supports {{name}} / {{email}} substitution.

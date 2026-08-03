@@ -165,7 +165,9 @@ export interface Campaign {
   name: string
   status: string
   send_strategy: string
-  throttle: { per_domain_daily?: number }
+  // The cap is now a single GLOBAL setting (see CampaignSettings); the backend
+  // may still echo a per-campaign throttle here, but the UI no longer reads it.
+  throttle?: { per_domain_daily?: number }
   subject: string
   body_text: string
   body_html: string
@@ -182,8 +184,15 @@ export interface CampaignCreate {
   body_text?: string
   body_html?: string
   send_strategy: string
-  throttle: { per_domain_daily: number }
   sources: CampaignSourceIn[]
+}
+
+/**
+ * The per-domain daily send cap is a single GLOBAL setting (get/set on the
+ * campaign manager page), applied to all campaigns — not a per-campaign field.
+ */
+export interface CampaignSettings {
+  per_domain_daily: number
 }
 
 export interface SourceMerge {
