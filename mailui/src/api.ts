@@ -14,6 +14,7 @@ import type {
   CampaignCreate,
   CampaignSettings,
   CampaignSourceIn,
+  CampaignUpdate,
   ConfirmationRequired,
   MailAccount,
   MailAttachment,
@@ -278,6 +279,14 @@ export async function createCampaign(body: CampaignCreate): Promise<Campaign> {
   return request<Campaign>('/api/mail/campaigns', {
     method: 'POST',
     body: JSON.stringify(body),
+  })
+}
+
+/** Edit a DRAFT campaign's configuration (message / send strategy / name). */
+export async function updateCampaign(campaignId: number, patch: CampaignUpdate): Promise<Campaign> {
+  return request<Campaign>(`/api/mail/campaigns/${campaignId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
   })
 }
 

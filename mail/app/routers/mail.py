@@ -30,6 +30,7 @@ from app.gmail import GmailAuthError, GmailClient, GmailError
 from app.models import (
     CAMPAIGN_CANCELLED,
     CAMPAIGN_COMPLETED,
+    CAMPAIGN_DRAFT,
     CAMPAIGN_PAUSED,
     CAMPAIGN_RUNNING,
     Campaign,
@@ -47,6 +48,7 @@ from app.schemas import (
     CampaignSettingsOut,
     CampaignSettingsUpdate,
     CampaignSourceIn,
+    CampaignUpdate,
     ContactedOut,
     ContactOut,
     MessageDetail,
@@ -853,6 +855,15 @@ async def gate_and_start_campaign(
             detail=f"Campaign is {campaign.status}",
         )
     pending = await _pending_count(db, campaign.id)
+    # Server-side "configured" invariant (the UI's launch guard is not the gate —
+    # curl / MCP / a UI race can start a bare draft otherwise). Launching a draft
+    # with no pending recipients or no subject would send nothing, complete
+    # instantly, and freeze the campaign (non-draft ⇒ no longer editable).
+    if campaign.status == CAMPAIGN_DRAFT and (pending <= 0 or not (campaign.subject or "").strip()):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Campaign is not configured — add at least one list (recipients) and a subject before launching.",
+        )
     require_confirmation(
         float(pending),
         _campaign_threshold(),
@@ -1001,6 +1012,45 @@ async def get_campaign(
     db: AsyncSession = Depends(get_db),
 ) -> CampaignOut:
     campaign = await _get_campaign(db, campaign_id)
+    return await campaigns.serialize_campaign(db, campaign)
+
+
+@router.patch("/campaigns/{campaign_id}", response_model=CampaignOut)
+async def update_campaign(
+    campaign_id: int,
+    body: CampaignUpdate,
+    user: UserOut = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignOut:
+    """Edit a DRAFT campaign's configuration (name, subject, message, send
+    strategy) — the "configure it after creating it" flow. Only a draft is
+    editable; once launched its content is frozen (409 otherwise).
+
+    OWNER-ONLY (the sanctioned P1 destructive-ownership carve-out): unlike the
+    cross-user lifecycle mutations (start/pause/cancel), editing another user's
+    draft would let attacker-chosen content send from THAT user's real mailbox
+    to their contacts, attributed to them — so a non-owner is refused. mail-access
+    gated."""
+    campaign = await _get_campaign(db, campaign_id)
+    if campaign.owner != user.username:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the campaign owner can edit it",
+        )
+    if campaign.status != CAMPAIGN_DRAFT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Campaign is {campaign.status}; only a draft campaign can be edited",
+        )
+    campaign = await campaigns.update_campaign(
+        db,
+        campaign,
+        name=body.name,
+        subject=body.subject,
+        body_text=body.body_text,
+        body_html=body.body_html,
+        send_strategy=body.send_strategy,
+    )
     return await campaigns.serialize_campaign(db, campaign)
 
 

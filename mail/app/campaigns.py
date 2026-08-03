@@ -87,6 +87,16 @@ def _render(template: str, recipient: CampaignRecipient) -> str:
     )
 
 
+def _validate_send_strategy(value: str) -> None:
+    """Raise 422 unless ``value`` is a known send strategy. Shared by create +
+    update so the two paths can't drift."""
+    if value not in SEND_STRATEGIES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"send_strategy must be one of {sorted(SEND_STRATEGIES)}",
+        )
+
+
 # --- suppression -----------------------------------------------------------
 
 
@@ -266,11 +276,7 @@ async def create_campaign(
 
     The per-domain daily cap is NOT set here: it is a single campaign-manager-wide
     GLOBAL setting (``CampaignSettings``), so ``throttle`` starts empty."""
-    if send_strategy not in SEND_STRATEGIES:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"send_strategy must be one of {sorted(SEND_STRATEGIES)}",
-        )
+    _validate_send_strategy(send_strategy)
     campaign = Campaign(
         owner=owner,
         origin=origin,
@@ -297,6 +303,35 @@ async def create_campaign(
                 for r in (getattr(source_in, "recipients", None) or [])
             ],
         )
+    await session.commit()
+    await session.refresh(campaign)
+    return campaign
+
+
+async def update_campaign(
+    session,
+    campaign: Campaign,
+    *,
+    name: str | None = None,
+    subject: str | None = None,
+    body_text: str | None = None,
+    body_html: str | None = None,
+    send_strategy: str | None = None,
+) -> Campaign:
+    """Apply a partial edit to a campaign's configuration (only non-``None``
+    fields change). Caller enforces the draft-only rule; this validates the
+    strategy and persists. The per-domain cap is NOT edited here (global setting)."""
+    if send_strategy is not None:
+        _validate_send_strategy(send_strategy)
+        campaign.send_strategy = send_strategy
+    if name is not None:
+        campaign.name = name
+    if subject is not None:
+        campaign.subject = subject
+    if body_text is not None:
+        campaign.body_text = body_text
+    if body_html is not None:
+        campaign.body_html = body_html
     await session.commit()
     await session.refresh(campaign)
     return campaign

@@ -154,6 +154,18 @@ class CampaignCreate(BaseModel):
     sources: list[CampaignSourceIn] = []
 
 
+class CampaignUpdate(BaseModel):
+    """Edit a DRAFT campaign's configuration. Every field is optional; only the
+    fields that are present are changed (``None`` = leave as-is). The per-domain
+    cap is NOT here — it is the global /campaigns/settings knob."""
+
+    name: str | None = Field(default=None, max_length=255)
+    subject: str | None = Field(default=None, max_length=998)
+    body_text: str | None = None
+    body_html: str | None = None
+    send_strategy: str | None = None
+
+
 class CampaignSettingsOut(BaseModel):
     """The campaign-manager-wide GLOBAL anti-spam per-domain daily send cap."""
 

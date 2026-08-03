@@ -42,11 +42,12 @@ import {
   pauseCampaign,
   resumeCampaign,
   startCampaign,
+  updateCampaign,
   updateCampaignSettings,
 } from './api'
 import { ConfirmationDialog } from './ConfirmationDialog'
 import { slug } from './slug'
-import type { Campaign, CampaignSourceIn, ConfirmationRequired, SavedSearch, User } from './types'
+import type { Campaign, CampaignSourceIn, CampaignUpdate, ConfirmationRequired, SavedSearch, User } from './types'
 
 type Notify = (text: string, severity: 'success' | 'error') => void
 
@@ -237,6 +238,24 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
     }
   }
 
+  const handleUpdate = useCallback(
+    async (patch: CampaignUpdate) => {
+      if (selectedId == null) return
+      try {
+        await updateCampaign(selectedId, patch)
+        await loadDetail(selectedId)
+        await refreshList()
+        notify('Campaign saved', 'success')
+      } catch (err) {
+        notify(errorMessage(err), 'error')
+        // Refresh so a since-launched (no-longer-draft) campaign stops showing
+        // the editable form instead of silently 409ing on the next save.
+        await loadDetail(selectedId)
+      }
+    },
+    [selectedId, loadDetail, refreshList, notify],
+  )
+
   const confirmPending = async () => {
     if (!pending) return
     setBusy(true)
@@ -330,7 +349,7 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
             </Box>
           ) : campaigns.length === 0 ? (
             <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-              No campaigns yet. Create one from a saved search list.
+              No campaigns yet. Create one to get started.
             </Typography>
           ) : (
             <List dense disablePadding>
@@ -388,6 +407,8 @@ export function CampaignsPage({ user, notify }: { user: User; notify: Notify }) 
             onPause={() => void handleSimple(() => pauseCampaign(detail.id))}
             onCancel={() => void handleSimple(() => cancelCampaign(detail.id))}
             onContinue={() => setContinueOpen(true)}
+            onUpdate={handleUpdate}
+            owned={detail.owner === user.username}
           />
         )}
       </Box>
@@ -452,6 +473,8 @@ function CampaignDetail({
   onPause,
   onCancel,
   onContinue,
+  onUpdate,
+  owned,
 }: {
   campaign: Campaign
   busy: boolean
@@ -461,12 +484,47 @@ function CampaignDetail({
   onPause: () => void
   onCancel: () => void
   onContinue: () => void
+  onUpdate: (patch: CampaignUpdate) => Promise<void>
+  owned: boolean
 }) {
   const { stats } = campaign
   const done = stats.sent + stats.failed + stats.suppressed
   const progress = stats.recipients_total > 0 ? Math.round((done / stats.recipients_total) * 100) : 0
   const terminal = campaign.status === 'completed' || campaign.status === 'cancelled'
   const domainCounts = Object.entries(stats.sent_today_by_domain)
+
+  // A draft is still being configured — message, send strategy and source lists
+  // are editable until it's launched; once running/paused/completed it's frozen.
+  const isDraft = campaign.status === 'draft'
+  const [strategy, setStrategy] = useState(campaign.send_strategy)
+  const [subject, setSubject] = useState(campaign.subject)
+  const [body, setBody] = useState(campaign.body_text)
+  const [savingConfig, setSavingConfig] = useState(false)
+  // Sync the editable drafts to the committed values when a different campaign
+  // is opened, or after a save refreshes them.
+  useEffect(() => {
+    setStrategy(campaign.send_strategy)
+    setSubject(campaign.subject)
+    setBody(campaign.body_text)
+  }, [campaign.id, campaign.send_strategy, campaign.subject, campaign.body_text])
+
+  const dirty =
+    strategy !== campaign.send_strategy || subject !== campaign.subject || body !== campaign.body_text
+  // Editing a draft's content is owner-only (it sends from the owner's mailbox);
+  // non-owners see the read-only view. Cross-user lifecycle (start/pause/cancel)
+  // stays open, matching the other mutations.
+  const canConfigure = isDraft && owned
+  // Can't launch an unconfigured draft — it needs at least one list and a subject.
+  const configured = campaign.sources.length > 0 && (campaign.subject?.trim() ?? '') !== ''
+
+  const saveConfig = async () => {
+    setSavingConfig(true)
+    try {
+      await onUpdate({ send_strategy: strategy, subject, body_text: body })
+    } finally {
+      setSavingConfig(false)
+    }
+  }
 
   return (
     <Box sx={{ p: 3 }}>
@@ -495,7 +553,7 @@ function CampaignDetail({
             data-testid="mail-campaign-start"
             variant="contained"
             startIcon={<PlayArrowIcon />}
-            disabled={busy || campaign.status === 'completed'}
+            disabled={busy || campaign.status === 'completed' || (isDraft && !configured)}
             onClick={onStart}
           >
             Launch
@@ -512,7 +570,7 @@ function CampaignDetail({
           </Button>
         )}
         <Button data-testid="mail-campaign-continue" variant="outlined" startIcon={<PlaylistAddIcon />} disabled={busy || terminal} onClick={onContinue}>
-          Continue (add search)
+          Add list
         </Button>
         {!terminal && (
           <Button data-testid="mail-campaign-cancel" color="error" startIcon={<CancelIcon />} disabled={busy} onClick={onCancel}>
@@ -520,6 +578,12 @@ function CampaignDetail({
           </Button>
         )}
       </Stack>
+
+      {canConfigure && !configured && (
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          Add at least one list and a subject before launching.
+        </Typography>
+      )}
 
       <Box sx={{ mt: 3 }}>
         <Stack direction="row" sx={{ justifyContent: 'space-between', mb: 0.5 }}>
@@ -562,18 +626,75 @@ function CampaignDetail({
 
       <Divider sx={{ my: 3 }} />
 
-      <Typography variant="subtitle1" gutterBottom>
-        Message
-      </Typography>
-      <Typography variant="body2" sx={{ fontWeight: 600 }}>
-        {campaign.subject || '(no subject)'}
-      </Typography>
-      <Box
-        component="pre"
-        sx={{ m: 0, mt: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', fontSize: 14 }}
-      >
-        {campaign.body_text || '(no body)'}
-      </Box>
+      {canConfigure ? (
+        <Box>
+          <Typography variant="subtitle1" gutterBottom>
+            Configure
+          </Typography>
+          <Stack spacing={2}>
+            <TextField
+              select
+              label="Send strategy (domain balancing)"
+              size="small"
+              fullWidth
+              value={strategy}
+              disabled={savingConfig}
+              onChange={(e) => setStrategy(e.target.value)}
+            >
+              {STRATEGIES.map((option) => (
+                <MenuItem key={option.value} data-testid={`mail-campaign-strategy-${option.value}`} value={option.value}>
+                  {option.label}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="Subject"
+              size="small"
+              fullWidth
+              value={subject}
+              disabled={savingConfig}
+              onChange={(e) => setSubject(e.target.value)}
+              slotProps={{ htmlInput: { 'data-testid': 'mail-campaign-subject' } }}
+            />
+            <TextField
+              label="Message"
+              fullWidth
+              multiline
+              minRows={6}
+              value={body}
+              disabled={savingConfig}
+              onChange={(e) => setBody(e.target.value)}
+              slotProps={{ htmlInput: { 'data-testid': 'mail-campaign-body' } }}
+            />
+            <Box>
+              <Button
+                data-testid="mail-campaign-save-config"
+                variant="contained"
+                onClick={() => void saveConfig()}
+                disabled={savingConfig || !dirty}
+                startIcon={savingConfig ? <CircularProgress size={14} /> : undefined}
+              >
+                Save changes
+              </Button>
+            </Box>
+          </Stack>
+        </Box>
+      ) : (
+        <>
+          <Typography variant="subtitle1" gutterBottom>
+            Message
+          </Typography>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {campaign.subject || '(no subject)'}
+          </Typography>
+          <Box
+            component="pre"
+            sx={{ m: 0, mt: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', fontSize: 14 }}
+          >
+            {campaign.body_text || '(no body)'}
+          </Box>
+        </>
+      )}
 
       <Divider sx={{ my: 3 }} />
 
@@ -677,55 +798,20 @@ function CreateCampaignDialog({
   onCreated: (campaign: Campaign) => void | Promise<void>
   notify: Notify
 }) {
-  const { searches, loading } = useSavedSearches(open, notify)
   const [name, setName] = useState('')
-  const [subject, setSubject] = useState('')
-  const [body, setBody] = useState('')
-  const [strategy, setStrategy] = useState<string>('balanced')
-  const [selected, setSelected] = useState<Set<number>>(new Set())
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    if (open) {
-      setName('')
-      setSubject('')
-      setBody('')
-      setStrategy('balanced')
-      setSelected(new Set())
-    }
+    if (open) setName('')
   }, [open])
 
-  const toggle = (id: number) =>
-    setSelected((current) => {
-      const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-
   const submit = async () => {
+    if (name.trim() === '') return
     setSubmitting(true)
     try {
-      // Resolve each chosen list into recipients (name,email) before creating.
-      const sources: CampaignSourceIn[] = []
-      for (const search of searches) {
-        if (!selected.has(search.id)) continue
-        const recipients = await fetchSearchRecipients(search.id)
-        sources.push({ search_id: String(search.id), label: search.query || `Search #${search.id}`, recipients })
-      }
-      const total = sources.reduce((sum, source) => sum + source.recipients.length, 0)
-      if (total === 0) {
-        notify('The selected lists have no usable email addresses', 'error')
-        setSubmitting(false)
-        return
-      }
-      const campaign = await createCampaign({
-        name,
-        subject,
-        body_text: body,
-        send_strategy: strategy,
-        sources,
-      })
+      // Name only. The message, send strategy and source lists are configured
+      // on the campaign after it's created (it starts as an empty draft).
+      const campaign = await createCampaign({ name: name.trim() })
       await onCreated(campaign)
     } catch (err) {
       notify(errorMessage(err), 'error')
@@ -739,36 +825,21 @@ function CreateCampaignDialog({
       <DialogTitle>New campaign</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
-          <TextField label="Name" size="small" fullWidth value={name} onChange={(e) => setName(e.target.value)} />
           <TextField
-            select
-            label="Send strategy"
+            label="Name"
             size="small"
             fullWidth
-            value={strategy}
-            onChange={(e) => setStrategy(e.target.value)}
-          >
-            {STRATEGIES.map((option) => (
-              <MenuItem key={option.value} data-testid={`mail-campaign-strategy-${option.value}`} value={option.value}>
-                {option.label}
-              </MenuItem>
-            ))}
-          </TextField>
-          <TextField label="Subject" size="small" fullWidth value={subject} onChange={(e) => setSubject(e.target.value)} />
-          <TextField
-            label="Message"
-            fullWidth
-            multiline
-            minRows={6}
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !submitting) void submit()
+            }}
           />
-          <Box>
-            <Typography variant="subtitle2" gutterBottom>
-              Source lists (one or more saved searches)
-            </Typography>
-            <SavedSearchPicker searches={searches} loading={loading} selected={selected} onToggle={toggle} />
-          </Box>
+          <Typography variant="body2" color="text.secondary">
+            Just a name to start. You'll choose which lists it draws from, write the
+            message and set domain balancing on the campaign itself.
+          </Typography>
         </Stack>
       </DialogContent>
       <DialogActions>
@@ -779,7 +850,7 @@ function CreateCampaignDialog({
           data-testid="mail-campaign-create"
           variant="contained"
           onClick={() => void submit()}
-          disabled={submitting || selected.size === 0 || subject.trim() === ''}
+          disabled={submitting || name.trim() === ''}
           startIcon={submitting ? <CircularProgress size={14} /> : undefined}
         >
           Create

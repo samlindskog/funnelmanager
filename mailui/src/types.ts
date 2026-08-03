@@ -178,13 +178,28 @@ export interface Campaign {
   stats: CampaignStats
 }
 
+/**
+ * Creating a campaign asks for the name only; everything else (message, send
+ * strategy, source lists) is configured on the campaign afterward. All fields
+ * are optional — the backend fills defaults (empty message, "balanced", no
+ * sources) for a fresh draft.
+ */
 export interface CampaignCreate {
   name?: string
   subject?: string
   body_text?: string
   body_html?: string
-  send_strategy: string
-  sources: CampaignSourceIn[]
+  send_strategy?: string
+  sources?: CampaignSourceIn[]
+}
+
+/** Partial edit of a DRAFT campaign's configuration (send only what changed). */
+export interface CampaignUpdate {
+  name?: string
+  subject?: string
+  body_text?: string
+  body_html?: string
+  send_strategy?: string
 }
 
 /**
