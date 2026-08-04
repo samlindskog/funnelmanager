@@ -45,12 +45,17 @@ spec:
               kubernetes.io/metadata.name: prod
           podSelector:
             matchExpressions:
-              # search-canary does the same search->leads RFC 8693 exchange as
-              # stable search, so it needs the Keycloak backchannel too. Added
-              # explicitly to the set.
+              # The *-canary backends run the same RFC 8693 exchanges as their
+              # stable peers (search-canary: search->leads; agents-canary: the
+              # agents->mcp exchange), so they need the Keycloak backchannel too.
+              # Each canary label is added explicitly — a canary reuses its
+              # stable peer's SA/audience but is a DISTINCT pod label, so it is
+              # not covered by the stable entry and must be listed here or its
+              # token exchange is REJECTed at Keycloak's ingress (connection
+              # refused), even though its own egress policy permits the hop.
               - key: app.kubernetes.io/name
                 operator: In
-                values: [search, search-canary, mcp, agents, jobs]
+                values: [search, search-canary, mcp, agents, agents-canary, jobs]
       ports:
         - port: 8080
           protocol: TCP
