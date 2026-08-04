@@ -31,6 +31,10 @@ from fm_runtime import (
     approval_ref as make_approval_ref,
     get_runtime_settings,
 )
+# opentelemetry-api ships with pydantic-ai (its instrumentation hook), so this
+# import is safe even in a prod agents pod that never configures tracing — it is
+# only the OTel *context* API, not logfire.
+from opentelemetry import context as otel_context
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -285,6 +289,16 @@ class RunManager:
         settings = get_settings()
         run_id = handle.run_id
         steps = 0
+        # A detached run is its OWN trace. Reset the OTel context to an empty
+        # (parent-less) context so this run's pydantic-ai spans (agent / model
+        # request / tool call + token usage) are created as a NEW ROOT trace
+        # rather than under the spawning request's context. That request rides
+        # the mesh's 5% sampling, so its context is almost always sampled=0;
+        # OTel's parent-based sampler would then make every agent span
+        # non-recording and drop it (verified in-pod: fresh ctx -> spans emit;
+        # unsampled parent -> 0 spans). A long-lived detached run being its own
+        # root trace is also the semantically correct attribution (P3/P8).
+        otel_reset = otel_context.attach(otel_context.Context())
         try:
             await self._mark_running(run_id)
             await publish_job(
@@ -396,6 +410,7 @@ class RunManager:
                 exit_status="error",
             )
         finally:
+            otel_context.detach(otel_reset)
             # Any approval left undecided can never be acted on now the run is
             # terminal — expire the rows and drop the in-memory waiters so a late
             # approve/reject cannot resolve a dead run.
