@@ -24,6 +24,14 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agents
+        # agents-canary reuses the stable agents SA/identity and drives the same
+        # agents->mcp tool surface, but is a DISTINCT pod label, so mcp's ingress
+        # must admit it too (mirrors keycloak-ingress + agents-db). Without this
+        # the canary's MCP calls are rejected at mcp's ingress -> 503 upstream
+        # connect error for http://mcp:8003/mcp.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agents-canary
       ports:
         - protocol: TCP
           port: 8003
