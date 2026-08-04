@@ -305,20 +305,18 @@ class RunManager:
                 origin=handle.ctx.origin,
                 process_tool_call=self._make_process_tool_call(handle),
             )
+            # Instrumentation note: pydantic-ai spans (agent run / model request /
+            # tool call + token usage) come from main.py's global
+            # logfire.instrument_pydantic_ai() (verified in-pod under the real
+            # configure_tracing path that agents left at the default instrument DO
+            # emit `invoke_agent` + `chat` spans via agent.iter()). Do NOT pass
+            # Agent(instrument=...): pydantic-ai 2.18.0's Agent.__init__ has no such
+            # kwarg and raises TypeError, killing the run at step 0.
             agent = Agent(
                 build_model(settings),
                 toolsets=[toolset],
                 system_prompt=SYSTEM_PROMPT,
                 name="funnel-runtime-agent",
-                # Emit pydantic-ai spans (agent run / model request / tool call +
-                # token usage) explicitly per-agent. main.py calls
-                # logfire.instrument_pydantic_ai() to set the global default, but in
-                # the pinned pydantic-ai that global was NOT picked up by agents left
-                # at instrument=None (verified live: only FastAPI spans reached
-                # Logfire, no LLM/tool spans). The explicit flag is version-safe and
-                # a no-op when no OTel tracer provider is configured (prod: FM_LOGFIRE
-                # unset -> logfire never configured -> spans go nowhere).
-                instrument=True,
             )
             limits = UsageLimits(
                 request_limit=settings.run_request_limit,
