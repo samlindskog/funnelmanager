@@ -96,6 +96,16 @@ therefore which toggled artifact + which kustomization the tooling operates on:
   `searchui` (SPA, gateway), `search` (backend, gateway), and `leads` (backend,
   east-west/internal). This driver never scaffolds one — arming a canary is a
   reviewed trust decision.
+- **Backend canaries also need INGRESS carve-outs for their distinct label.** A
+  `<svc>-canary` pod is labeled `<svc>-canary`, so it is NOT covered by the stable
+  `<svc>` entries in the identity/DB NetworkPolicies. If the canary does RFC 8693
+  token exchange (any backend reaching Keycloak), **add `<svc>-canary` to the
+  `keycloak-ingress` allowlist** (`deploy/infrastructure/identity/networkpolicies.yaml`
+  → `ingress[1]…matchExpressions[0].values`) **and** to any dependency DB's ingress
+  (`deploy/apps/base/netpol/<svc>-db.yaml`). Omitting the Keycloak one makes every
+  exchange REJECT at Keycloak → constant **503 opening the MCP toolset**, even though
+  the canary's *own* egress already permits `keycloak:8080`. Precedent: `search-canary`
+  + `agents-canary` are listed. Full runbook: **`docs/ops-runbook.md`**.
 
 ## Verbs
 
