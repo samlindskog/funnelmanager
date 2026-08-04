@@ -310,6 +310,15 @@ class RunManager:
                 toolsets=[toolset],
                 system_prompt=SYSTEM_PROMPT,
                 name="funnel-runtime-agent",
+                # Emit pydantic-ai spans (agent run / model request / tool call +
+                # token usage) explicitly per-agent. main.py calls
+                # logfire.instrument_pydantic_ai() to set the global default, but in
+                # the pinned pydantic-ai that global was NOT picked up by agents left
+                # at instrument=None (verified live: only FastAPI spans reached
+                # Logfire, no LLM/tool spans). The explicit flag is version-safe and
+                # a no-op when no OTel tracer provider is configured (prod: FM_LOGFIRE
+                # unset -> logfire never configured -> spans go nowhere).
+                instrument=True,
             )
             limits = UsageLimits(
                 request_limit=settings.run_request_limit,
