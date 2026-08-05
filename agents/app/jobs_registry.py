@@ -1,16 +1,25 @@
 """In-process job registry + event broadcast for the ``/internal/jobs/v1`` stream.
 
-The ``agents`` service is a **v1 jobs producer**: every runtime-AI-agent run
-(``AgentRun``) is a job, and its lifecycle transitions are published here as
-``JobEvent``s. The internal stream endpoint (``GET /internal/jobs/v1/stream``)
-fans them out to the ``jobs`` service, which persists job state and offers
-cross-user visibility + pause/resume/cancel control.
+The ``agents`` service is a **v1 jobs producer**: every active runtime-agent
+**turn** (one user message → the streamed response) is a short job, and its
+lifecycle transitions are published here as ``JobEvent``s. The internal stream
+endpoint (``GET /internal/jobs/v1/stream``) fans them out to the ``jobs``
+service, which persists job state and offers cross-user visibility +
+pause/resume/cancel control. An idle session emits no job (a job exists only
+while a turn is running/paused).
+
+TODO(P10/reuse): migrate this hand-rolled broadcast hub onto the shared
+``fm_runtime.JobProducer`` (Phase 0's helper — ``search`` is the reference
+wiring: ``JobProducer(apply_control=…)`` + a thin ``stream_ndjson`` route). This
+class currently duplicates the fm_runtime machinery (broadcast/snapshot/TTL/
+never-raise-stream); the swap is a clean adapter around ``turn_runner.control``.
+Deferred from the Phase 2 rebuild to keep the working job stream unchanged.
 
 Design notes (mirrors ``search``'s registry so the two producers behave
 identically for the ``jobs`` subscriber):
 
-- ``job_id`` is the ``AgentRun.id`` (a uuid4 hex) — the exact handle the agents
-  service uses for control, so pausing/cancelling a job maps 1:1 onto the run.
+- ``job_id`` is the **turn id** (a uuid4 hex) — the exact handle the agents
+  service uses for control, so pausing/cancelling a job maps 1:1 onto the turn.
 - ``JobEvent`` is constructed **strictly per fm_runtime** (real ``JobStatus``
   enums, never bare status strings) so a typo fails loud in-process rather than
   silently degrading a run's reported lifecycle.
