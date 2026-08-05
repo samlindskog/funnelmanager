@@ -87,6 +87,16 @@ confirm `e2e-canary` is dormant when done.
 - **The token is a secret** — never print it in full or commit it; it expires on its
   own (short-lived) and the roles are gone after `deescalate`.
 
+## TODO (future)
+
+- **Per-service escalation groups** — add `e2e-agents` / `e2e-search` / `e2e-mail` /
+  `e2e-leads` / `e2e-jobs`, each granting only that one service's `-access`, so a
+  test can hold *exactly* one MCP surface. This isolates per-service testing AND
+  structurally prevents side effects (e.g. an agents-only test can't reach mail →
+  can't send email), rather than relying on `power` (which grants all four) + a
+  read-only-goal convention. Until then, keep the test goal narrow and never invoke
+  a service you didn't intend (e.g. no mail tools when testing agents).
+
 ## See also
 
 - **drive-canary** — the browser half (Playwright as `e2e-canary`); this skill just
