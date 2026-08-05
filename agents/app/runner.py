@@ -70,6 +70,7 @@ from app.history import (
     load_context_messages,
     make_history_processor,
     next_seq,
+    persist_failed_user_message,
     persist_turn,
 )
 from app.jobs_registry import JobContext, publish_job
@@ -141,6 +142,12 @@ class TurnHandle:
     _timeout_suspends: int = 0
     _timeout_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     approval_ids: set[str] = field(default_factory=set)
+    # Turn context captured so the failure path can best-effort persist the user's
+    # own message when a turn dies before persist_turn runs (append-only invariant
+    # — otherwise the input, and the next turn's memory of it, are lost).
+    user_message: str = ""
+    model_name: str = ""
+    start_seq: int | None = None
 
     def request_pause(self) -> None:
         self.paused = True
@@ -312,6 +319,8 @@ class TurnRunner:
         otel_reset = otel_context.attach(otel_context.Context())
         summary_state = _SummaryState()
         model_name = (model or "").strip() or settings.model_name
+        handle.user_message = user_message
+        handle.model_name = model_name
 
         try:
             await publish_job(
@@ -333,6 +342,7 @@ class TurnRunner:
 
             context_window = context_window_for(model_name)
             start_seq = await next_seq(session_id)
+            handle.start_seq = start_seq
             watermark = await self._session_watermark(session_id)
             history = await load_context_messages(session_id, watermark)
 
@@ -450,8 +460,27 @@ class TurnRunner:
             await session_turn_manager.finish(turn_id, status=TurnStatus.ERROR)
         except Exception:  # noqa: BLE001
             logger.debug("agent turn %s: error-event publish failed", turn_id, exc_info=True)
+        # Persist the user's own message even though the turn failed, so the input
+        # (and the next turn's memory of it) isn't lost — persist_turn only ran on
+        # the success path. Best-effort; no-op if the turn died before it was seq'd.
         try:
-            await self._touch_session(session_id, error=detail if status is JobStatus.FAILED else None)
+            await persist_failed_user_message(
+                session_id=session_id,
+                turn_id=turn_id,
+                start_seq=handle.start_seq,
+                user_message=handle.user_message,
+                model=handle.model_name,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("agent turn %s: failed-turn user-message persist failed", turn_id, exc_info=True)
+        try:
+            # A canceled turn is NOT an error — clear any stale last_error so the
+            # session's derived status reflects the latest turn, not a prior failure.
+            await self._touch_session(
+                session_id,
+                error=detail if status is JobStatus.FAILED else None,
+                clear_error=status is not JobStatus.FAILED,
+            )
         except Exception:  # noqa: BLE001
             logger.debug("agent turn %s: session touch failed", turn_id, exc_info=True)
         await publish_job(

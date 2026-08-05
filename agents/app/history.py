@@ -188,6 +188,36 @@ async def persist_turn(
     return seq
 
 
+async def persist_failed_user_message(
+    *,
+    session_id: str,
+    turn_id: str,
+    start_seq: int | None,
+    user_message: str,
+    model: str,
+) -> None:
+    """Best-effort: persist just the turn's user prompt when the turn FAILED before
+    ``persist_turn`` ran (which only fires on the success path).
+
+    Without this, a failed/canceled/timed-out turn silently discards the user's
+    own message — the transcript loses it and the next turn's context has no memory
+    of it (breaking the append-only invariant). No-op if ``start_seq`` is None (the
+    turn died before it was assigned a seq) or the message is empty.
+    """
+    if start_seq is None or not user_message:
+        return
+    msg = ModelRequest(parts=[UserPromptPart(content=user_message)])
+    await persist_turn(
+        session_id=session_id,
+        turn_id=turn_id,
+        start_seq=start_seq,
+        new_messages=[msg],
+        model=model,
+        usage=None,
+        summary_text=None,
+    )
+
+
 def _last_response_index(messages: list[ModelMessage]) -> int:
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], ModelResponse):
