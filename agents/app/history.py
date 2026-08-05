@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pydantic_ai import RunContext
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -256,7 +257,9 @@ def make_history_processor(
     """
     trigger = max(1, int(context_window * _CONTEXT_TRIGGER_FRACTION))
 
-    async def processor(ctx, messages: list[ModelMessage]) -> list[ModelMessage]:
+    async def processor(
+        ctx: RunContext, messages: list[ModelMessage]
+    ) -> list[ModelMessage]:
         total = int(getattr(ctx.usage, "total_tokens", 0) or 0)
         if state.fired or total < trigger or len(messages) <= _KEEP_RECENT_MIN:
             return messages
