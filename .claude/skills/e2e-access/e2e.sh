@@ -55,7 +55,8 @@ case "$VERB" in
     else
       echo "escalator $ESC already exists ($CID)"
     fi
-    CS=$(kcadm_master "get clients/$CID/client-secret -r $REALM" | grep -oE '"value"[^,}]*' | grep -oE '[^"]+$' | tail -1)
+    CS=$(kcadm_master "get clients/$CID/client-secret -r $REALM" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value","") or "")')
+    [ -n "$CS" ] || { echo "failed to read escalator client secret"; exit 1; }
     sudo -n kubectl -n "$NS" create secret generic "$SECRET" --from-literal=client_secret="$CS" --dry-run=client -o yaml | sudo -n kubectl apply -f - >/dev/null
     echo "stored escalator client_secret in Secret $NS/$SECRET"
     echo "de-privileging $E2E_USER to dormant (removing standing access roles)"
@@ -83,8 +84,8 @@ case "$VERB" in
 
   status)
     EID=$(user_id "$E2E_USER")
-    echo -n "$E2E_USER roles:  "; kcadm_master "get users/$EID/role-mappings/realm -r $REALM --fields name" | grep name | tr -d ' \n'; echo
-    echo -n "$E2E_USER groups: "; kcadm_master "get users/$EID/groups -r $REALM --fields name" | grep name | tr -d ' \n'; echo
+    echo -n "$E2E_USER roles:  "; { kcadm_master "get users/$EID/role-mappings/realm -r $REALM --fields name" | grep name | tr -d ' \n'; } || true; echo
+    echo -n "$E2E_USER groups: "; { kcadm_master "get users/$EID/groups -r $REALM --fields name" | grep name | tr -d ' \n'; } || echo -n "(none)"; echo
     CID=$(kcadm_master "get clients -r $REALM -q clientId=$ESC --fields id" | uuid || true)
     [ -n "${CID:-}" ] && echo "escalator $ESC: present" || echo "escalator $ESC: NOT created (run init)"
     ;;
