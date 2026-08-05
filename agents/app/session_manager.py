@@ -56,9 +56,14 @@ class SessionTurnManager:
 
     def __init__(self) -> None:
         self._turns: dict[str, TurnBuffer] = {}
-        # session_id -> the turn_id currently running/paused (for reattach + the
-        # "one turn at a time" guard). Cleared when the turn finishes.
+        # session_id -> the turn_id currently running/paused (for the "one turn at
+        # a time" guard). Cleared when the turn finishes.
         self._active: dict[str, str] = {}
+        # session_id -> the most-recent turn_id (running OR finished-but-still-
+        # buffered). Unlike `_active` this is NOT cleared on finish — only when the
+        # buffer is dropped — so a client reattaching within the ~90s grace window
+        # can still replay a just-finished turn's tail. Fixes the reattach gap.
+        self._recent: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     async def start_turn(self, session_id: str, turn_id: str) -> TurnBuffer:
@@ -71,6 +76,7 @@ class SessionTurnManager:
             buf = TurnBuffer(turn_id=turn_id, session_id=session_id)
             self._turns[turn_id] = buf
             self._active[session_id] = turn_id
+            self._recent[session_id] = turn_id
         # Drop the buffer if the runner never publishes (spawn failure guard).
         self._schedule_expiry(buf, delay=_STALE_TURN_MAX_AGE_SECONDS)
         return buf
@@ -92,6 +98,14 @@ class SessionTurnManager:
             return None
         buf = self._turns.get(turn_id)
         return buf.status if buf is not None else None
+
+    def latest_turn_for_session(self, session_id: str) -> str | None:
+        """The session's most-recent turn still buffered — running OR finished
+        within the grace window. Use this for reattach so a client reconnecting
+        shortly AFTER a turn completes still replays its tail (``_active`` is
+        cleared on finish, but the buffer lingers ~90s)."""
+        turn_id = self._recent.get(session_id)
+        return turn_id if turn_id is not None and turn_id in self._turns else None
 
     async def publish(self, turn_id: str, event: dict[str, Any]) -> None:
         buf = self._turns.get(turn_id)
@@ -206,9 +220,10 @@ class SessionTurnManager:
             buf._cleanup_handle = None
         buf.history.clear()
         self._turns.pop(buf.turn_id, None)
-        async_active = self._active.get(buf.session_id)
-        if async_active == buf.turn_id:
+        if self._active.get(buf.session_id) == buf.turn_id:
             self._active.pop(buf.session_id, None)
+        if self._recent.get(buf.session_id) == buf.turn_id:
+            self._recent.pop(buf.session_id, None)
 
 
 session_turn_manager = SessionTurnManager()

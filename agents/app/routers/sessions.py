@@ -353,13 +353,16 @@ async def reattach_stream(
     _: Principal = Depends(require_principal),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """Reattach to a session's in-flight turn: replay its buffer, then live. If the
-    session is idle (no active turn), emits a single ``idle`` line and closes."""
+    """Reattach to a session's most-recent turn: replay its buffer, then live. This
+    resolves a turn that is still running OR one that finished within the ~90s grace
+    window (so a client reconnecting just after completion still replays the tail —
+    final text, tool results, usage, or the record of a failure). Emits a single
+    ``idle`` line only when no turn is buffered for the session."""
     session = await db.get(AgentSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
 
-    turn_id = session_turn_manager.active_turn_for_session(session_id)
+    turn_id = session_turn_manager.latest_turn_for_session(session_id)
     if turn_id is None:
         async def idle() -> AsyncIterator[str]:
             yield json.dumps({"type": "idle"}) + "\n"
