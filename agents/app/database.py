@@ -52,6 +52,35 @@ async def _create_database_if_missing() -> None:
         await admin_engine.dispose()
 
 
+# Columns added to the session/message/approval tables after their initial
+# release. ``create_all`` only creates missing *tables*, never ALTERs an existing
+# one, and there is no migration framework here — so an existing agents-db (e.g. a
+# prior canary that ran an earlier cut of these tables) keeps the old shape and a
+# SELECT of a new column 500s. Postgres ``ADD COLUMN IF NOT EXISTS`` is idempotent,
+# so healing on every boot is safe and needs no manual DB surgery. Types/defaults
+# mirror app.models. (mail's pattern.)
+_COLUMN_HEALS = (
+    "ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS last_error TEXT",
+    "ALTER TABLE agent_session ADD COLUMN IF NOT EXISTS "
+    "context_watermark INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE agent_message ADD COLUMN IF NOT EXISTS usage JSONB",
+    "ALTER TABLE agent_message ADD COLUMN IF NOT EXISTS model VARCHAR(128)",
+    "ALTER TABLE agent_consumed_approvals ADD COLUMN IF NOT EXISTS "
+    "turn_id VARCHAR(64) NOT NULL DEFAULT ''",
+)
+
+
+async def _heal_schema(conn) -> None:
+    """Additively bring a pre-existing schema up to the current model. Scoped to
+    known-drifted columns; not a general schema sync. Best-effort per statement so
+    one missing base table never blocks the rest."""
+    for ddl in _COLUMN_HEALS:
+        try:
+            await conn.execute(text(ddl))
+        except Exception:  # noqa: BLE001 — a table may not exist yet on first boot
+            pass
+
+
 async def init_db() -> None:
     # Import models so metadata is registered before create_all.
     from app import models  # noqa: F401
@@ -59,9 +88,11 @@ async def init_db() -> None:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await _heal_schema(conn)
     except Exception:
         # Most likely the database itself is missing (first boot of this
         # service on an existing Postgres volume) — create it and retry once.
         await _create_database_if_missing()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await _heal_schema(conn)

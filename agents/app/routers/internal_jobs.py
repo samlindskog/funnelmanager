@@ -29,7 +29,7 @@ from fastapi.responses import StreamingResponse
 from fm_runtime import JobControlAction, Principal, require_principal
 
 from app.jobs_registry import job_registry
-from app.runner import run_manager
+from app.runner import turn_runner
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ async def jobs_control(
         acting_user or "-",
     )
 
-    new_status, applied = await run_manager.control(cleaned, control.value)
+    new_status, applied = await turn_runner.control(cleaned, control.value)
     return {
         "job_id": cleaned,
         "action": control.value,

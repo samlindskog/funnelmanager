@@ -30,7 +30,7 @@ from typing import Any
 from fm_runtime import JobEvent, JobStatus
 
 from app.config import get_settings
-from app.models import JOB_TYPE_AGENT_RUN
+from app.models import JOB_TYPE_AGENT_TURN
 
 
 @dataclass
@@ -117,7 +117,7 @@ async def publish_job(
     """Construct a JobEvent (strict) for a run and broadcast it."""
     event = JobEvent(
         job_id=str(job_id),
-        type=JOB_TYPE_AGENT_RUN,
+        type=JOB_TYPE_AGENT_TURN,
         user=ctx.user,
         origin=ctx.origin,
         actor=ctx.actor,

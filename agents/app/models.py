@@ -1,135 +1,259 @@
-"""ORM models for the agents service.
+"""ORM models for the agents service — interactive **sessions**.
 
-An ``AgentRun`` is one runtime-AI-agent task: a human's goal, the pydantic-ai
-loop that pursued it exclusively through MCP tools, and its lifecycle. Each run
-is also a **job** (agents is a v1 jobs producer) — ``id`` is the job id the
-``jobs`` service stores, and the attribution columns are exactly the job-event
-fields so a run renders as "alice (via agent)".
+A ``AgentSession`` is one persistent, multi-turn conversation with a runtime AI
+agent (replacing the retired one-shot ``AgentRun``). A **turn** = one user
+message → the agent's streamed response (possibly many model requests + tool
+calls). Every turn's pydantic-ai ``ModelMessage``s are persisted **verbatim and
+append-only** as ``AgentMessage`` rows (the source of truth for replay + display
++ the model context of the next turn).
 
-Cross-user visible (principle 1): every column that owns a run records the
-initiating human, but reads are NOT owner-filtered — within the service every
-user with ``agents-access`` sees every run.
+Attribution (Principle 3): every session records the initiating human
+(``owner = preferred_username``), the origin (``origin = fm_origin``, always
+``agent`` for runtime-agent work), and the acting client (``actor = azp``) so a
+UI renders "alice (via agent)". Attribution is **never** a read filter
+(Principle 1): within the service every user with ``agents-access`` sees every
+session — the columns attribute a session, they do not hide it. The *one*
+sanctioned per-user carve-out is destructive ownership (delete-my-own-session),
+enforced in the router as a 404, not here.
+
+A session's **display status is derived** in the list endpoint (running / paused
+/ scheduled / error / idle) from live turn state + the last message — it is not a
+stored column, so it can never drift from reality.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
-# Job type this producer publishes on /internal/jobs/v1/stream.
-JOB_TYPE_AGENT_RUN = "agent_run"
+# Job types this producer publishes on /internal/jobs/v1/stream. A turn is one
+# short RUNNING→terminal job; a schedule (Phase 3) is a persistent SCHEDULED job.
+# An idle session is NOT a job (jobs surfaces running/long-running/scheduled work
+# only — never idle state).
+JOB_TYPE_AGENT_TURN = "agent_turn"
+JOB_TYPE_AGENT_SCHEDULE = "agent_schedule"
 
-# Pending-approval lifecycle (Principle 4 agent hard-enforcement). An
-# over-threshold action a runtime agent attempted, awaiting its initiating
-# human's out-of-band decision. A runtime agent can NEVER self-confirm, so an
-# approval only ever leaves `pending` via the owner-gated approvals API.
-APPROVAL_PENDING = "pending"
-APPROVAL_APPROVED = "approved"
-APPROVAL_REJECTED = "rejected"
-# Terminal without a human decision: the run was canceled/ended while the
-# approval still sat pending, so it can never be acted on again.
-APPROVAL_EXPIRED = "expired"
+# --- Message kinds (coarse display grouping) --------------------------------
+# ``content`` (the serialized ModelMessage) is the real source of truth; ``kind``
+# is a coarse label so a UI can group the transcript without re-deriving it from
+# every part. Classified from the ModelMessage's parts (see runner._message_kind).
+MSG_KIND_USER = "user"
+MSG_KIND_ASSISTANT = "assistant"
+MSG_KIND_TOOL_CALL = "tool_call"
+MSG_KIND_TOOL_RESULT = "tool_result"
+MSG_KIND_SUMMARY = "summary"
 
-# Run/job lifecycle words. These are the string values of fm_runtime.JobStatus
-# (queued|running|paused|completed|failed|canceled); kept as plain strings in
-# the column so a newer status never trips a DB enum constraint.
+# --- Turn lifecycle words (string values of fm_runtime.JobStatus) -----------
+# Kept as plain strings so a newer status never trips a DB enum constraint.
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_PAUSED = "paused"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELED = "canceled"
+STATUS_SCHEDULED = "scheduled"
+
+# Derived session-display statuses (returned by the list endpoint; not stored).
+SESSION_STATUS_RUNNING = "running"
+SESSION_STATUS_PAUSED = "paused"
+SESSION_STATUS_SCHEDULED = "scheduled"
+SESSION_STATUS_ERROR = "error"
+SESSION_STATUS_IDLE = "idle"
+
+# --- Pending-approval lifecycle (Principle 4 agent hard-enforcement) --------
+APPROVAL_PENDING = "pending"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+# Terminal without a human decision: the turn ended while the approval still sat
+# pending, so it can never be acted on again.
+APPROVAL_EXPIRED = "expired"
+
+# --- Schedule lifecycle (Phase 3 — table stubbed here, logic out of scope) --
+SCHEDULE_SCHEDULED = "scheduled"
+SCHEDULE_CANCELED = "canceled"
+SCHEDULE_COMPLETED = "completed"
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class AgentRun(Base):
-    __tablename__ = "agent_runs"
+class AgentSession(Base):
+    """One persistent, multi-turn conversation with a runtime AI agent."""
 
-    # A uuid4 hex — also the job_id surfaced to the jobs service. Opaque string
-    # so it never collides with search's leads-stream-id job ids.
+    __tablename__ = "agent_session"
+
+    # A uuid4 hex. Opaque so it never collides with search's stream-id job ids.
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
-    goal: Mapped[str] = mapped_column(Text, nullable=False)
-    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default=STATUS_QUEUED)
-
-    # Attribution (== the job-event fields). owner is the initiating human's
-    # preferred_username; origin is always `agent` for a runtime-agent run;
-    # actor is the agents service client (azp) that acts downstream.
+    # Attribution (Principle 3) — never a read filter (Principle 1). owner is the
+    # initiating human's preferred_username; origin is `agent` for runtime-agent
+    # work; actor is the agents service client (azp) acting downstream.
     owner: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     origin: Mapped[str] = mapped_column(String(16), nullable=False, default="agent")
     actor: Mapped[str] = mapped_column(String(255), nullable=False, default="")
 
-    # Final natural-language result, or the failure reason.
-    result: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Auto-derived from the first user message, renameable by the owner.
+    title: Mapped[str] = mapped_column(String(400), nullable=False, default="New session")
 
-    # Progress bookkeeping: node steps taken and usage snapshot (requests /
-    # tool calls / tokens) for observability.
-    steps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The OpenAI chat model selected for this session's turns (bare id, no
+    # provider prefix). Turns build OpenAIChatModel(model, provider=…) from it.
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+
+    # ``seq`` up to which the verbatim history has been summarized: the context
+    # fed to the next turn is (summary rows) + (messages with seq > watermark).
+    context_watermark: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # ``error`` remembers a failed last turn so the derived status can show it
+    # even after the in-memory turn buffer has expired.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class AgentMessage(Base):
+    """One verbatim, append-only pydantic-ai ``ModelMessage`` in a session.
+
+    ``content`` is the ModelMessage serialized via ``ModelMessagesTypeAdapter`` —
+    the source of truth for transcript replay/display AND for reconstructing the
+    model context of the next turn (deserialized straight back). ``kind`` is a
+    coarse display label derived from the message's parts. ``usage`` (a serialized
+    ``RunUsage``) is stamped on the assistant row that ended a turn.
+    """
+
+    __tablename__ = "agent_message"
+    __table_args__ = (
+        # Append-only ordering within a session; no two rows share a seq.
+        UniqueConstraint("session_id", "seq", name="uq_agent_message_session_seq"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("agent_session.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Monotonic per session — the transcript order. Assigned server-side.
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # The turn (one user message → response) this message belongs to. Groups a
+    # multi-message assistant turn and keys the Principle-4 approval to a turn.
+    turn_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    # The serialized ModelMessage (ModelRequest | ModelResponse) — source of truth.
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    # The model that produced an assistant/tool_call row (NULL for user rows).
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Per-turn RunUsage snapshot, on the final assistant row of a turn (else NULL).
     usage: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Coarse fractional progress (0.0-1.0) or NULL when not meaningful.
-    progress: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+class AgentSchedule(Base):
+    """A persisted schedule for a session (Phase 3 — table stubbed now).
+
+    The scheduler loop + the internal ``schedule_agent_job`` tool that populate
+    and fire these are **out of scope for Phase 2**; the table exists so the
+    Phase 3 migration is additive and the derived "scheduled" session status has
+    a home to read from. No code writes these rows yet.
+    """
+
+    __tablename__ = "agent_schedule"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("agent_session.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    owner: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="agent")
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+
+    # One-shot ``{"at": iso}`` or recurring ``{"cron": expr}``.
+    spec: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=SCHEDULE_SCHEDULED, index=True
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
 
 
 class PendingApproval(Base):
     """A Principle-4 pending human approval for an over-threshold agent action.
 
     When an MCP tool call returns the fm_runtime agent-approval gate
-    (``needs_human_approval`` — e.g. launching a large campaign or a big
-    embeddings backfill), the runtime-agent run **pauses** and records one of
-    these. A runtime agent can never self-confirm; the ONLY way the action
-    proceeds is the initiating human approving here, after which the ``agents``
-    service mints an unforgeable ``human_approval`` token (bound to this exact
-    ``action`` + ``estimate`` + ``subject``) and resumes the run so it re-issues
-    the tool call WITH the approval.
+    (``needs_human_approval`` — e.g. a large campaign or a big embeddings
+    backfill), the running **turn** pauses and records one of these. A runtime
+    agent can never self-confirm; the ONLY way the action proceeds is the
+    initiating human approving it here, after which the ``agents`` service mints
+    an unforgeable ``human_approval`` token (bound to this exact
+    ``action`` + ``estimate`` + ``subject``) and resumes the turn so it re-issues
+    the tool call WITH the approval (token injected server-side, never by the LLM).
 
-    ``tool_name``/``tool_args`` capture the exact gated MCP call so the resumed
-    run re-issues *that* action (token injected server-side, never by the LLM).
-    The minted token is deliberately **not** persisted — it lives only in memory
-    on the live run's coordinator, so a DB row can never leak a bearer-equivalent.
-
-    Cross-user visible for *reading* (principle 1), but only the initiating human
-    (``AgentRun.owner``) may *decide* it — enforced in the approvals router.
+    Re-keyed from the retired run model to ``(session_id, turn_id)``: the paused
+    unit is now a turn within a session. Cross-user visible for *reading*
+    (Principle 1); only the initiating human (``subject``/session ``owner``) may
+    *decide* it — enforced in the approvals router. The minted token is
+    deliberately **not** persisted — it rides only the in-memory coordinator.
     """
 
     __tablename__ = "agent_pending_approvals"
 
-    # uuid4 hex — the `aid` in POST /api/agents/tasks/{id}/approvals/{aid}.
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
-    # The run this approval gates. Cascade so a deleted run drops its approvals.
-    run_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    # The session + turn this approval gates. Cascade so a deleted session drops
+    # its approvals.
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("agent_session.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
+    turn_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
-    # The human whose action this is — always the run's owner (initiating human).
-    # The minted approval token binds to this subject so it can never be replayed
-    # for a different human.
+    # The human whose action this is — the session owner. The minted token binds
+    # to this subject so it can never be replayed for a different human.
     subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
-    # fm_runtime's stable approval reference for (action, estimate-bucket, subject)
-    # — dedup key + audit correlation with the gate that raised it.
+    # fm_runtime's stable approval reference for (action, estimate-bucket, subject).
     approval_ref: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
-    # The gated action identity (opaque string from the gate, e.g.
-    # "campaign:42:start") and the resource estimate that tripped the threshold.
     action: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     estimate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -143,7 +267,6 @@ class PendingApproval(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default=APPROVAL_PENDING, index=True
     )
-    # Who decided it (must equal subject) and when.
     decided_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -156,31 +279,27 @@ class ConsumedApproval(Base):
     """A **spent** Principle-4 approval reference — the single-use ledger.
 
     The fm_runtime ``human_approval`` token this service mints is *replayable
-    within its TTL* for the same (action, estimate-bucket, subject): the token
-    binds to those, and ``approval_ref`` is their stable hash. Nothing in the
-    token itself makes it one-shot. This table is the consumed-ref hook that
-    closes that: once a paused run resumes with an approval and the re-issued MCP
-    action is accepted (the gate let it through), its ``approval_ref`` is recorded
-    here. Thereafter the approvals API refuses to mint a second token for that ref
-    and the resume path refuses to re-issue one — so one human approval authorizes
-    **exactly one** over-threshold action, never a replayed second.
+    within its TTL* for the same (action, estimate-bucket, subject); nothing in
+    the token itself makes it one-shot. This table is the consumed-ref hook that
+    closes that: once a paused turn resumes with an approval and the re-issued MCP
+    action is accepted, its ``approval_ref`` is recorded here. Thereafter the
+    approvals API refuses to mint a second token for that ref and the resume path
+    refuses to re-issue one — so one human approval authorizes **exactly one**
+    over-threshold action, never a replayed second.
 
-    Keyed by ``approval_ref`` (the primary key), so recording a spend is an atomic
-    check-and-set even under concurrent approvals landing on the same bucket: the
-    first insert wins, a duplicate raises and is caught. Deliberately **no** FK to
-    ``agent_runs`` — a consumed ref must outlive any run-row cleanup, or deleting
-    the run would re-open the token to replay for its remaining TTL.
+    Keyed by ``approval_ref`` (the PK) so recording a spend is an atomic
+    check-and-set even under concurrent approvals on the same bucket. Deliberately
+    **no** FK to ``agent_session`` — a consumed ref must outlive any session
+    cleanup, or deleting the session would re-open the token to replay.
     """
 
     __tablename__ = "agent_consumed_approvals"
 
-    # The stable fm_runtime approval_ref (action|estimate-bucket|subject). Unique
-    # by being the PK — this is what makes the spend atomic and idempotent.
     approval_ref: Mapped[str] = mapped_column(String(64), primary_key=True)
 
-    # Provenance of the spend (audit / debugging) — which run and which pending
-    # approval consumed the ref, and the human + action it authorized.
-    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # Provenance of the spend (audit / debugging).
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    turn_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     approval_id: Mapped[str] = mapped_column(String(64), nullable=False)
     subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(255), nullable=False, default="")

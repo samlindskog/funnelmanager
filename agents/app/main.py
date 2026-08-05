@@ -10,16 +10,16 @@ from fm_runtime import anonymous, install, tracing_enabled
 from app import models  # noqa: F401 — register ORM metadata
 from app.config import get_settings
 from app.database import engine, init_db
-from app.routers import internal_jobs, tasks
-from app.runner import run_manager
+from app.routers import internal_jobs, sessions
+from app.runner import turn_runner
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
     yield
-    # Cancel any in-flight runtime-agent runs on shutdown so tasks don't leak.
-    await run_manager.shutdown()
+    # Cancel any in-flight runtime-agent turns on shutdown so tasks don't leak.
+    await turn_runner.shutdown()
 
 
 async def _db_ready() -> None:
@@ -62,9 +62,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# The human-facing task API (/api/agents, gated by the agents-access role) and
+# The human-facing sessions API (/api/agents, gated by the agents-access role) and
 # the internal jobs producer surface (/internal/jobs/v1, gated by jobs-internal).
-app.include_router(tasks.router)
+app.include_router(sessions.router)
 app.include_router(internal_jobs.router)
 
 
