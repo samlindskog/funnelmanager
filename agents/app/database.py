@@ -65,8 +65,18 @@ _COLUMN_HEALS = (
     "context_watermark INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE agent_message ADD COLUMN IF NOT EXISTS usage JSONB",
     "ALTER TABLE agent_message ADD COLUMN IF NOT EXISTS model VARCHAR(128)",
-    "ALTER TABLE agent_consumed_approvals ADD COLUMN IF NOT EXISTS "
+    # The approval tables were re-keyed run_id -> (session_id, turn_id). On a db
+    # that pre-existed with the old run-based shape, ADD the new key columns
+    # (defaulted so the old shape's rows/inserts still satisfy them) and RELAX the
+    # legacy run_id NOT NULL (new inserts don't set it). Idempotent + best-effort.
+    "ALTER TABLE agent_pending_approvals ADD COLUMN IF NOT EXISTS "
+    "session_id VARCHAR(64) NOT NULL DEFAULT ''",
+    "ALTER TABLE agent_pending_approvals ADD COLUMN IF NOT EXISTS "
     "turn_id VARCHAR(64) NOT NULL DEFAULT ''",
+    "ALTER TABLE agent_pending_approvals ALTER COLUMN run_id DROP NOT NULL",
+    "ALTER TABLE agent_consumed_approvals ADD COLUMN IF NOT EXISTS "
+    "session_id VARCHAR(64) NOT NULL DEFAULT ''",
+    "ALTER TABLE agent_consumed_approvals ALTER COLUMN run_id DROP NOT NULL",
 )
 
 
