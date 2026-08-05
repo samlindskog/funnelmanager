@@ -310,6 +310,19 @@ async def post_message(
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
 
+    # Posting into a session is owner-only (a sanctioned destructive-ownership
+    # gate, like rename/delete — NOT a reads filter; cross-user *viewing* stays
+    # open). This keeps the session single-actor, which the approval flow already
+    # assumes: decide_approval lets only the session owner approve and binds the
+    # human_approval token to `session.owner`, while a turn runs under the
+    # poster's subject_token — so a non-owner poster whose turn hit the P4 gate
+    # would mint a token bound to the wrong subject and be rejected (fails closed).
+    # Attribution also stays honest: every message in a session is the owner's.
+    if principal.username != session.owner:
+        raise HTTPException(
+            status_code=403, detail="only the session owner may post to this session"
+        )
+
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=422, detail="message must not be empty")
