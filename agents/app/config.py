@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # replay before the in-memory registry prunes it.
     job_terminal_retention_seconds: float = 120.0
 
+    # How often the in-process schedule poller wakes to fire due schedules
+    # (seconds). Small enough that a one-shot ``at`` fires promptly, large enough
+    # that idle polling is cheap. Single-replica assumption (one poll loop).
+    schedule_poll_interval_seconds: float = 10.0
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

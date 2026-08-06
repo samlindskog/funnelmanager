@@ -40,9 +40,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 # Job types this producer publishes on /internal/jobs/v1/stream. A turn is one
-# short RUNNING→terminal job; a schedule (Phase 3) is a persistent SCHEDULED job.
-# An idle session is NOT a job (jobs surfaces running/long-running/scheduled work
-# only — never idle state).
+# short RUNNING→terminal job; a schedule is a persistent SCHEDULED job (a one-shot
+# fires RUNNING→COMPLETED, a recurring one stays SCHEDULED). An idle session is
+# NOT a job (jobs surfaces running/long-running/scheduled work only — never idle
+# state). See app.jobs_registry (producer) + app.scheduler (the poller that fires).
 JOB_TYPE_AGENT_TURN = "agent_turn"
 JOB_TYPE_AGENT_SCHEDULE = "agent_schedule"
 
@@ -81,7 +82,10 @@ APPROVAL_REJECTED = "rejected"
 # pending, so it can never be acted on again.
 APPROVAL_EXPIRED = "expired"
 
-# --- Schedule lifecycle (Phase 3 — table stubbed here, logic out of scope) --
+# --- Schedule lifecycle (row.status; distinct from the schedule's JOB status) --
+# A schedule row is `scheduled` while pending, `completed` once a one-shot has
+# fired (or a recurring cron has no further run), or `canceled` when cancelled via
+# the jobs control API. The DB-polling scheduler only ever selects `scheduled`.
 SCHEDULE_SCHEDULED = "scheduled"
 SCHEDULE_CANCELED = "canceled"
 SCHEDULE_COMPLETED = "completed"
@@ -177,12 +181,17 @@ class AgentMessage(Base):
 
 
 class AgentSchedule(Base):
-    """A persisted schedule for a session (Phase 3 — table stubbed now).
+    """A persisted schedule for a session — future/recurring runtime-agent work.
 
-    The scheduler loop + the internal ``schedule_agent_job`` tool that populate
-    and fire these are **out of scope for Phase 2**; the table exists so the
-    Phase 3 migration is additive and the derived "scheduled" session status has
-    a home to read from. No code writes these rows yet.
+    Written by the internal ``schedule_agent_job`` tool (``app.scheduler``) a
+    running turn calls, and fired by the in-process poller (``app.scheduler``):
+    when ``next_run_at`` arrives the poller spawns a fresh background turn on the
+    detached execution path. A one-shot (``spec = {"at": iso}``) completes after
+    its single firing; a recurring one (``spec = {"cron": expr}``) recomputes
+    ``next_run_at`` and stays ``scheduled``. Surfaces on ``/internal/jobs`` as an
+    ``agent_schedule`` job (id ``sched-<id>``) and drives the derived "scheduled"
+    session status. Attribution (Principle 3) mirrors the session's; never a read
+    filter (Principle 1). Cascade-deletes with its session.
     """
 
     __tablename__ = "agent_schedule"

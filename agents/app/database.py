@@ -80,15 +80,29 @@ _COLUMN_HEALS = (
 )
 
 
-async def _heal_schema(conn) -> None:
+async def _heal_schema() -> None:
     """Additively bring a pre-existing schema up to the current model. Scoped to
-    known-drifted columns; not a general schema sync. Best-effort per statement so
-    one missing base table never blocks the rest."""
+    known-drifted columns; not a general schema sync.
+
+    Each statement runs in its OWN transaction so a failing ALTER (e.g. dropping
+    NOT NULL on the legacy ``run_id`` column, which does NOT exist on a fresh
+    ``create_all`` schema) aborts only itself. Running them in the same
+    transaction as ``create_all`` would poison that transaction on the first such
+    error — Postgres aborts the whole tx — and roll every table back, so a fresh
+    DB would boot with **zero** tables. Isolating per statement keeps the heal
+    best-effort without ever endangering ``create_all``.
+    """
     for ddl in _COLUMN_HEALS:
         try:
-            await conn.execute(text(ddl))
-        except Exception:  # noqa: BLE001 — a table may not exist yet on first boot
+            async with engine.begin() as conn:
+                await conn.execute(text(ddl))
+        except Exception:  # noqa: BLE001 — a column/table may not exist; heal is best-effort
             pass
+
+
+async def _create_all() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def init_db() -> None:
@@ -96,13 +110,12 @@ async def init_db() -> None:
     from app import models  # noqa: F401
 
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            await _heal_schema(conn)
+        await _create_all()
     except Exception:
         # Most likely the database itself is missing (first boot of this
         # service on an existing Postgres volume) — create it and retry once.
         await _create_database_if_missing()
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            await _heal_schema(conn)
+        await _create_all()
+    # Heal AFTER (and separate from) create_all, per-statement isolated — never in
+    # the create_all transaction, or a failing heal would roll the tables back.
+    await _heal_schema()

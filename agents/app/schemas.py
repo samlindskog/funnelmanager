@@ -84,11 +84,30 @@ class PendingApprovalOut(BaseModel):
     created_at: datetime
 
 
+class ScheduleOut(BaseModel):
+    """A pending schedule for a session (Phase 3). Cross-user visible for reading;
+    controlled (cancelled) via the jobs service, keyed by ``sched-<id>``."""
+
+    id: str
+    session_id: str
+    owner: str
+    origin: str
+    actor: str
+    # {"at": iso} for a one-shot, {"cron": expr} for a recurring schedule.
+    spec: dict[str, Any] = Field(default_factory=dict)
+    prompt: str
+    status: str
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    created_at: datetime
+
+
 class SessionDetail(SessionSummary):
     context_watermark: int = 0
     last_error: str | None = None
     messages: list[MessageOut] = Field(default_factory=list)
     pending_approvals: list[PendingApprovalOut] = Field(default_factory=list)
+    schedules: list[ScheduleOut] = Field(default_factory=list)
 
 
 class SessionListResponse(BaseModel):

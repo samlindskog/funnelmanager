@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from fm_runtime import (
     ORIGIN_AGENT,
+    JobStatus,
     Principal,
     make_human_approval,
     require_principal,
@@ -56,6 +57,7 @@ from app.models import (
     AgentSession,
     PendingApproval,
 )
+from app import schedules as schedules_store
 from app.models_catalog import estimate_cost, list_models
 from app.runner import agents_actor, turn_runner
 from app.schemas import (
@@ -69,6 +71,7 @@ from app.schemas import (
     PendingApprovalOut,
     PostMessageRequest,
     RenameSessionRequest,
+    ScheduleOut,
     SessionDetail,
     SessionListResponse,
     SessionSummary,
@@ -129,6 +132,15 @@ def _pending_out(row: PendingApproval) -> PendingApprovalOut:
         approval_ref=row.approval_ref, action=row.action, estimate=row.estimate,
         threshold=row.threshold, unit=row.unit, message=row.message,
         tool_name=row.tool_name, status=row.status, created_at=row.created_at,
+    )
+
+
+def _schedule_out(row: AgentSchedule) -> ScheduleOut:
+    return ScheduleOut(
+        id=row.id, session_id=row.session_id, owner=row.owner, origin=row.origin,
+        actor=row.actor, spec=row.spec or {}, prompt=row.prompt, status=row.status,
+        next_run_at=row.next_run_at, last_run_at=row.last_run_at,
+        created_at=row.created_at,
     )
 
 
@@ -228,14 +240,22 @@ async def get_session(
             .order_by(PendingApproval.created_at.asc())
         )
     ).scalars().all()
-    scheduled = await _scheduled_session_ids(db)
+    session_schedules = (
+        await db.execute(
+            select(AgentSchedule)
+            .where(AgentSchedule.session_id == session_id,
+                   AgentSchedule.status == SCHEDULE_SCHEDULED)
+            .order_by(AgentSchedule.created_at.asc())
+        )
+    ).scalars().all()
 
     return SessionDetail(
-        **_summary(session, has_scheduled=session_id in scheduled).model_dump(),
+        **_summary(session, has_scheduled=bool(session_schedules)).model_dump(),
         context_watermark=session.context_watermark,
         last_error=session.last_error,
         messages=[_message_out(m) for m in messages],
         pending_approvals=[_pending_out(p) for p in pending],
+        schedules=[_schedule_out(s) for s in session_schedules],
     )
 
 
@@ -273,6 +293,28 @@ async def delete_session(
     active = session_turn_manager.active_turn_for_session(session_id)
     if active is not None:
         await turn_runner.control(active, "cancel")
+
+    # Terminalize any pending schedules on the jobs stream before the cascade
+    # delete removes their rows, so the jobs service doesn't keep showing a
+    # scheduled job for a deleted session (the DB-polling scheduler would already
+    # stop firing them once the rows are gone).
+    from app.jobs_registry import job_producer
+    from app.scheduler import agent_scheduler
+
+    pending_schedules = (
+        await db.execute(
+            select(AgentSchedule).where(
+                AgentSchedule.session_id == session_id,
+                AgentSchedule.status == SCHEDULE_SCHEDULED,
+            )
+        )
+    ).scalars().all()
+    for sched in pending_schedules:
+        agent_scheduler.forget_token(sched.id)
+        await job_producer.publish(
+            schedules_store.schedule_event(sched, JobStatus.CANCELED, exit_status="session_deleted")
+        )
+
     await db.delete(session)
     await db.commit()
     return Response(status_code=204)

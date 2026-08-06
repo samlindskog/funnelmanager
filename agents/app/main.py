@@ -12,13 +12,19 @@ from app.config import get_settings
 from app.database import engine, init_db
 from app.routers import internal_jobs, sessions
 from app.runner import turn_runner
+from app.scheduler import agent_scheduler
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
+    # Start the in-process schedule poller (single-replica): it reloads pending
+    # schedules from Postgres and fires due ones as background turns.
+    await agent_scheduler.start()
     yield
-    # Cancel any in-flight runtime-agent turns on shutdown so tasks don't leak.
+    # Stop the poller, then cancel any in-flight runtime-agent turns on shutdown
+    # so tasks don't leak.
+    await agent_scheduler.stop()
     await turn_runner.shutdown()
 
 

@@ -95,7 +95,11 @@ SYSTEM_PROMPT = (
     "read tools (list_searches, recent_leads, list_campaigns) to understand prior "
     "activity. Do not launch a duplicate of something already in flight — wait on "
     "or reference the existing job instead.\n"
-    "2. Then take the minimal set of tool actions that achieve the goal.\n"
+    "2. Then take the minimal set of tool actions that achieve the goal. If the "
+    "user asks for work to happen LATER or on a RECURRING schedule (e.g. 'every "
+    "Monday', 'in an hour', 'tomorrow at 9'), use the schedule_agent_job tool to "
+    "schedule it instead of trying to do it now — it runs in the background and "
+    "survives the tab closing, and surfaces as a job the user can cancel.\n"
     "3. Expensive actions are HUMAN-gated. You must NEVER set confirm=true and "
     "NEVER pass a human_approval token yourself — you cannot self-approve an "
     "expensive action. If a tool reports it needs human approval, this service "
@@ -340,6 +344,16 @@ class TurnRunner:
                 process_tool_call=self._make_process_tool_call(handle),
             )
 
+            # Local (non-MCP) scheduling tool: lets this turn schedule future/
+            # recurring work in the agents DB (no new mcp->agents edge). The
+            # expensive downstream calls the scheduled turn later makes stay
+            # P4-gated at the MCP layer — only the cheap schedule write is local.
+            from app.scheduler import build_schedule_tool
+
+            schedule_tool = build_schedule_tool(
+                session_id=session_id, ctx=handle.ctx, subject_token=subject_token
+            )
+
             context_window = context_window_for(model_name)
             start_seq = await next_seq(session_id)
             handle.start_seq = start_seq
@@ -364,6 +378,7 @@ class TurnRunner:
             agent = Agent(
                 build_model(settings, model_name),
                 toolsets=[toolset],
+                tools=[schedule_tool],
                 instructions=SYSTEM_PROMPT,
                 capabilities=[ProcessHistory(processor)],
                 name="funnel-runtime-agent",
