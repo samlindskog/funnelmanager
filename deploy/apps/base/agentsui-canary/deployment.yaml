@@ -50,10 +50,7 @@ metadata:
     version: canary
 spec:
   # Idle by default (see ACTIVATION above). build-canary.yml scales to 1.
-  # ACTIVATED (2026-08-06, manual pin canary-d0d72a29 — GitHub could not give the
-  # build-canary `pin` job a hosted runner; replicated its edits by hand). Retire
-  # via canary.sh (replicas 0 + drop the route entry) when done driving Phase 4.
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: agentsui-canary
