@@ -143,3 +143,10 @@ spec:
                   key: api-key
             - name: GRAPHITI_TELEMETRY_ENABLED
               value: "false"
+            - name: NEO4J_URI
+              value: bolt://knowledge-graph:7687
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-graph-auth
+                  key: NEO4J_PASSWORD

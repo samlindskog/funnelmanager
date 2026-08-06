@@ -1,0 +1,80 @@
+# Graphiti's graph store (knowledge-engine plan D2: Neo4j 5.26 community).
+# Single-instance StatefulSet on the mongo/milvus pattern; auth from the
+# operator-created `knowledge-graph-auth` Secret (key NEO4J_AUTH, format
+# "neo4j/<password>" — not in git). Only the knowledge service may reach 7687
+# (netpol/knowledge-graph.yaml). Sized modestly: heap 768m + pagecache 384m
+# under a 2560Mi limit (milvus-class); grow deliberately with the graph.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: knowledge-graph
+  labels:
+    app.kubernetes.io/name: knowledge-graph
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  serviceName: knowledge-graph
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge-graph
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: knowledge-graph
+        app.kubernetes.io/part-of: funnelmanager
+    spec:
+      serviceAccountName: knowledge-graph
+      nodeSelector:
+        role: worker
+      containers:
+        - name: neo4j
+          image: neo4j:5.26-community
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-graph-auth
+                  key: NEO4J_AUTH
+            - name: NEO4J_server_memory_heap_initial__size
+              value: 512m
+            - name: NEO4J_server_memory_heap_max__size
+              value: 768m
+            - name: NEO4J_server_memory_pagecache_size
+              value: 384m
+          ports:
+            - name: bolt
+              containerPort: 7687
+            - name: http
+              containerPort: 7474
+          livenessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 768Mi
+            limits:
+              cpu: 1000m
+              memory: 2560Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi

@@ -14,6 +14,10 @@ metadata:
 spec:
   hard:
     requests.cpu: "4"
-    requests.memory: 6Gi
-    limits.memory: 18Gi
+    # Raised 6→7Gi / 18→22Gi when knowledge + knowledge-db + knowledge-graph
+    # (Neo4j, 2560Mi limit) joined the namespace (knowledge-engine plan §9.4;
+    # operator-approved 2026-08-06, accepting burstable oversubscription on the
+    # two 8GB workers until worker3 lands).
+    requests.memory: 7Gi
+    limits.memory: 22Gi
     pods: "60"
