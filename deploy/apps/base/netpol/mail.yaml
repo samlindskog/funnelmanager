@@ -19,6 +19,20 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # knowledge's sync connectors (GET-only, service identity holding
+    # knowledge-internal; canary label shares the read path). NetworkPolicy is
+    # enforced on BOTH ends — without this ingress leg the knowledge sidecar's
+    # dial is refused and surfaces as HTTP 503 (ops-runbook §2).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge-canary
+      ports:
+        - protocol: TCP
+          port: 8004
     - from:
         - namespaceSelector:
             matchLabels:
