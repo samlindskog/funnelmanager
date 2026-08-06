@@ -22,6 +22,11 @@ spec:
       labels:
         app.kubernetes.io/name: knowledge-graph
         app.kubernetes.io/part-of: funnelmanager
+      annotations:
+        # Mesh-excluded like milvus (and CNPG): the Envoy inbound path breaks
+        # the Bolt handshake ("incomplete handshake response" even with
+        # appProtocol tcp). NetworkPolicy fences access to the knowledge pods.
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: knowledge-graph
       nodeSelector:
