@@ -240,14 +240,7 @@ async def get_session(
             .order_by(PendingApproval.created_at.asc())
         )
     ).scalars().all()
-    session_schedules = (
-        await db.execute(
-            select(AgentSchedule)
-            .where(AgentSchedule.session_id == session_id,
-                   AgentSchedule.status == SCHEDULE_SCHEDULED)
-            .order_by(AgentSchedule.created_at.asc())
-        )
-    ).scalars().all()
+    session_schedules = await schedules_store.list_scheduled_for_session(session_id)
 
     return SessionDetail(
         **_summary(session, has_scheduled=bool(session_schedules)).model_dump(),
@@ -301,14 +294,7 @@ async def delete_session(
     from app.jobs_registry import job_producer
     from app.scheduler import agent_scheduler
 
-    pending_schedules = (
-        await db.execute(
-            select(AgentSchedule).where(
-                AgentSchedule.session_id == session_id,
-                AgentSchedule.status == SCHEDULE_SCHEDULED,
-            )
-        )
-    ).scalars().all()
+    pending_schedules = await schedules_store.list_scheduled_for_session(session_id)
     for sched in pending_schedules:
         agent_scheduler.forget_token(sched.id)
         await job_producer.publish(
@@ -398,6 +384,16 @@ async def post_message(
         model=session.model,
         ctx=ctx,
         subject_token=principal.raw_token or None,
+    )
+
+    # Re-arm any re-auth-paused schedules for this session with the poster's fresh
+    # token (fix #3, P6). The owner reached this endpoint only because they still
+    # hold agents-access, so this ties a paused schedule's revival to the owner's
+    # CURRENT authorization — never to the service identity. Best-effort.
+    from app.scheduler import agent_scheduler
+
+    await agent_scheduler.rearm_paused_for_session(
+        session_id, principal.raw_token or None
     )
     return _ndjson_response(turn_id)
 

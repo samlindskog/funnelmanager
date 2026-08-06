@@ -92,12 +92,23 @@ def _parse_field(field: str, lo: int, hi: int, *, dow: bool = False) -> tuple[fr
             except ValueError as exc:
                 raise ValueError(f"invalid value {base!r}") from exc
 
-        # Day-of-week: accept 7 as Sunday and normalize to 0.
         if dow:
-            if start == 7:
-                start = 0
-            if end == 7:
-                end = 0
+            # Day-of-week: 7 is an alias for Sunday (0). Accept 0..7 as INPUT and
+            # expand the range in 0..7 space, THEN fold 7 -> 0 as a set member. This
+            # makes ranges that cross the Sunday boundary correct: 0-7 / 1-7 both mean
+            # every weekday, and 5-7 = {5,6,0} = Fri,Sat,Sun. (The old code normalized
+            # 7->0 on the endpoints *before* the range walk, so 0-7 collapsed to {0}
+            # — Sunday only, ~6x too rare — and 1-7 / 5-7 were rejected as
+            # 'range start after end'.)
+            if not (0 <= start <= 7 and 0 <= end <= 7):
+                raise ValueError(f"day-of-week value out of range [0,7] in {base!r}")
+            if start > end:
+                # A genuinely backwards range (e.g. 5-1) is still invalid.
+                raise ValueError(f"range start after end in {base!r}")
+            for value in range(start, end + 1, step):
+                values.add(0 if value == 7 else value)
+            continue
+
         if start > end:
             raise ValueError(f"range start after end in {base!r}")
         for value in range(start, end + 1, step):
@@ -185,7 +196,51 @@ def cron_next(expr: str | CronSpec, after: datetime) -> datetime | None:
     return None
 
 
-__all__ = ["CronSpec", "cron_is_valid", "cron_next", "parse_cron"]
+# How many consecutive fire times to sample when estimating a cron's tightest
+# interval. 32 is enough to capture any sub-hour cluster (e.g. a 0-4 * * * burst)
+# while staying cheap — each step is a bounded minute-walk.
+_MIN_INTERVAL_SAMPLES = 32
+
+
+def cron_min_interval_minutes(
+    expr: str | CronSpec, *, after: datetime | None = None, samples: int = _MIN_INTERVAL_SAMPLES
+) -> float | None:
+    """The smallest gap (in minutes) between consecutive fires this cron implies.
+
+    Used by the scheduler (P4 Denial-of-Wallet guard) to reject a recurring schedule
+    that can fire more often than a configured floor — a prompt-injected
+    ``* * * * *`` would otherwise plant an agent LLM turn every minute forever.
+
+    Samples the next ``samples`` fire times from ``after`` and returns the minimum
+    consecutive delta, so a burst pattern (e.g. ``0-4 9 * * *`` = five fires a minute
+    apart, then sparse) is caught by its tightest cluster, not its average. Returns
+    ``None`` when fewer than two fires exist in the bounded lookahead (a single/rare
+    expression has no sub-interval to bound).
+    """
+    spec = expr if isinstance(expr, CronSpec) else parse_cron(expr)
+    ref = after or datetime.now(timezone.utc)
+    fires: list[datetime] = []
+    cursor = ref
+    for _ in range(max(2, samples)):
+        nxt = cron_next(spec, cursor)
+        if nxt is None:
+            break
+        fires.append(nxt)
+        cursor = nxt
+    if len(fires) < 2:
+        return None
+    return min(
+        (fires[i + 1] - fires[i]).total_seconds() / 60.0 for i in range(len(fires) - 1)
+    )
+
+
+__all__ = [
+    "CronSpec",
+    "cron_is_valid",
+    "cron_min_interval_minutes",
+    "cron_next",
+    "parse_cron",
+]
 
 
 # --------------------------------------------------------------------------
@@ -211,9 +266,29 @@ if __name__ == "__main__":  # pragma: no cover
     _eq("0 0 * * 7", "2026-08-09T00:00:00+00:00")  # 7 == Sunday
     _eq("0 0 13 * 5", "2026-08-07T00:00:00+00:00")  # dom=13 OR dow=Fri -> Fri first
 
+    # dow 7<->0 boundary + Sun-crossing ranges (fix #4). _base is a Thursday, so the
+    # next midnight for any of these is Fri 2026-08-07 00:00 (Fri is in every set).
+    _eq("0 0 * * 0-7", "2026-08-07T00:00:00+00:00")  # 0-7 = every day (was {0} only)
+    _eq("0 0 * * 1-7", "2026-08-07T00:00:00+00:00")  # 1-7 = every day (was rejected)
+    _eq("0 0 * * 5-7", "2026-08-07T00:00:00+00:00")  # Fri,Sat,Sun (was rejected)
+    assert parse_cron("* * * * 0-7").dows == frozenset({0, 1, 2, 3, 4, 5, 6})
+    assert parse_cron("* * * * 1-7").dows == frozenset({0, 1, 2, 3, 4, 5, 6})
+    assert parse_cron("* * * * 5-7").dows == frozenset({5, 6, 0})  # Fri,Sat,Sun
+    assert parse_cron("* * * * 1-5").dows == frozenset({1, 2, 3, 4, 5})  # Mon-Fri intact
+    # A Sun-crossing dow range must actually match those weekdays.
+    _sat = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)  # a Saturday
+    assert cron_next("0 0 * * 5-7", _sat) == datetime(2026, 8, 9, 0, 0, tzinfo=timezone.utc)  # Sun
+
     assert cron_is_valid("0-30/10 * * * *")
     assert sorted(parse_cron("0-30/10 * * * *").minutes) == [0, 10, 20, 30]
     for bad in ("bad", "60 * * * *", "* * * *", "* * * * 8", "5-1 * * * *"):
         assert not cron_is_valid(bad), f"{bad!r} should be invalid"
+
+    # cron_min_interval_minutes (fix #2 DoW guard).
+    assert cron_min_interval_minutes("* * * * *", after=_base) == 1.0
+    assert cron_min_interval_minutes("*/15 * * * *", after=_base) == 15.0
+    assert cron_min_interval_minutes("0-4 9 * * *", after=_base) == 1.0  # burst caught
+    assert cron_min_interval_minutes("0 9 * * *", after=_base) == 1440.0  # daily
+    assert cron_min_interval_minutes("0,30 9 * * *", after=_base) == 30.0
 
     print("app.cron self-check: ALL OK")

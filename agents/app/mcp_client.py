@@ -84,6 +84,23 @@ def _jwt_exp(token: str) -> float | None:
         return None
 
 
+def subject_token_expired(token: str | None) -> bool:
+    """Whether a captured human subject token has GENUINELY expired (the drift-#9
+    'genuine expiry, not a transient blip' definition, in ONE place).
+
+    ``None``/empty ⇒ expired (there is no live human authorization to act under). A
+    token whose ``exp`` we cannot read ⇒ **not** expired (treat as transient, keep
+    the human subject). The scheduler (fix #3) uses this to decide whether a fired
+    schedule may run under the owner's authorization or must pause for re-auth; the
+    per-request auth below uses it to decide a mid-turn downgrade."""
+    if not token:
+        return True
+    exp = _jwt_exp(token)
+    if exp is None:
+        return False  # unreadable -> not provably expired -> transient
+    return time.time() >= (exp - _EXP_SKEW_SECONDS)
+
+
 class _AgentExchangeAuth(httpx.Auth):
     """httpx auth injecting a freshly-exchanged mcp-audience token on every
     request, keeping the human as subject and ``fm_origin=agent``.
@@ -98,12 +115,7 @@ class _AgentExchangeAuth(httpx.Auth):
         self._downgraded = False
 
     def _subject_expired(self) -> bool:
-        if not self._subject_token:
-            return True
-        exp = _jwt_exp(self._subject_token)
-        if exp is None:
-            return False  # unreadable -> not provably expired -> transient
-        return time.time() >= (exp - _EXP_SKEW_SECONDS)
+        return subject_token_expired(self._subject_token)
 
     async def _token(self) -> str:
         if self._subject_token and not self._downgraded:
@@ -184,4 +196,4 @@ def build_mcp_toolset(
     )
 
 
-__all__ = ["MCP_AUDIENCE", "build_mcp_toolset"]
+__all__ = ["MCP_AUDIENCE", "build_mcp_toolset", "subject_token_expired"]

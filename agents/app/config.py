@@ -71,8 +71,28 @@ class Settings(BaseSettings):
 
     # How often the in-process schedule poller wakes to fire due schedules
     # (seconds). Small enough that a one-shot ``at`` fires promptly, large enough
-    # that idle polling is cheap. Single-replica assumption (one poll loop).
+    # that idle polling is cheap. Multi-pod-safe: each firing is claimed atomically
+    # at the DB level (schedules.claim_due_schedule) so a shared agents-db never
+    # double-fires.
     schedule_poll_interval_seconds: float = 10.0
+
+    # P4 Denial-of-Wallet floor (fix #2): the minimum interval a RECURRING schedule
+    # may fire at. A recurring turn spins up an LLM + expensive MCP tool calls, and
+    # a prompt-injection payload (the agent reasons over untrusted Apollo/Gmail
+    # content) could otherwise plant a self-perpetuating ``* * * * *`` — ~1440
+    # turns/day/session, reloaded from Postgres on every restart. The schedule tool
+    # rejects any cron whose tightest implied interval is below this. NOTE: a full
+    # per-run cost budget / circuit breaker (cumulative Apollo credits + OpenAI $,
+    # OWASP LLM10) is the proper long-term control — TODO; a min-interval + a
+    # per-session recurring cap is the Phase-3 mitigation.
+    schedule_min_recurring_interval_minutes: int = 15
+    # Bound on how many ACTIVE (scheduled) recurring schedules one session may hold
+    # — a fire-rate cap complementing the min-interval (row-count alone is not a
+    # rate bound). Also a total-pending cap below.
+    schedule_max_recurring_per_session: int = 10
+    # Bound on total pending schedules per session (one-shot + recurring) so a
+    # looping agent can't flood the table with cheap one-shots.
+    schedule_max_pending_per_session: int = 25
 
     @property
     def cors_origin_list(self) -> list[str]:

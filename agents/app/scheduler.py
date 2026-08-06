@@ -21,13 +21,34 @@ Two parts, both single-replica (in-memory poller, like the leads/turn managers):
 
 Trace hygiene (LOAD-BEARING): the poll loop runs OUTSIDE any request, so it roots
 its own OTel trace; each fired turn additionally roots a fresh trace inside
-``runner._execute``. Detached-token posture (item 7): a fired turn reuses the
-captured human subject token **only while it is genuinely still valid** — the
-``mcp_client`` exchange auth downgrades to the agents service identity
-(client-credentials, ``origin=agent``) on genuine expiry, never a transient blip.
-The captured token is held **in memory only** (never persisted — a persisted
-bearer would be a leak), so after a restart a fired turn simply runs as the
-service identity, which is the correct detached-job fallback.
+``runner._execute``.
+
+Single-writer + multi-pod safety (fix #1): the captured human token and the
+in-process serial-chat guard are **per-pod** state, so the poll loop is designed to
+run on exactly ONE pod. It therefore starts only on the primary (non-``canary``)
+pod — the agents-canary shares this prod agents-db but must NOT run a competing
+scheduler (it exists to trace request flows, not to poll the schedule table). On
+top of that, each firing is CLAIMED atomically at the DB level
+(``schedules.claim_due_schedule``) BEFORE any turn spawns, as defense-in-depth for
+a rollout window where two pollers briefly overlap: exactly one pod wins each
+firing, so the atomic claim guarantees no double turn / double spend even then. (A
+cross-pod session-serial guarantee for two *different* schedules of one session is
+not attempted — that per-process limit is shared with the interactive post path.)
+
+Detached-token / de-auth posture (fix #3 + item 7): a fired turn reuses the
+captured human subject token, held **in memory only** (never persisted — a
+persisted bearer would be a leak). A scheduled firing must run under the owner's
+**live** authorization. If that token is genuinely expired OR absent (e.g. after a
+pod restart, when in-memory tokens are gone), the poller does **not** downgrade the
+firing to the agents service identity — that would let scheduled work OUTLIVE the
+owner's authorization (revoking their ``agents-access`` wouldn't stop it; short-
+lived tokens are the de-auth lever). Instead it **pauses** the schedule for re-auth
+(``SCHEDULE_PAUSED``, surfaced on the jobs stream) and stops firing it. A paused
+schedule is re-armed only when the owner returns and posts to the session — which
+they can do only while they still hold ``agents-access`` — so schedule liveness is
+tied to the owner's *current* grant. (Within a single already-authorized firing,
+``mcp_client`` may still downgrade to the service identity if the fresh token
+expires mid-turn; that is a bounded single job, not indefinite scheduled work.)
 """
 
 from __future__ import annotations
@@ -44,18 +65,15 @@ from opentelemetry import context as otel_context
 
 from app import schedules
 from app.config import get_settings
-from app.cron import cron_is_valid, cron_next
+from app.cron import cron_is_valid, cron_min_interval_minutes, cron_next
 from app.database import SessionLocal
 from app.jobs_registry import JobContext, job_producer
-from app.models import AgentSession
-from app.schedules import schedule_event
+from app.mcp_client import subject_token_expired
+from app.models import SCHEDULE_CANCELED, SCHEDULE_SCHEDULED, AgentSession
+from app.schedules import is_recurring, schedule_event
 from app.session_manager import session_turn_manager
 
 logger = logging.getLogger(__name__)
-
-# Cap on how many schedules a single session may have pending at once — a cheap
-# guard so a looping agent can't fill the table with schedules.
-_MAX_PENDING_PER_SESSION = 25
 
 
 def _utcnow() -> datetime:
@@ -138,12 +156,14 @@ class AgentScheduler:
                     logger.exception("agent scheduler: failed to fire schedule %s", row.id)
 
     async def _fire(self, row: Any, now: datetime) -> None:
-        """Fire one due schedule: spawn a background turn, then advance/complete
-        the schedule and publish its lifecycle onto the jobs stream."""
-        recurring = schedules.is_recurring(row.spec)
+        """Fire one due schedule: atomically CLAIM it (fix #1), then — only if the
+        owner's authorization is still live (fix #3) — spawn a background turn and
+        publish the schedule's lifecycle onto the jobs stream."""
+        recurring = is_recurring(row.spec)
 
-        # Defer if the session already has a live turn (a chat is serial). Retry on
-        # a later tick rather than dropping the firing.
+        # (1) Serial-chat guard: a chat is serial, so if THIS pod already has a live
+        # turn for the session, defer (retry next tick) rather than claim — the claim
+        # is the point of no return and must not be spent on a firing we can't run now.
         if session_turn_manager.active_turn_for_session(row.session_id) is not None:
             logger.info(
                 "agent scheduler: schedule %s deferred — session %s has a live turn",
@@ -151,42 +171,65 @@ class AgentScheduler:
             )
             return
 
+        # (2) AUTHORIZATION GATE (fix #3, P6): a scheduled firing must run under the
+        # owner's LIVE authorization, proxied by the captured human subject token.
+        # Absent (e.g. after a restart) or genuinely expired ⇒ do NOT fall back to the
+        # service identity (that would let scheduled work OUTLIVE the owner's
+        # authorization) — pause for re-auth and stop firing. Checked BEFORE the claim
+        # so a paused row is left un-advanced.
+        if subject_token_expired(self._tokens.get(row.id)):
+            await self._pause_for_reauth(row)
+            return
+
+        # (3) Compute the recurring next fire up front so the claim commits the exact
+        # transition atomically.
+        next_run_at: datetime | None = cron_next(row.spec["cron"], now) if recurring else None
+
+        # (4) ATOMIC CLAIM (multi-pod safe): exactly one pod wins this firing; a pod
+        # that lost the race — or a schedule cancelled between select and here — gets
+        # None and returns.
+        claimed = await schedules.claim_due_schedule(
+            row.id, now=now, recurring=recurring, next_run_at=next_run_at
+        )
+        if claimed is None:
+            logger.debug(
+                "agent scheduler: schedule %s not claimed (lost race / cancelled) — skip",
+                row.id,
+            )
+            return
+
+        # (5) Won the claim. Load the session; if it vanished (raced a delete),
+        # terminalize cleanly — cancel the DB row too (not just the jobs event), so a
+        # recurring row the claim just re-advanced can't keep becoming due if the
+        # cascade ever failed to remove it.
         async with SessionLocal() as db:
             session = await db.get(AgentSession, row.session_id)
         if session is None:
-            # Orphaned schedule (session gone despite the cascade) — cancel it so
-            # it stops firing and terminalizes on the jobs stream.
-            cancelled = await schedules.cancel_schedule(row.id)
             self.forget_token(row.id)
-            if cancelled is not None:
-                await job_producer.publish(
-                    schedule_event(cancelled, _J.CANCELED, exit_status="session_deleted")
-                )
+            canceled = await schedules.cancel_schedule(row.id)
+            await job_producer.publish(
+                schedule_event(canceled or claimed, _J.CANCELED, exit_status="session_deleted")
+            )
             return
 
+        # (6) Reserve the in-process turn buffer + spawn the background turn.
         turn_id = uuid.uuid4().hex
         try:
             await session_turn_manager.start_turn(row.session_id, turn_id)
         except RuntimeError:
-            # Raced a live turn between the check and here — defer to next tick.
-            logger.info(
-                "agent scheduler: schedule %s deferred — session %s turn race",
-                row.id, row.session_id,
+            # A live turn raced onto this session on THIS pod between (1) and here.
+            # The firing is already claimed (committed): a recurring schedule fires its
+            # next occurrence, a one-shot is spent. Republish lifecycle so jobs stays
+            # consistent, then skip — never double-run.
+            logger.warning(
+                "agent scheduler: schedule %s claimed but session %s gained a live "
+                "turn; skipping this firing", row.id, row.session_id,
             )
+            await self._republish_after_claim(claimed)
             return
 
-        # Claim the firing now that the turn buffer is ours (prevents re-selection
-        # on the next tick): advance a recurring schedule / complete a one-shot.
-        next_run_at: datetime | None = None
-        if recurring:
-            next_run_at = cron_next(row.spec["cron"], now)
-            await schedules.advance_recurring(row.id, fired_at=now, next_run_at=next_run_at)
-        else:
-            await schedules.mark_fired_oneshot(row.id, fired_at=now)
-
-        # Reuse the captured human token while it is still valid (mcp_client
-        # downgrades on genuine expiry). One-shot: pop (single firing). Recurring:
-        # keep until the schedule ends.
+        # Reuse the (validated-live) captured human token. One-shot: pop (single
+        # firing). Recurring: keep until the schedule ends.
         token = self._tokens.pop(row.id, None) if not recurring else self._tokens.get(row.id)
 
         ctx = JobContext(
@@ -199,7 +242,7 @@ class AgentScheduler:
         # single firing; a recurring one stays SCHEDULED (each firing spawns its own
         # agent_turn job, which is what the user watches).
         if not recurring:
-            await job_producer.publish(schedule_event(row, _J.RUNNING))
+            await job_producer.publish(schedule_event(claimed, _J.RUNNING))
 
         from app.runner import turn_runner  # local: runner imports this module lazily
 
@@ -216,21 +259,82 @@ class AgentScheduler:
             row.id, "recurring" if recurring else "once", turn_id, row.session_id,
         )
 
-        # Republish the schedule's own lifecycle.
-        fresh = await schedules.get_schedule(row.id)
-        if recurring:
-            if next_run_at is not None and fresh is not None:
-                await job_producer.publish(schedule_event(fresh, _J.SCHEDULED))
-            else:
-                # Cron exhausted — the row was completed by advance_recurring.
-                self.forget_token(row.id)
-                if fresh is not None:
-                    await job_producer.publish(
-                        schedule_event(fresh, _J.COMPLETED, exit_status="ok")
-                    )
+        # (7) Republish the schedule's own lifecycle (advanced / completed / canceled).
+        await self._republish_after_claim(claimed)
+
+    async def _republish_after_claim(self, claimed: Any) -> None:
+        """Republish a claimed schedule's lifecycle after firing, from its FRESH
+        re-read status (``claim_due_schedule`` re-reads post-commit):
+          * ``scheduled`` — a recurring row advanced to its next fire → SCHEDULED;
+          * ``canceled`` — a cancel raced into the claim→re-read window → CANCELED
+            (NOT COMPLETED — else the jobs stream would tell the user their just-
+            canceled schedule "completed successfully");
+          * else (``completed``) — a one-shot, or a recurring cron that just
+            exhausted → COMPLETED.
+        A terminal row drops its captured token."""
+        if claimed.status == SCHEDULE_SCHEDULED:
+            await job_producer.publish(schedule_event(claimed, _J.SCHEDULED))
+        elif claimed.status == SCHEDULE_CANCELED:
+            self.forget_token(claimed.id)
+            await job_producer.publish(
+                schedule_event(claimed, _J.CANCELED, exit_status="canceled")
+            )
         else:
-            if fresh is not None:
-                await job_producer.publish(schedule_event(fresh, _J.COMPLETED, exit_status="ok"))
+            self.forget_token(claimed.id)
+            await job_producer.publish(
+                schedule_event(claimed, _J.COMPLETED, exit_status="ok")
+            )
+
+    async def _pause_for_reauth(self, row: Any) -> None:
+        """P6 de-auth (fix #3): the owner's authorization can't be proven for this
+        firing (captured token absent/expired). Pause the schedule so the DB-polling
+        select stops firing it, drop the (dead) token, and surface it on the jobs
+        stream as needing re-auth. Re-armed only by the owner's next post."""
+        paused = await schedules.pause_for_reauth(row.id)
+        self.forget_token(row.id)
+        if paused is None:
+            return
+        logger.info(
+            "agent scheduler: schedule %s paused for re-auth (session %s) — owner "
+            "token expired/absent; re-arms when the owner returns to the session",
+            row.id, row.session_id,
+        )
+        await job_producer.publish(
+            schedule_event(paused, _J.PAUSED, extra_meta={"needs_reauth": True})
+        )
+
+    async def rearm_paused_for_session(self, session_id: str, token: str | None) -> None:
+        """Re-arm a session's re-auth-paused schedules with a fresh owner token
+        (fix #3). Called when the owner posts a message — which they can do only while
+        they still hold ``agents-access`` — so re-arming is implicitly gated by the
+        owner's CURRENT authorization. Adds one indexed lookup (session_id + paused
+        status) before the turn stream starts; a failure is swallowed so it can never
+        fail the post, but the (fast) lookup is awaited inline on purpose — a paused
+        schedule must be re-armed deterministically before the response returns, not
+        on a floating task that a shutdown could drop."""
+        if not token:
+            return
+        try:
+            rearmed = await schedules.rearm_paused(session_id, _utcnow())
+        except Exception:  # noqa: BLE001 — re-arm must never fail a message post
+            logger.exception(
+                "agent scheduler: failed to re-arm schedules for session %s", session_id
+            )
+            return
+        # Remember every token in ONE synchronous pass (no await between) BEFORE the
+        # first publish yields to the event loop — so a concurrent poller tick can
+        # never observe a re-armed (scheduled) row that has no token yet and re-pause
+        # it. (Recurring rows also get a future next_run_at, so only a one-shot's
+        # next_run_at=now could even be due; this closes that window entirely.)
+        for row in rearmed:
+            self.remember_token(row.id, token)
+        for row in rearmed:
+            await job_producer.publish(schedule_event(row, _J.SCHEDULED))
+        if rearmed:
+            logger.info(
+                "agent scheduler: re-armed %d paused schedule(s) for session %s",
+                len(rearmed), session_id,
+            )
 
 
 agent_scheduler = AgentScheduler()
@@ -282,6 +386,7 @@ def build_schedule_tool(*, session_id: str, ctx: JobContext, subject_token: str 
             }
 
         now = _utcnow()
+        settings = get_settings()
         if has_at:
             raw = at.strip()
             try:
@@ -308,6 +413,22 @@ def build_schedule_tool(*, session_id: str, ctx: JobContext, subject_token: str 
                     "error": "invalid_argument",
                     "message": f"`cron` is not a valid 5-field cron expression: {expr!r}.",
                 }
+            # P4 Denial-of-Wallet floor (fix #2): reject a cron that can fire more
+            # often than the configured minimum recurring interval. Each recurring
+            # firing spins up an LLM turn + expensive MCP tool calls, so a
+            # prompt-injected `* * * * *` (the agent reasons over untrusted
+            # Apollo/Gmail content) would otherwise plant a self-perpetuating turn
+            # every minute forever, reloaded from Postgres on every restart. A row
+            # cap bounds COUNT, not RATE — this bounds rate.
+            floor = settings.schedule_min_recurring_interval_minutes
+            tightest = cron_min_interval_minutes(expr, after=now)
+            if tightest is not None and tightest < floor:
+                return {
+                    "error": "invalid_argument",
+                    "message": f"That schedule can fire as often as every {tightest:g} "
+                    f"minute(s); the minimum recurring interval is {floor} minutes. "
+                    f"Use a less frequent cron (e.g. '*/{floor} * * * *' or '0 * * * *').",
+                }
             next_run_at = cron_next(expr, now)
             if next_run_at is None:
                 return {
@@ -316,14 +437,31 @@ def build_schedule_tool(*, session_id: str, ctx: JobContext, subject_token: str 
                 }
             spec = {"cron": expr}
 
-        # Cheap anti-abuse cap (a looping agent must not flood the table).
-        pending = await schedules.list_scheduled_for_session(session_id)
-        if len(pending) >= _MAX_PENDING_PER_SESSION:
+        # Anti-abuse caps (fix #2): a total cap so a looping agent can't flood the
+        # table with cheap one-shots, plus a tighter cap on ACTIVE RECURRING schedules
+        # per session (a recurring row is a standing spend source, so bound how many
+        # can run at once — complements the per-cron min-interval floor). Counts
+        # `scheduled` AND `paused` rows: a paused (re-auth) row still holds a slot, so
+        # counting only `scheduled` would let a create -> let-token-lapse -> create
+        # cycle grow the table unbounded.
+        pending = await schedules.list_active_for_session(session_id)
+        if len(pending) >= settings.schedule_max_pending_per_session:
             return {
                 "error": "limit_reached",
                 "message": f"This session already has {len(pending)} pending schedules "
-                f"(max {_MAX_PENDING_PER_SESSION}); cancel one before adding another.",
+                f"(max {settings.schedule_max_pending_per_session}); cancel one before "
+                "adding another.",
             }
+        if has_cron:
+            recurring_count = sum(1 for p in pending if is_recurring(p.spec))
+            if recurring_count >= settings.schedule_max_recurring_per_session:
+                return {
+                    "error": "limit_reached",
+                    "message": f"This session already has {recurring_count} active "
+                    f"recurring schedules (max "
+                    f"{settings.schedule_max_recurring_per_session}); cancel one before "
+                    "adding another.",
+                }
 
         row = await schedules.create_schedule(
             session_id=session_id,

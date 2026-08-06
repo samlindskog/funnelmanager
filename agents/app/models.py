@@ -86,9 +86,17 @@ APPROVAL_EXPIRED = "expired"
 # A schedule row is `scheduled` while pending, `completed` once a one-shot has
 # fired (or a recurring cron has no further run), or `canceled` when cancelled via
 # the jobs control API. The DB-polling scheduler only ever selects `scheduled`.
+# `paused` (P6 de-auth, fix #3): the captured human subject token has genuinely
+# expired / is absent (e.g. after a pod restart), so the firing can no longer run
+# under the owner's live authorization. Rather than downgrade to the service
+# identity — which would let scheduled work OUTLIVE the owner's authorization
+# (revoking their access wouldn't stop it) — the poller pauses the row. It is
+# re-armed only when the owner returns and posts to the session (implicitly gated
+# by their still holding `agents-access`), never automatically.
 SCHEDULE_SCHEDULED = "scheduled"
 SCHEDULE_CANCELED = "canceled"
 SCHEDULE_COMPLETED = "completed"
+SCHEDULE_PAUSED = "paused"
 
 
 def _utcnow() -> datetime:

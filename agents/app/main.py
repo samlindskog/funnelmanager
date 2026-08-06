@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from fm_runtime import anonymous, install, tracing_enabled
+from fm_runtime import anonymous, get_runtime_settings, install, tracing_enabled
 
 from app import models  # noqa: F401 — register ORM metadata
 from app.config import get_settings
@@ -14,16 +14,27 @@ from app.routers import internal_jobs, sessions
 from app.runner import turn_runner
 from app.scheduler import agent_scheduler
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
-    # Start the in-process schedule poller (single-replica): it reloads pending
-    # schedules from Postgres and fires due ones as background turns.
-    await agent_scheduler.start()
+    # Start the in-process schedule poller on the PRIMARY pod only. The poller's
+    # captured-token cache and serial-chat guard are per-pod state, so it must be a
+    # single writer: the agents-canary shares this prod agents-db but must NOT run a
+    # competing scheduler (it exists to trace request flows). Fail-safe — default
+    # variant is "stable", so an unset FM_DEPLOYMENT_VARIANT still runs the poller;
+    # only an explicit `canary` pod skips it. (The atomic DB claim in
+    # schedules.claim_due_schedule still guards a brief two-poller rollout overlap.)
+    is_canary = get_runtime_settings().deployment_variant == "canary"
+    if is_canary:
+        logger.info("agents: canary pod — schedule poller NOT started (single-writer)")
+    else:
+        await agent_scheduler.start()
     yield
-    # Stop the poller, then cancel any in-flight runtime-agent turns on shutdown
-    # so tasks don't leak.
+    # Stop the poller (no-op if it never started), then cancel any in-flight
+    # runtime-agent turns on shutdown so tasks don't leak.
     await agent_scheduler.stop()
     await turn_runner.shutdown()
 
