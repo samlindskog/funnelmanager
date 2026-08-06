@@ -42,9 +42,9 @@ spec:
             - name: NEO4J_server_memory_pagecache_size
               value: 384m
           ports:
-            - name: bolt
+            - name: tcp-bolt
               containerPort: 7687
-            - name: http
+            - name: tcp-http
               containerPort: 7474
           livenessProbe:
             tcpSocket:

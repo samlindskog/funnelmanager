@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,18 +15,24 @@ from app.sync import sync_manager
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
-    # Graph + LLM are OPTIONAL at startup (leads-Milvus tolerance pattern):
-    # a missing Neo4j or OPENAI_API_KEY degrades graph/fuzzy features with a
-    # clear reason in /stats, but never blocks the service — this keeps the
-    # prod rollout safe before the graph store's capacity work lands.
-    try:
-        await graph_service.ensure()
-    except RuntimeError:
-        pass  # reason is logged + surfaced via /stats
+
+    # Graph + LLM are OPTIONAL at startup (leads-Milvus tolerance pattern): a
+    # missing Neo4j or OPENAI_API_KEY degrades graph/fuzzy features with a
+    # clear reason in /stats, but must never block the service. Warm the graph
+    # in the BACKGROUND — awaiting it here holds up the HTTP server past the
+    # liveness probe window when the store is slow-failing (learned in prod).
+    async def _warm_graph() -> None:
+        try:
+            await graph_service.ensure()
+        except RuntimeError:
+            pass  # reason is logged + surfaced via /stats
+
+    warm = asyncio.create_task(_warm_graph())
     sync_manager.start()
     try:
         yield
     finally:
+        warm.cancel()
         await sync_manager.stop()
 
 

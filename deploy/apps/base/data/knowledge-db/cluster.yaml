@@ -23,6 +23,12 @@ spec:
     initdb:
       database: funnelmanager_knowledge
       owner: funnel
+      # Superuser-created at bootstrap: this CNPG image's pgvector control file
+      # is NOT marked trusted, so the app's own CREATE EXTENSION (owner role)
+      # is refused; with it pre-created the app's IF NOT EXISTS no-ops.
+      # (Applied manually on the already-bootstrapped prod cluster 2026-08-06.)
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector;
   storage:
     size: 5Gi
     storageClass: local-path

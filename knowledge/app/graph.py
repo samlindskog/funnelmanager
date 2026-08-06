@@ -94,8 +94,11 @@ class GraphService:
                     llm_client=llm,
                     embedder=embedder,
                 )
-                await graphiti.build_indices_and_constraints()
-            except Exception as exc:  # noqa: BLE001 — any driver/import/conn error means "degraded"
+                # Bounded: the neo4j driver retries internally for ~30s+ on an
+                # unreachable/misbehaving store — an unbounded await here would
+                # hang startup and every request that triggers a lazy ensure.
+                await asyncio.wait_for(graphiti.build_indices_and_constraints(), timeout=25)
+            except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 — any driver/import/conn/timeout error means "degraded"
                 self._note_failure(f"graph store unavailable: {exc}")
                 raise RuntimeError(self.unavailable_reason) from exc
             self._graphiti = graphiti

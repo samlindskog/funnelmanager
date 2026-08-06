@@ -9,6 +9,9 @@ spec:
   selector:
     app.kubernetes.io/name: knowledge-graph
   ports:
-    - name: bolt
+    # Explicit TCP: Istio protocol sniffing garbles the Neo4j Bolt handshake
+    # ("incomplete handshake response"); tcp-* naming + appProtocol disable it.
+    - name: tcp-bolt
+      appProtocol: tcp
       port: 7687
       targetPort: 7687
