@@ -117,7 +117,7 @@ images:
   # while `replicas: 0`.
   - name: ghcr.io/samlindskog/funnelmanager/agentsui-canary
     newName: ghcr.io/samlindskog/funnelmanager/agentsui
-    newTag: canary-PINME
+    newTag: canary-d0d72a29
 
 generatorOptions:
   disableNameSuffixHash: true

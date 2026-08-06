@@ -4,6 +4,7 @@ resources:
   - gateway.yaml
   - httproutes.yaml
   - referencegrants.yaml
+  - canary/agentsui-canary.yaml
   - canary/agents-canary.yaml
   # CANARY ROUTES — "canary-if-exists-else-stable" (the idle-canary 503 fix).
   # Each `canary/<svc>-canary.yaml` is a SEPARATE HTTPRoute for the cookie-marked
