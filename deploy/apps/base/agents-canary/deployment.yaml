@@ -185,6 +185,12 @@ spec:
             # Does NOT change identity or the service name.
             - name: FM_DEPLOYMENT_VARIANT
               value: canary
+            # Force the schedule poller ON for this canary (default "auto" skips it
+            # on a canary). Safe while stable runs pre-scheduling code so no other
+            # pod competes on the shared agents-db; lets us drive a scheduling E2E.
+            # Revert to unset/"auto" once scheduling ships to stable.
+            - name: SCHEDULER_ENABLED
+              value: "on"
             # The mesh validates JWTs (RequestAuthentication); the app trusts them.
             - name: FM_JWT_VERIFY
               value: "false"

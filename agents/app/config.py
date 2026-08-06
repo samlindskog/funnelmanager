@@ -94,6 +94,25 @@ class Settings(BaseSettings):
     # looping agent can't flood the table with cheap one-shots.
     schedule_max_pending_per_session: int = 25
 
+    # Single-writer control for the schedule poll loop (its captured-token cache +
+    # serial-chat guard are per-pod, so exactly one pod must run it). Env
+    # SCHEDULER_ENABLED:
+    #   "auto" (default) — run on every pod EXCEPT an explicit canary
+    #     (FM_DEPLOYMENT_VARIANT=canary), so the canary sharing the prod agents-db
+    #     never competes with stable.
+    #   "on"  — force the poller on (e.g. to drive a scheduling E2E on the canary
+    #     while stable has no scheduler yet — safe only when no OTHER pod runs it).
+    #   "off" — never run the poller here.
+    scheduler_enabled: str = "auto"  # auto | on | off
+
+    def should_run_scheduler(self, *, is_canary: bool) -> bool:
+        mode = (self.scheduler_enabled or "auto").strip().lower()
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        return not is_canary  # auto
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

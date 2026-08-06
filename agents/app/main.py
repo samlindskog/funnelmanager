@@ -28,10 +28,11 @@ async def lifespan(_: FastAPI):
     # only an explicit `canary` pod skips it. (The atomic DB claim in
     # schedules.claim_due_schedule still guards a brief two-poller rollout overlap.)
     is_canary = get_runtime_settings().deployment_variant == "canary"
-    if is_canary:
-        logger.info("agents: canary pod — schedule poller NOT started (single-writer)")
-    else:
+    if get_settings().should_run_scheduler(is_canary=is_canary):
         await agent_scheduler.start()
+        logger.info("agents: schedule poller started (variant=%s)", "canary" if is_canary else "stable")
+    else:
+        logger.info("agents: schedule poller NOT started (single-writer; variant=%s)", "canary" if is_canary else "stable")
     yield
     # Stop the poller (no-op if it never started), then cancel any in-flight
     # runtime-agent turns on shutdown so tasks don't leak.
