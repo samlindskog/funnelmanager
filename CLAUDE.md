@@ -385,6 +385,17 @@ npm run lint    # oxlint
 
 There is **no test suite** in this repo (no pytest/vitest) and no Python linter is configured. Verify backend changes by running the service and exercising the flow.
 
+## Working-tree safety under concurrent agents (directive)
+
+The repository working tree and `.git` HEAD/index are **shared by every agent and background job in a session**. A branch switch, `reset`, `rebase`, `cherry-pick`, `merge`, or `stash pop` in the shared checkout rewrites files another job may be mid-edit on — non-deterministically reverting/clobbering uncommitted work (this has happened here). Follow these rules so multiple agents can run safely; they are lightweight and behavioral (no locks):
+
+- **Never mutate HEAD/index across branches in the shared checkout while any other agent or background job may be active.** Do **not** run `git checkout <branch>` / `git switch`, `git reset --hard`, `rebase`, `cherry-pick`, `merge`, or `stash pop` in the main working tree. Safe on the *current* branch: `status`, `log`, `diff`, `show`, `add`, `commit`.
+- **Do all cross-branch work in a throwaway `git worktree`, never by switching the shared tree.** e.g. to land a commit on `main` from a feature branch — instead of the `checkout main → cherry-pick → checkout back` dance — use:
+  `git worktree add "$WT" -B main origin/main && git -C "$WT" cherry-pick <sha> && git -C "$WT" push origin main; git worktree remove "$WT"` (WT under a scratch/tmp path). The shared tree stays on its branch, untouched.
+- **When spawning multiple agents that WRITE files, isolate each** — pass `isolation: "worktree"` to the Agent/Workflow tool (each gets its own auto-cleaned worktree) **or** run them sequentially. Never let two writers share the tree; read-only agents (reviewers, Explore) may share freely.
+- **Commit early and often on your own branch** — a cheap WIP commit makes in-progress work unclobberable; squash/amend later. Prefer this over leaving edits uncommitted while other jobs run.
+- Worktrees live under a scratch path (not the repo). For SPA builds, symlink `node_modules` into the worktree (do not `git add` the symlink); `git worktree remove` when done.
+
 ## Conventions worth knowing
 
 - Backend imports are absolute from the `app` package (`from app.routers import ...`), run with the service dir as CWD.
