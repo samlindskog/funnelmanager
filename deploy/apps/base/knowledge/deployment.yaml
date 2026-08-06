@@ -6,7 +6,12 @@ metadata:
     app.kubernetes.io/name: knowledge
     app.kubernetes.io/part-of: funnelmanager
 spec:
-  replicas: 1
+  # HELD at 0 (2026-08-06): the knowledge image is not yet built/published to GHCR
+  # (no build-images entry) and Neo4j + worker3 capacity are not yet stood up, so a
+  # replicas:1 here ImagePullBackOffs and STALLS Flux apps-prod (health check fails).
+  # Idled to keep prod GitOps green; restore to 1 when the image is published and the
+  # Neo4j StatefulSet + capacity are up (i.e. when deploying knowledge properly).
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: knowledge
