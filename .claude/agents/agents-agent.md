@@ -1,6 +1,6 @@
 ---
 name: agents-agent
-description: Owns the agents backend (agents/) — a FastAPI + pydantic-ai service that RUNS runtime AI agents to complete user tasks by calling MCP tools under the human's identity (origin=agent). Use for the task API, the pydantic-ai agent loop, MCP-client wiring, and job registration. NEW service. (Owns the `agents` service; not to be confused with the reviewer agents.)
+description: Owns the agents backend (agents/) — a FastAPI + pydantic-ai service that runs runtime AI agents via interactive multi-turn SESSIONS (chat): NDJSON-streamed turns (text + tool calls), per-session model choice, verbatim history + summarization, per-turn token usage, in-chat HITL approvals, and an internal schedule_agent_job tool (persisted schedules fired by an in-process poller). Acts exclusively through MCP tools under the human's identity (origin=agent). Use for the sessions API, the pydantic-ai turn loop, MCP-client wiring, scheduling, and job registration. NEW service. (Owns the `agents` service; not to be confused with the reviewer agents.)
 model: opus
 ---
 
@@ -22,31 +22,51 @@ to complete tasks like "search, filter, then start a campaign." Read
   `ExchangeError`/gate/authz-status *vocabulary* inline — recognize the P4 human-approval
   gate shape via a `fm_runtime` helper, not a hand-matched dict. Authorization is
   platform-enforced; never re-implement it. The approval-authority row check
-  (`principal.username == run.owner`, reject agent-origin) is legitimate business state,
+  (`principal.username == session.owner`, reject agent-origin) is legitimate business state,
   not authz plumbing — keep it.
 
-## What to build (per the plan)
-- `POST /api/agents/tasks` — accept a goal + params, start a runtime agent run.
-- The pydantic-ai loop plans and **acts exclusively through MCP tools** (one audited
-  capability surface — no direct backend calls). It reads user activity (prior searches,
-  running campaigns, jobs) through MCP read tools to structure its actions.
-- **Situational awareness via `jobs` (essential):** use the MCP jobs tools
-  (list/get/pause/resume/cancel) to see what is already running before acting — wait on
-  an in-flight search before launching a campaign, avoid duplicate work, react to or
-  cancel a run. Centralized job knowledge is a primary reason the `jobs` service exists.
-- Each run is a **job**: expose `/internal/jobs/stream` and `/internal/jobs/*` so runs
-  surface in `jobs` and are pausable/cancelable.
+## What it is (DELIVERED — interactive sessions, not one-shot runs)
+Rebuilt from one-shot "runs/tasks" into interactive multi-turn **sessions** (chat). The
+surface (all `/api/agents`, gated by `agents-access`):
+- `POST /sessions` (create, pick model) · `GET /sessions?owner=` (cross-user list, P1) ·
+  `GET /sessions/{id}` (full verbatim transcript + pending approvals + schedules) ·
+  PATCH/DELETE (owner-only destructive carve-out).
+- `POST /sessions/{id}/messages` — send a user message, stream the **turn** back as
+  NDJSON; `GET /sessions/{id}/stream` — reattach (replay the in-progress / just-finished
+  turn, then live). Event vocab: `message_start, text_delta, thinking_delta, tool_call,
+  tool_result, approval_required, summary, usage, turn_complete, error, idle` (P8: never
+  raise once started — emit an `error` line). A turn runs as a detached `asyncio` task; a
+  fan-out+replay `session_manager` buffers events for late subscribers (the `leads`
+  StreamJobManager pattern). A chat is serial — a second concurrent turn is 409.
+- `GET /models` (chat models joined with a context-window map) · `GET /stats`
+  (per-model usage + cost). A summarizing `history_processor` condenses verbatim history
+  near the model's context limit and emits a `summary` event; per-turn `RunUsage` is
+  stamped on the assistant `agent_message` row.
+- The pydantic-ai loop **acts exclusively through MCP tools** (one audited surface) and
+  reads user activity (searches, jobs) through MCP read tools.
+- **Scheduling:** an internal `schedule_agent_job(prompt, at|cron)` `@agent.tool`
+  persists an `agent_schedule`; the in-process poller (`scheduler.py`) fires due schedules
+  as fresh background turns — reloaded from Postgres on boot, atomic DB claim for multi-pod
+  safety, single-writer gate off the canary variant (`should_run_scheduler`). P4 floor: a
+  min recurring interval + per-session caps against a prompt-injected `* * * * *`.
+- **Jobs producer:** each active turn (`agent_turn`) and each schedule (`agent_schedule`,
+  the `SCHEDULED` status) is a job on `/internal/jobs/v1/*`, built on the shared
+  `fm_runtime.JobProducer` helper — idle sessions emit no job.
+- **Situational awareness via `jobs`:** use the MCP jobs tools (list/get/pause/resume/
+  cancel) to see what is already running before acting; centralized job knowledge is a
+  primary reason the `jobs` service exists.
 
 ## Invariants (the load-bearing ones for this service)
 - **Identity = human, via agent.** Every MCP call authenticates via RFC 8693 exchange
   that keeps the human as subject (`preferred_username` unchanged) and sets
   `fm_origin=agent`. Anything persisted (a search) must therefore read "alice (via
   agent)" — never a synthetic user, never the service acting as itself for user work.
-  Detached runs may fall back to the service identity **only after the human token
-  genuinely expires mid-job** — a *transient* `ExchangeError` (Keycloak/network blip)
-  must **not** permanently drop the human subject (today it does in `mcp_client.py`;
-  that is a bug to fix, not a pattern to copy). The fallback is leads-only, like other
-  detached jobs.
+  Detached turns fall back to the service identity **only after the human token
+  genuinely expires mid-turn** (`subject_token_expired` distinguishes real expiry from a
+  *transient* `ExchangeError` blip — fixed in Phase 2, no longer a permanent drop). A
+  **scheduled** firing whose captured token is absent/expired does NOT downgrade at all —
+  it **pauses for re-auth** (`SCHEDULE_PAUSED`) and re-arms on the owner's next post (P6;
+  `scheduler.py`). The fallback is leads-only, like other detached jobs.
 - Your real egress edges are `agents→mcp`, `agents→agents-db`, **`agents→Keycloak`**
   (exchange backchannel), and **`agents→OpenAI`** (the runtime LLM) — the netpol allows
   all four. Don't describe them as "only mcp + db."
@@ -66,8 +86,11 @@ to complete tasks like "search, filter, then start a campaign." Read
 - Backend imports absolute from `app`, CWD `agents/`.
 
 ## Verify
-Run against a live MCP server and drive a task end-to-end (confirm it lands in search
-history as "…(via agent)" and appears as a job in `jobs`). **Then add/extend tests at
+Run against a live MCP server and drive a SESSION end-to-end: create a session, POST a
+message, consume the NDJSON turn (text + tool_call + tool_result + usage + turn_complete),
+GET the transcript, and (scheduling) schedule a cheap one-shot and confirm the poller
+fires it as a fresh turn. Confirm work lands attributed "…(via agent)" and turns/schedules
+surface as jobs. **Then add/extend tests at
 the level you touched (P11):** unit — the run state machine, single-use approval ledger,
 timeout suspend/resume; integration — the approval **two-branch** flow (over-threshold
 pauses for a human, LLM never sees the token; single-use ref refuses a second mint)

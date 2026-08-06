@@ -1,6 +1,6 @@
 ---
 name: agentsui-agent
-description: Owns the agents frontend (agentsui/) — standalone React 19 + MUI 9 + Vite 8 + TS app served at /agents/, for starting runtime AI-agent tasks and watching their progress. Use for the agents UI. Mirrors mailui's standalone structure; shares no code with frontend/ or mailui/. NEW service.
+description: Owns the agents frontend (agentsui/) — standalone React 19 + MUI 9 + Vite 8 + TS chatbot app served at /agents/: a session list (status chips + cross-user owner select) and a chat view with live NDJSON-streamed turns (text + tool calls + tool results + summaries), inline HITL approval cards, a per-session model dropdown, and a token-usage panel. Use for the agents UI. Mirrors mailui's standalone structure; shares no code with frontend/ or mailui/. NEW service.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 ---
@@ -18,12 +18,26 @@ This is your delta.
   Remove the vestigial `user.role` field carried from the hub if it stays unread (dead
   plumbing, not a gate).
 
-## What to build (per the plan)
-- Start a task (goal + params), list runs, watch progress **by polling the `agents`
-  backend** (`GET /api/agents/tasks/{id}` — the browser cannot reach the internal/loopback
-  `jobs` service; `agents` re-surfaces run state as a jobs producer), view results/history.
-  "Live" is interval polling, not an NDJSON stream — don't promise streaming you don't
-  have. Cross-user visible (principle 1) — show everyone's runs, attributed.
+## What it is (DELIVERED — a sessions chatbot)
+Rebuilt from the one-shot "runs/tasks" UI into an interactive **chatbot** over the
+`agents` sessions API:
+- **Session list** — status-chipped rows (`running/paused/scheduled/error/idle`) +
+  timestamps, a mailui-style cross-user **owner `<select>`** (All / Me / owners), a
+  new-session dialog (model pick), `Load more` pagination. Cross-user visible (P1).
+- **Chat view** — a **live NDJSON turn stream** (`stream.ts`: ReadableStream reader +
+  line buffering) rendering assistant text, tool_call/tool_result blocks and `summary`
+  notices; **reattach on open** via `GET /sessions/{id}/stream` (status-gated to
+  running/paused so it can't duplicate persisted history); a composer (disabled during a
+  turn — POST is 409 if one runs); a **model dropdown**; a **usage panel** (per-response /
+  current-context / cumulative + per-model stats). It IS NDJSON streaming now — the old
+  "interval polling, don't promise streaming" note no longer applies.
+- **In-chat HITL** — `approval_required` events + persisted `pending_approvals` render as
+  **approval cards**; Approve/Reject show only for the owner and POST to the approvals
+  endpoint. The **server is the gate** — the client cannot self-approve; buttons are
+  display-only. Pure view logic (`transcript.ts` reducer, `status.ts`) is factored out
+  unit-testably (P11).
+- An in-stream `{type:"error"}` (or a dropped reader) becomes a transcript **error line**,
+  never a fatal throw — the SPA half of P8's never-again-fatal contract.
 
 ## Invariants
 - Mirror `mailui`: Vite `base:'/agents/'`, own container, **same-origin serving** so it
