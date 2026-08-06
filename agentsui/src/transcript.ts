@@ -121,8 +121,10 @@ export function applyEvent(items: TranscriptItem[], event: TurnEvent): Transcrip
   switch (event.type) {
     case 'message_start': {
       const text = String((event as { text?: unknown }).text ?? '')
-      // Dedupe the user echo (the composer optimistically adds it, and a reattach
-      // may replay it) — skip if the last item is already this user message.
+      // Defensive dedup: the live stream is the ONLY source of the in-flight
+      // user echo (the composer does not optimistically push it), so skip only
+      // when the last live item is already this exact user message — guarding
+      // against a stream that redundantly replays a user message_start.
       if (last && last.kind === 'user' && last.text === text) return items
       return [...items, { key: nextKey(), kind: 'user', text }]
     }
@@ -174,18 +176,17 @@ export function applyEvent(items: TranscriptItem[], event: TurnEvent): Transcrip
 }
 
 /** Convert a live `approval_required` event into a PendingApproval-shaped row so
- * the same inline card renders for both live and persisted approvals. */
+ * the same inline card renders for both live and persisted approvals. Only the
+ * fields the card actually reads are populated; the persisted-only attribution
+ * fields (`turn_id`/`subject`/`approval_ref`) are simply absent for a live
+ * approval — never read in the UI, so they stay optional on the type. */
 export function approvalFromEvent(
   event: Extract<TurnEvent, { type: 'approval_required' }>,
   sessionId: string,
-  owner: string,
 ): PendingApproval {
   return {
     id: event.approval_id,
     session_id: sessionId,
-    turn_id: '',
-    subject: owner,
-    approval_ref: '',
     action: event.action,
     estimate: event.estimate,
     threshold: event.threshold,
@@ -207,6 +208,23 @@ const USAGE_KEYS = [
   'total_tokens',
   'cache_read_tokens',
 ] as const
+
+/** Sum two usage stats (token keys + cost), dropping zero-valued keys. Shares
+ * the single `USAGE_KEYS` list with `cumulativeUsage` so the token-key set has
+ * one source of truth. Returns `a` unchanged when `b` is absent. */
+export function mergeUsage(a: UsageStat, b: UsageStat | null | undefined): UsageStat {
+  if (!b) return a
+  const out: Record<string, number> = {}
+  for (const key of USAGE_KEYS) {
+    const sum = Number(a[key] ?? 0) + Number(b[key] ?? 0)
+    if (sum) out[key] = sum
+  }
+  const result = out as UsageStat
+  const costA = typeof a.cost === 'number' ? a.cost : 0
+  const costB = typeof b.cost === 'number' ? b.cost : 0
+  if (typeof a.cost === 'number' || typeof b.cost === 'number') result.cost = costA + costB
+  return result
+}
 
 /** Sum per-turn usage across a session's persisted messages (cumulative). */
 export function cumulativeUsage(messages: MessageOut[]): UsageStat {

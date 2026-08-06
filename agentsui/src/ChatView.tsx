@@ -47,6 +47,7 @@ import {
   approvalFromEvent,
   cumulativeUsage,
   lastTurnUsage,
+  mergeUsage,
   messagesToTranscript,
   type TranscriptItem,
 } from './transcript'
@@ -63,21 +64,6 @@ import type {
 } from './types'
 
 type Notify = (text: string, severity: 'success' | 'error') => void
-
-function mergeUsage(a: UsageStat, b: UsageStat | null | undefined): UsageStat {
-  if (!b) return a
-  const keys = ['requests', 'tool_calls', 'input_tokens', 'output_tokens', 'total_tokens', 'cache_read_tokens'] as const
-  const out: Record<string, number> = {}
-  for (const key of keys) {
-    const sum = Number(a[key] ?? 0) + Number(b[key] ?? 0)
-    if (sum) out[key] = sum
-  }
-  const result = out as UsageStat
-  const costA = typeof a.cost === 'number' ? a.cost : 0
-  const costB = typeof b.cost === 'number' ? b.cost : 0
-  if (typeof a.cost === 'number' || typeof b.cost === 'number') result.cost = costA + costB
-  return result
-}
 
 // --- transcript item rendering ---------------------------------------------
 
@@ -314,6 +300,7 @@ export function ChatView({
   const [live, setLive] = useState<TranscriptItem[]>([])
   const [pending, setPending] = useState<PendingApproval[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [turnError, setTurnError] = useState(false)
   const [input, setInput] = useState('')
   const [deciding, setDeciding] = useState<string | null>(null)
 
@@ -335,16 +322,29 @@ export function ChatView({
   const status = detail?.status ?? session.status
   const model = detail?.model ?? session.model
 
+  // The header chip tracks LIVE turn state (matching the transcript), not just
+  // the status captured at fetch: running while a stream is active, error on a
+  // failed turn, paused while an approval blocks the turn, else the derived
+  // status (which turn_complete falls back to, since streaming/turnError clear).
+  const displayStatus = streaming
+    ? 'running'
+    : turnError
+      ? 'error'
+      : pending.length > 0
+        ? 'paused'
+        : status
+
   const consume = useCallback(
     async (response: Response, abort: AbortController) => {
       setStreaming(true)
+      setTurnError(false)
       try {
         for await (const raw of readNdjson(response)) {
           if (abort.signal.aborted) break
           const event = raw as TurnEvent
           if (event.type === 'idle') continue
           if (event.type === 'approval_required') {
-            const card = approvalFromEvent(event as Extract<TurnEvent, { type: 'approval_required' }>, sessionId, owner)
+            const card = approvalFromEvent(event as Extract<TurnEvent, { type: 'approval_required' }>, sessionId)
             setPending((prev) => (prev.some((p) => p.id === card.id) ? prev : [...prev, card]))
           } else if (event.type === 'usage') {
             setLastUsage(event as UsageStat)
@@ -355,19 +355,29 @@ export function ChatView({
               setLiveCumulative((prev) => mergeUsage(prev, usage))
             }
             setPending([])
+          } else if (event.type === 'error') {
+            // A turn that ends via an in-stream error resolves this turn's pending
+            // approvals — never leave a stale card that would 409/404 on Approve.
+            setLive((prev) => applyEvent(prev, event))
+            setPending([])
+            setTurnError(true)
           } else {
             setLive((prev) => applyEvent(prev, event))
           }
         }
       } catch (err) {
         if (!abort.signal.aborted) {
+          // The turn ended by a thrown error mid-stream — same fail-closed cleanup:
+          // surface the error line and drop any pending approval for the dead turn.
           setLive((prev) => applyEvent(prev, { type: 'error', detail: errorMessage(err) }))
+          setPending([])
+          setTurnError(true)
         }
       } finally {
         if (!abort.signal.aborted) setStreaming(false)
       }
     },
-    [sessionId, owner],
+    [sessionId],
   )
 
   // Load the session on open; reattach to an in-flight turn (running/paused).
@@ -382,6 +392,7 @@ export function ChatView({
     setLastUsage(null)
     setLiveCumulative({})
     setStreaming(false)
+    setTurnError(false)
     setInput('')
     ;(async () => {
       try {
@@ -421,9 +432,12 @@ export function ChatView({
     const content = input.trim()
     if (!content || streaming || !isOwner) return
     const abort = new AbortController()
-    abortRef.current?.abort()
+    abortRef.current?.abort() // cancel any prior in-flight turn
     abortRef.current = abort
     setInput('')
+    // A new turn supersedes any prior turn's pending approval — clear stale cards
+    // so the owner can't Approve an action whose turn no longer exists (409/404).
+    setPending([])
     try {
       const response = await postMessage(sessionId, content, abort.signal)
       await consume(response, abort)
@@ -506,9 +520,9 @@ export function ChatView({
             </Typography>
             <Chip
               data-testid="agents-session-status"
-              label={status}
+              label={displayStatus}
               size="small"
-              color={STATUS_COLOR[status] ?? 'default'}
+              color={STATUS_COLOR[displayStatus] ?? 'default'}
               variant="outlined"
             />
           </Stack>

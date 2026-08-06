@@ -48,9 +48,11 @@ export interface MessageOut {
 export interface PendingApproval {
   id: string
   session_id: string
-  turn_id: string
-  subject: string
-  approval_ref: string
+  // Persisted-only attribution fields — present on the backend `PendingApprovalOut`
+  // but never read by the UI, so optional (a live approval omits them).
+  turn_id?: string
+  subject?: string
+  approval_ref?: string
   action: string
   estimate: number
   threshold: number | null
