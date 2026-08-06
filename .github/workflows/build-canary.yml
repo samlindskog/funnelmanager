@@ -74,6 +74,7 @@ on:
           - mcp
           - jobs
           - agents
+          - knowledge
       ref:
         description: Git branch or SHA to build the canary image from.
         required: true
@@ -106,7 +107,7 @@ jobs:
           # apply. Keep this enumeration in sync with the `service` input options.
           case "$SVC" in
             frontend|searchui|mailui|agentsui|search|mail|agents) rc=gateway ;;
-            leads|mcp|jobs) rc=eastwest ;;
+            leads|mcp|jobs|knowledge) rc=eastwest ;;
             *) echo "::error::unknown service '$SVC' (no routing class)"; exit 1 ;;
           esac
           dep="deploy/apps/base/${SVC}-canary/deployment.yaml"
@@ -208,7 +209,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ inputs.service }}" in
-            search|leads|mcp|mail|jobs|agents)
+            search|leads|mcp|mail|jobs|agents|knowledge)
               echo "context=." >> "$GITHUB_OUTPUT" ;;
             frontend|mailui|agentsui|searchui)
               echo "context=./${{ inputs.service }}" >> "$GITHUB_OUTPUT" ;;
@@ -267,7 +268,7 @@ jobs:
           # insertion anchor (keep in sync with preflight + the `service` options).
           case "$SVC" in
             frontend|searchui|mailui|agentsui|search|mail|agents) rc=gateway ;;
-            leads|mcp|jobs) rc=eastwest ;;
+            leads|mcp|jobs|knowledge) rc=eastwest ;;
             *) echo "unknown service '$SVC' (no routing class)" >&2; exit 1 ;;
           esac
           if [ "$rc" = gateway ]; then

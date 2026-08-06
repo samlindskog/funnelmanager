@@ -1,0 +1,62 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: knowledge-db
+  labels:
+    app.kubernetes.io/name: knowledge-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  instances: 1
+  # pgvector REQUIRED: the knowledge records store uses vector columns and the
+  # app runs `CREATE EXTENSION IF NOT EXISTS vector` at startup (trusted
+  # extension, owner-creatable — but the .so must exist in the server image).
+  # CNPG's standard postgres-containers images bundle pgvector; if the operator
+  # default in this cluster does not, pin imageName to one that does (verify at
+  # deploy: `kubectl exec ... -- psql -c "CREATE EXTENSION IF NOT EXISTS vector"`).
+  inheritedMetadata:
+    labels:
+      app.kubernetes.io/name: knowledge-db
+      app.kubernetes.io/part-of: funnelmanager
+    annotations:
+      sidecar.istio.io/inject: "false"
+  bootstrap:
+    initdb:
+      database: funnelmanager_knowledge
+      owner: funnel
+  storage:
+    size: 5Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  affinity:
+    nodeSelector:
+      role: worker
+    enablePodAntiAffinity: true
+    podAntiAffinityType: preferred
+    topologyKey: kubernetes.io/hostname
+  postgresql:
+    parameters:
+      # Near-idle DB: default archive_timeout=5m forces a full 16MiB WAL segment
+      # upload every 5m; 30m + gzip matches every sibling CNPG cluster.
+      archive_timeout: "30min"
+  backup:
+    retentionPolicy: "14d"
+    barmanObjectStore:
+      destinationPath: s3://${cluster_obj_bucket_backups}/knowledge-db
+      endpointURL: https://${cluster_obj_host}
+      wal:
+        compression: gzip
+      data:
+        compression: gzip
+      s3Credentials:
+        accessKeyId:
+          name: objectstore-backups
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: objectstore-backups
+          key: ACCESS_SECRET_KEY

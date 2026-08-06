@@ -13,6 +13,7 @@ resources:
   - mcp.yaml
   - jobs.yaml
   - agents.yaml
+  - knowledge.yaml
   - agents-canary.yaml
   - frontend.yaml
   - frontend-canary.yaml
@@ -25,6 +26,9 @@ resources:
   - mail-db.yaml
   - jobs-db.yaml
   - agents-db.yaml
+  - knowledge-db.yaml
+  - knowledge-graph.yaml
+  - knowledge-canary.yaml
   - mongo.yaml
   - milvus.yaml
   - etcd.yaml

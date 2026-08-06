@@ -59,11 +59,16 @@ jobs:
         # is the same isolation each service's own Docker image gives it.
         run: |
           set -e
-          for svc in search leads mail mcp jobs agents; do
+          for svc in search leads mail mcp jobs agents knowledge; do
             echo "== $svc =="
             python -m venv "/tmp/venv-$svc"
             "/tmp/venv-$svc/bin/pip" install -q ./libs/fm_runtime -r "$svc/requirements.txt"
             (cd "$svc" && "/tmp/venv-$svc/bin/python" -c "import app.main") && echo "$svc imports OK"
+            # knowledge ships the repo's first unit suite (P11) — run it here.
+            if [ "$svc" = "knowledge" ]; then
+              "/tmp/venv-$svc/bin/pip" install -q pytest
+              (cd "$svc" && "/tmp/venv-$svc/bin/python" -m pytest tests/ -q)
+            fi
             rm -rf "/tmp/venv-$svc"
           done
 

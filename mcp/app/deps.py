@@ -19,3 +19,7 @@ class Deps:
     search: BackendClient
     jobs: BackendClient
     mail: BackendClient
+    # Optional: wired only when KNOWLEDGE_BACKEND_URL is set (the knowledge
+    # service integrates at the operator's convenience; None => its tools are
+    # not registered).
+    knowledge: BackendClient | None = None

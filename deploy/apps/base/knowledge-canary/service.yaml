@@ -1,0 +1,19 @@
+# Distinct Service so the east-west VirtualService can target the canary
+# explicitly by host. Selector is `knowledge-canary`, so the stable `knowledge`
+# Service never picks up canary pods and vice-versa — no routing gap on the
+# stable path, and the marker-matching VS exists only while the canary is
+# scaled up (canary-if-exists-else-stable).
+apiVersion: v1
+kind: Service
+metadata:
+  name: knowledge-canary
+  labels:
+    app.kubernetes.io/name: knowledge-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  selector:
+    app.kubernetes.io/name: knowledge-canary
+  ports:
+    - name: http
+      port: 8007
+      targetPort: 8007

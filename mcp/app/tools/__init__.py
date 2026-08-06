@@ -10,7 +10,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from app.deps import Deps
-from app.tools import jobs, leads, mail, search
+from app.tools import jobs, knowledge, leads, mail, search
 
 
 def register_all(mcp: FastMCP, deps: Deps) -> None:
@@ -18,6 +18,8 @@ def register_all(mcp: FastMCP, deps: Deps) -> None:
     search.register(mcp, deps)
     jobs.register(mcp, deps)
     mail.register(mcp, deps)
+    if deps.knowledge is not None:
+        knowledge.register(mcp, deps)
 
 
 __all__ = ["register_all"]

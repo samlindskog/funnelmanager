@@ -31,7 +31,7 @@ URL=https://x9bc433.win
 OVERLAY=deploy/apps/overlays/prod/kustomization.yaml
 # Backends that carry an app container named after the service (for log scans) —
 # the subset of FM_SERVICES with a scannable app container (frontends have none).
-BACKENDS="search leads mail mcp jobs agents"
+BACKENDS="search leads mail mcp jobs agents knowledge"
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 OK="✅"; WARN="⚠️"; BAD="❌"

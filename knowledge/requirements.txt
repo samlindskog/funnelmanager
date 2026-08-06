@@ -1,0 +1,13 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+httpx==0.28.1
+pydantic-settings==2.9.1
+sqlalchemy==2.0.40
+asyncpg==0.30.0
+greenlet==3.2.1
+pgvector==0.3.6
+# graphiti-core 0.29.3 floors openai at >=1.91; pin a tested 1.x.
+openai==1.109.1
+# Pinned deliberately (P2/plan §12: 0.29.0 was a breaking redesign; upgrade
+# only with the eval set as the regression gate).
+graphiti-core==0.29.3

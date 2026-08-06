@@ -295,6 +295,8 @@ services:
       LEADS_BACKEND_URL: ${LEADS_BACKEND_URL:-http://leads:8001}
       SEARCH_BACKEND_URL: ${SEARCH_BACKEND_URL:-http://search:8000}
       JOBS_BACKEND_URL: ${JOBS_BACKEND_URL:-http://jobs:8005}
+      # Opt-in (empty = knowledge tools not registered; set to http://knowledge:8007 to enable)
+      KNOWLEDGE_BACKEND_URL: ${KNOWLEDGE_BACKEND_URL:-}
       MAIL_BACKEND_URL: ${MAIL_BACKEND_URL:-http://mail:8004}
       FM_SERVICE_NAME: mcp
       FM_JWT_VERIFY: "true"
@@ -469,6 +471,79 @@ services:
     depends_on:
       - search
 
+  # Dedicated Postgres for the knowledge store (own db funnelmanager_knowledge; mail-db pattern).
+  knowledge-db:
+    # pgvector-enabled Postgres — the records store's fuzzy columns are
+    # pgvector embeddings (the app runs CREATE EXTENSION vector itself).
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: funnelmanager_knowledge
+    volumes:
+      - knowledge_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d funnelmanager_knowledge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Knowledge service (:8007) — internal only (loopback publish like mcp). Scaffolded by new-service.
+  knowledge:
+    image: ghcr.io/samlindskog/funnelmanager/knowledge:${IMAGE_TAG:-prod}
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: ${KNOWLEDGE_DATABASE_URL}
+      FM_SERVICE_NAME: knowledge
+      FM_JWT_VERIFY: "true"
+      FM_OIDC_ISSUER: ${FM_OIDC_ISSUER}
+      FM_OIDC_TOKEN_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/token
+      FM_OIDC_JWKS_URL: http://keycloak:8080/realms/funnelmanager/protocol/openid-connect/certs
+      FM_OIDC_CLIENT_ID: knowledge
+      FM_OIDC_CLIENT_SECRET: ${FM_OIDC_KNOWLEDGE_SECRET}
+      FM_ENFORCE_GRANTS: "true"
+      NEO4J_URI: bolt://knowledge-graph:7687
+      NEO4J_PASSWORD: ${KNOWLEDGE_GRAPH_PASSWORD}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      KNOWLEDGE_LLM_MODEL: ${KNOWLEDGE_LLM_MODEL:-gpt-4.1}
+      KNOWLEDGE_SMALL_LLM_MODEL: ${KNOWLEDGE_SMALL_LLM_MODEL:-gpt-4.1-mini}
+      GRAPH_INGEST_SOURCES: ${KNOWLEDGE_GRAPH_INGEST_SOURCES:-searches,mail_campaigns}
+      SEMAPHORE_LIMIT: "5"
+      GRAPHITI_TELEMETRY_ENABLED: "false"
+    ports:
+      - "${HOST_BIND:-127.0.0.1:}${PROD_KNOWLEDGE_PORT:-8007}:8007"
+    expose:
+      - "8007"
+    depends_on:
+      knowledge-db:
+        condition: service_healthy
+      knowledge-graph:
+        condition: service_started
+      keycloak:
+        condition: service_started
+
+  # Graphiti's graph store (decision D2: Neo4j 5.26). Missing/starting Neo4j
+  # degrades the knowledge service's graph features; records queries keep working.
+  knowledge-graph:
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    mem_limit: 1536m
+    environment:
+      NEO4J_AUTH: neo4j/${KNOWLEDGE_GRAPH_PASSWORD}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 768m
+      NEO4J_server_memory_pagecache_size: 384m
+    volumes:
+      - knowledge_graph_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   frontend:
     image: ghcr.io/samlindskog/funnelmanager/frontend:${IMAGE_TAG:-prod}
     restart: unless-stopped
@@ -497,6 +572,8 @@ services:
 volumes:
   keycloak_data:
   postgres_data:
+  knowledge_graph_data:
+  knowledge_postgres_data:
   mail_postgres_data:
   jobs_postgres_data:
   agents_postgres_data:

@@ -1,0 +1,85 @@
+# knowledge-canary: NetworkPolicy (layer 3 of 3 with OPA + Istio L4).
+# Mirror of netpol/knowledge.yaml for the canary's DISTINCT pod label, with
+# ingress from `mcp` only — the sole legitimate carrier of the propagated
+# x-fm-canary marker toward knowledge (and the exec-source for in-mesh
+# verification drives). The canary shares stable's knowledge-db (its ingress
+# admits knowledge-canary explicitly) and runs the same sync fan-out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: knowledge-canary
+  labels:
+    app.kubernetes.io/name: knowledge-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge-canary
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - protocol: TCP
+          port: 8007
+  egress:
+    # Shared dedicated Postgres (CNPG labels instance pods cnpg.io/cluster).
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: knowledge-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Sync-connector reads (GET-only via the knowledge-internal role).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mail
+      ports:
+        - protocol: TCP
+          port: 8004
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agents
+      ports:
+        - protocol: TCP
+          port: 8006
+    # Graphiti's Neo4j store (forward-correct; no StatefulSet yet — plan §9.4).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge-graph
+      ports:
+        - protocol: TCP
+          port: 7687
+    # OpenAI (records-store embeddings). Same pattern as leads/mail/agents.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    # Keycloak (in-cluster token endpoint for RFC 8693 exchange).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge
+  labels:
+    app.kubernetes.io/name: knowledge
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: knowledge
+        app.kubernetes.io/part-of: funnelmanager
+      annotations:
+        # Istio's metrics merge rewrites these to the sidecar's :15020.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8007"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: knowledge
+      nodeSelector:
+        role: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: knowledge
+          # Tag is pinned only in overlays via the images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/knowledge
+          ports:
+            - name: http
+              containerPort: 8007
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8007
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8007
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: knowledge
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            # In-cluster token endpoint (split horizon).
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
+            - name: FM_OIDC_CLIENT_ID
+              value: knowledge
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-knowledge
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-db-app
+                  key: uri
+            # Records-store fuzzy-column embeddings — key from the shared
+            # `openai` secret (same one leads/agents use). The Graphiti graph
+            # stays degraded until a knowledge-graph (Neo4j) exists (plan §9.4).
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai
+                  key: api-key
+            - name: GRAPHITI_TELEMETRY_ENABLED
+              value: "false"

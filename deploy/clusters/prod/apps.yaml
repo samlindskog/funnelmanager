@@ -30,3 +30,4 @@ spec:
     - { apiVersion: apps/v1, kind: Deployment, name: searchui, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: mailui, namespace: prod }
     - { apiVersion: apps/v1, kind: Deployment, name: agentsui, namespace: prod }
+    - { apiVersion: apps/v1, kind: Deployment, name: knowledge, namespace: prod }

@@ -58,7 +58,7 @@ die() { echo "error: $*" >&2; exit 1; }
 svc_class() {
   case "$1" in
     frontend|searchui|mailui|agentsui) echo spa ;;
-    search|leads|mail|mcp|jobs|agents) echo backend ;;
+    search|leads|mail|mcp|jobs|agents|knowledge) echo backend ;;
     *) echo unknown ;;
   esac
 }
@@ -76,7 +76,7 @@ svc_class() {
 routing_class() {
   case "$1" in
     frontend|searchui|mailui|agentsui|search|mail|agents) echo gateway ;;
-    leads|mcp|jobs) echo eastwest ;;
+    leads|mcp|jobs|knowledge) echo eastwest ;;
     *) echo unknown ;;
   esac
 }

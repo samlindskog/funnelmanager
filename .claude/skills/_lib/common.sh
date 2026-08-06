@@ -41,7 +41,7 @@ FM_CF_ZONE_ID="${FM_CF_ZONE_ID:-}"
 # prod. This is the authoritative rollout-wait list and the release/health
 # workload set. `backup` is a batch CronJob image, NOT a Deployment, so it is not
 # here — it IS the eleventh BUILT image, but nothing waits on its rollout.
-FM_SERVICES="frontend searchui mailui agentsui search leads mail mcp jobs agents"
+FM_SERVICES="frontend searchui mailui agentsui search leads mail mcp jobs agents knowledge"
 
 # Shared remote-invocation prefixes. Plain flux/kubectl on the control plane fail
 # with "dial tcp [::1]:8080: connection refused" — root's kubeconfig must be

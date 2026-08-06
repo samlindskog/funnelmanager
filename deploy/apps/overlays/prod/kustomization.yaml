@@ -8,12 +8,14 @@ resources:
   - ../../base/mcp
   - ../../base/jobs
   - ../../base/agents
+  - ../../base/knowledge
   - ../../base/frontend
   - ../../base/frontend-canary
   - ../../base/search-canary
   - ../../base/searchui-canary
   - ../../base/leads-canary
   - ../../base/agents-canary
+  - ../../base/knowledge-canary
   - ../../base/agentsui-canary
   - ../../base/mailui
   - ../../base/agentsui
@@ -48,6 +50,8 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/searchui
     newTag: sha-fd9221acda7a4f725178e2c7d5304aed9b806622
   - name: ghcr.io/samlindskog/funnelmanager/backup
+    newTag: sha-fd9221acda7a4f725178e2c7d5304aed9b806622
+  - name: ghcr.io/samlindskog/funnelmanager/knowledge
     newTag: sha-fd9221acda7a4f725178e2c7d5304aed9b806622
   # Header-routed frontend canary (Phase 4). Its base uses the canary-logical
   # name `.../frontend-canary`; this entry remaps it to the real `frontend`
@@ -88,6 +92,14 @@ images:
   - name: ghcr.io/samlindskog/funnelmanager/leads-canary
     newName: ghcr.io/samlindskog/funnelmanager/leads
     newTag: canary-8b78014d
+  # East-west BACKEND knowledge canary. Same remap pattern: the base uses the
+  # canary-logical name `.../knowledge-canary`; this entry remaps it to the
+  # real `knowledge` repo with an INDEPENDENT `canary-<sha>` tag. `canary-PINME`
+  # is rewritten by build-canary.yml (seds only `newTag: canary-*`); never
+  # pulled while the canary is `replicas: 0`.
+  - name: ghcr.io/samlindskog/funnelmanager/knowledge-canary
+    newName: ghcr.io/samlindskog/funnelmanager/knowledge
+    newTag: canary-PINME
   # Telemetry-enabled BACKEND agents canary (Phase 1b — Logfire/OTLP wired). Same
   # remap pattern as search-canary: the base uses the canary-logical name
   # `.../agents-canary`; this entry remaps it to the real `agents` repo with an

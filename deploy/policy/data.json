@@ -21,12 +21,17 @@
         "/": "frontend"
       },
       "callers": {
+        "knowledge": [
+          {"ns": "env", "sa": "mcp"}
+        ],
         "search": [
+          {"ns": "env", "sa": "knowledge"},
           {"ns": "istio-ingress", "sa": "istio-ingress"},
           {"ns": "env", "sa": "mcp", "path_prefixes": ["/api/search/mcp/"]},
           {"ns": "env", "sa": "jobs", "path_prefixes": ["/internal/jobs"]}
         ],
         "mail": [
+          {"ns": "env", "sa": "knowledge"},
           {"ns": "istio-ingress", "sa": "istio-ingress"},
           {"ns": "env", "sa": "mcp", "path_prefixes": ["/api/mail/mcp/"]},
           {
@@ -51,17 +56,19 @@
         "mcp": [{"ns": "env", "sa": "agents"}],
         "jobs": [{"ns": "env", "sa": "mcp"}],
         "agents": [
+          {"ns": "env", "sa": "knowledge"},
           {"ns": "istio-ingress", "sa": "istio-ingress"},
           {"ns": "env", "sa": "jobs", "path_prefixes": ["/internal/jobs"]}
         ]
       },
       "azp_allow": {
-        "search": ["frontend", "mcp", "jobs"],
-        "mail": ["frontend", "mcp", "search"],
+        "knowledge": ["mcp"],
+        "search": ["frontend", "mcp", "jobs", "knowledge"],
+        "mail": ["frontend", "mcp", "search", "knowledge"],
         "leads": ["search", "mcp"],
         "mcp": ["agents"],
         "jobs": ["mcp"],
-        "agents": ["frontend", "jobs"]
+        "agents": ["frontend", "jobs", "knowledge"]
       },
       "anonymous": [
         {
@@ -130,6 +137,7 @@
       ],
       "pairings": [
         {"from": "search", "to": "app-db"},
+        {"from": "knowledge", "to": "knowledge-db"},
         {"from": "mail", "to": "mail-db"},
         {"from": "leads", "to": "mongo"},
         {"from": "leads", "to": "milvus"},
@@ -140,6 +148,20 @@
       ]
     },
     "roles": {
+      "knowledge-access": {
+        "description": "Human access to the knowledge API. Full methods within /api/knowledge (principle 1) — and NOTHING else: the service's own read fan-out is the machine-only knowledge-internal role. Keep in sync with fm_runtime/grants.py.",
+        "grants": [
+          {"service": "knowledge", "methods": ["*"], "path_prefix": "/api/knowledge"}
+        ]
+      },
+      "knowledge-internal": {
+        "description": "Machine-only role for the knowledge service account (azp=knowledge, client-credentials): GET-only sync reads of mail/search/agents. Never a human. Mirrors grants.py.",
+        "grants": [
+          {"service": "mail", "methods": ["GET"], "path_prefix": "/api/mail"},
+          {"service": "search", "methods": ["GET"], "path_prefix": "/api/search"},
+          {"service": "agents", "methods": ["GET"], "path_prefix": "/api/agents"}
+        ]
+      },
       "admin": {
         "description": "Full access to every service (the single human principal today; agents' service accounts receive realm roles in Keycloak the same way)",
         "grants": [

@@ -1,0 +1,13 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: knowledge-db-daily
+  labels:
+    app.kubernetes.io/name: knowledge-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  schedule: "0 45 3 * * *"
+  immediate: true
+  backupOwnerReference: self
+  cluster:
+    name: knowledge-db

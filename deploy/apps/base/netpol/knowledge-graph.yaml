@@ -1,0 +1,26 @@
+# knowledge-graph (Neo4j): NetworkPolicy (layer 3 of 3 with OPA + Istio L4).
+# Only the knowledge service may speak Bolt to it; no egress (Neo4j calls
+# nothing). The StatefulSet itself is not yet deployed (plan §9.4 capacity
+# work); this policy is forward-correct and inert until it lands.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: knowledge-graph
+  labels:
+    app.kubernetes.io/name: knowledge-graph
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge-graph
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge
+      ports:
+        - protocol: TCP
+          port: 7687

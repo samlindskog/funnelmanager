@@ -49,6 +49,7 @@ jobs:
           - { service: agents,   context: .,        dockerfile: agents/Dockerfile }
           - { service: agentsui, context: ./agentsui, dockerfile: agentsui/Dockerfile }
           - { service: searchui, context: ./searchui, dockerfile: searchui/Dockerfile }
+          - { service: knowledge, context: ., dockerfile: knowledge/Dockerfile }
           - { service: backup,   context: ./backup, dockerfile: backup/Dockerfile }
     steps:
       - uses: actions/checkout@v4

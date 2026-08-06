@@ -62,6 +62,11 @@ deps = Deps(
     search=BackendClient("search", settings.search_backend_url, "search", tokens),
     jobs=BackendClient("jobs", settings.jobs_backend_url, "jobs", tokens),
     mail=BackendClient("mail", settings.mail_backend_url, "mail", tokens),
+    knowledge=(
+        BackendClient("knowledge", settings.knowledge_backend_url, "knowledge", tokens)
+        if settings.knowledge_backend_url
+        else None
+    ),
 )
 
 mcp = FastMCP(

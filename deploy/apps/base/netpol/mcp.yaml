@@ -43,6 +43,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8001
+    # knowledge: the knowledge_* MCP tools (stable + east-west canary — the
+    # marker-routed VS resolves either from the same mcp hop).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge-canary
+      ports:
+        - protocol: TCP
+          port: 8007
     # search + jobs: MCP tools call their /api/{svc}/mcp/v1/* endpoints
     # (OPA still gates on the mcp->{svc} exchange edge + workload identity).
     - to:

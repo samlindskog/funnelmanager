@@ -53,6 +53,13 @@ from fm_runtime.settings import get_runtime_settings
 # exactly the v1 job producers (`search`, `agents`) — no `/api/*` reach, no other
 # services. It pairs with the jobs->search / jobs->agents exchange edges below.
 _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
+    # Humans get ONLY the knowledge API. The service's own read fan-out to
+    # mail/search/agents lives on the machine-only `knowledge-internal` role
+    # below — granting those prefixes to humans would let a knowledge-access
+    # holder read full mail bodies / exports / transcripts directly.
+    "knowledge-access": [
+        {"service": "knowledge", "methods": ["*"], "path_prefix": "/api/knowledge"},
+    ],
     "admin": [{"service": "*", "methods": ["*"], "path_prefix": "/"}],
     "internal-service": [
         {"service": "leads", "methods": ["*"], "path_prefix": "/api/leads"}
@@ -74,6 +81,14 @@ _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
         {"service": "search", "methods": ["*"], "path_prefix": "/internal/jobs"},
         {"service": "agents", "methods": ["*"], "path_prefix": "/internal/jobs"},
     ],
+    # Machine-only (the knowledge service account): the sync connectors' read
+    # fan-out. GET-only — the knowledge service must never send mail or start
+    # searches. Mirrors jobs-internal's machine-role pattern.
+    "knowledge-internal": [
+        {"service": "mail", "methods": ["GET"], "path_prefix": "/api/mail"},
+        {"service": "search", "methods": ["GET"], "path_prefix": "/api/search"},
+        {"service": "agents", "methods": ["GET"], "path_prefix": "/api/agents"},
+    ],
 }
 
 # Every logical service in the mesh — the audiences a token may name and the
@@ -81,6 +96,7 @@ _DEFAULT_ROLE_GRANTS: dict[str, list[dict[str, Any]]] = {
 # callers surface. `agents`/`jobs` (this program) join `search`/`leads`/`mail`/
 # `mcp` here; UIs (`frontend`/`mailui`/`agentsui`) are not token audiences.
 SERVICES: tuple[str, ...] = (
+    "knowledge",
     "search",
     "leads",
     "mail",
@@ -100,6 +116,10 @@ SERVICES: tuple[str, ...] = (
 # phase: mcp->search, mcp->jobs, mcp->mail, jobs->search, jobs->agents,
 # search->mail. Each widens who may act toward a service — audit deliberately.
 SVC_EXCHANGE_SCOPES: tuple[tuple[str, str], ...] = (
+    ("mcp", "knowledge"),
+    ("knowledge", "mail"),
+    ("knowledge", "search"),
+    ("knowledge", "agents"),
     # existing
     ("search", "leads"),
     ("mcp", "leads"),

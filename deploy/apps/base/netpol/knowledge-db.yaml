@@ -1,0 +1,45 @@
+# knowledge-db (CNPG Postgres): knowledge is its only client. NetworkPolicy is
+# layer 3 of 3 (OPA pairing knowledge->knowledge-db + Istio L4 also apply).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: knowledge-db
+  labels:
+    app.kubernetes.io/name: knowledge-db
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: knowledge-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Stable + canary: the canary is a distinct pod label sharing this DB.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge-canary
+      ports:
+        - protocol: TCP
+          port: 5432
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443

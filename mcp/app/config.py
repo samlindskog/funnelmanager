@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     search_backend_url: str = "http://search:8000"
     jobs_backend_url: str = "http://jobs:8005"
     mail_backend_url: str = "http://mail:8004"
+    # Opt-in: empty (the default) leaves the knowledge tools unregistered, so
+    # the live agent integrates the knowledge service only when the operator
+    # sets KNOWLEDGE_BACKEND_URL on this container.
+    knowledge_backend_url: str = ""
 
     # Optional dev fallback for tool calls that arrive WITHOUT a token: act
     # as this server's own service identity (client-credentials token). When

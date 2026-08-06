@@ -55,7 +55,7 @@ spec:
               # refused), even though its own egress policy permits the hop.
               - key: app.kubernetes.io/name
                 operator: In
-                values: [search, search-canary, mcp, agents, agents-canary, jobs]
+                values: [search, search-canary, mcp, agents, agents-canary, jobs, knowledge, knowledge-canary]
       ports:
         - port: 8080
           protocol: TCP

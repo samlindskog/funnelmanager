@@ -1,0 +1,38 @@
+# ARMED-IDLE east-west canary VirtualService for the INTERNAL service knowledge
+# (scaffolded by new-service) — the in-mesh analogue of the gateway canary
+# HTTPRoutes. It attaches to the SIDECARS (gateways: [mesh], NEVER the
+# fm-gateway) for host `knowledge` and PRESENCE-matches `x-fm-canary` (regex `.+`,
+# NEVER the secret value — the marker is already non-forgeable in-mesh). Listed
+# in mesh-policies/kustomization.yaml ONLY while `knowledge-canary` is scaled up
+# (VS presence == canary activation); an idle canary has no VS and the marker
+# falls through to stable `knowledge`. The canary tooling owns that toggle.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: knowledge-canary-eastwest
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: knowledge-canary
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  hosts:
+    - knowledge
+  gateways:
+    - mesh
+  http:
+    - name: canary-marked
+      match:
+        - headers:
+            x-fm-canary:
+              regex: ".+"
+      route:
+        - destination:
+            host: knowledge-canary
+            port:
+              number: 8007
+    - name: default-stable
+      route:
+        - destination:
+            host: knowledge
+            port:
+              number: 8007

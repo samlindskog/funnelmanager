@@ -5,6 +5,7 @@ resources:
   - mail-db
   - jobs-db
   - agents-db
+  - knowledge-db
   - mongo
   - mongo-backup
   - milvus

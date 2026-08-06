@@ -1,0 +1,145 @@
+# East-west canary of the `knowledge` BACKEND — a SEPARATE workload beside
+# stable `knowledge`, FAITHFUL copy of it (same SA -> same SPIFFE identity ->
+# same `aud: knowledge` + OPA verdict, same Secret/ConfigMap refs, same
+# knowledge-db Postgres) with only the sanctioned canary deltas: name/labels
+# (`version: canary` -> the overlay's fm-dev priority patch), replicas 0
+# (armed-idle; build-canary.yml flips 0->1 on activation), worker2 preference,
+# the canary-logical image name, and FM_DEPLOYMENT_VARIANT=canary.
+#
+# ROUTING: knowledge is INTERNAL (never gateway-routed) — reached only in-mesh
+# via `mcp->knowledge`. The east-west VirtualService
+# (mesh-policies/canary/knowledge-canary-eastwest.yaml, toggled with
+# activation) presence-matches the propagated `x-fm-canary` marker and steers
+# marked calls here; unmarked traffic falls to stable `knowledge`.
+#
+# TRUST MODEL: this pod holds the real knowledge identity — the machine-only
+# `knowledge-internal` role (GET-only reads of mail/search/agents), the shared
+# `openai` secret (embedding spend — small; the LLM graph pass is inert in
+# prod while no Neo4j exists), and stable's knowledge-db. Its sync loop runs
+# CONCURRENTLY with stable's against the shared records store; unique
+# constraints keep that idempotent (transient duplicate-key retries are
+# expected noise while both are active). Activation gates: build-canary's
+# `environment: canary-activation` approval + `--confirm-backend` in the skill.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge-canary
+  labels:
+    app.kubernetes.io/name: knowledge-canary
+    app.kubernetes.io/part-of: funnelmanager
+    version: canary
+spec:
+  # Idle by default. build-canary.yml scales up on activation.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge-canary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: knowledge-canary
+        app.kubernetes.io/part-of: funnelmanager
+        version: canary
+      annotations:
+        # Istio's metrics merge rewrites these to the sidecar's :15020.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8007"
+        prometheus.io/path: /metrics
+    spec:
+      # Reuse the stable knowledge identity (SA/audience/OPA verdict).
+      serviceAccountName: knowledge
+      nodeSelector:
+        role: worker
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - worker2
+      # Overridden to fm-dev by the overlay's version=canary patch.
+      priorityClassName: fm-dev
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: knowledge
+          # Canary-logical name; remapped to the real `.../knowledge` repo +
+          # `canary-<sha>` tag by the prod overlay images transformer.
+          image: ghcr.io/samlindskog/funnelmanager/knowledge-canary
+          ports:
+            - name: http
+              containerPort: 8007
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8007
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8007
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            - name: FM_SERVICE_NAME
+              value: knowledge
+            - name: FM_DEPLOYMENT_VARIANT
+              value: canary
+            # The mesh validates JWTs (RequestAuthentication); the app trusts them.
+            - name: FM_JWT_VERIFY
+              value: "false"
+            - name: FM_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: issuer
+            # In-cluster token endpoint (split horizon).
+            - name: FM_OIDC_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fm-oidc
+                  key: token-url
+            - name: FM_OIDC_CLIENT_ID
+              value: knowledge
+            - name: FM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fm-oidc-knowledge
+                  key: client-secret
+            - name: FM_LOG_LEVEL
+              value: INFO
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-db-app
+                  key: uri
+            # Records-store fuzzy-column embeddings — key from the shared
+            # `openai` secret (same one leads/agents use). The Graphiti graph
+            # stays degraded until a knowledge-graph (Neo4j) exists (plan §9.4).
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai
+                  key: api-key
+            - name: GRAPHITI_TELEMETRY_ENABLED
+              value: "false"

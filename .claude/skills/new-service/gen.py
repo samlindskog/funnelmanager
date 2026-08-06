@@ -1024,11 +1024,10 @@ def generate(spec: dict) -> None:
         edit(".github/workflows/build-canary.yml", ") rc=gateway ;;", f"|{name}) rc=gateway ;;", count=0)
     else:
         edit(".github/workflows/build-canary.yml", ") rc=eastwest ;;", f"|{name}) rc=eastwest ;;", count=0)
-    edit_re(".github/workflows/ci.yml", r"-r mcp/requirements\.txt", f"-r mcp/requirements.txt -r {name}/requirements.txt", count=1)
     edit_re(".github/workflows/ci.yml", r"(for svc in [a-z ]+)(; do)", rf"\1 {name}\2", count=1)
 
     # ---- 11. skill service-lists -------------------------------------------
-    edit_re(".claude/skills/deploy-funnelmanager/deploy.sh", r'(SERVICES="[a-z ]+)"', rf'\1 {name}"', count=1)
+    edit_re(".claude/skills/_lib/common.sh", r'(FM_SERVICES="[a-z ]+)"', rf'\1 {name}"', count=1)
     edit_re(".claude/skills/prod-health/check.sh", r'(BACKENDS="[a-z ]+)"', rf'\1 {name}"', count=1)
     edit(".claude/skills/canary/canary.sh", ") echo backend ;;", f"|{name}) echo backend ;;")
     if browser:

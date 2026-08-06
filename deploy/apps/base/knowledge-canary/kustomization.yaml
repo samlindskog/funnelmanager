@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No serviceaccount.yaml: the canary reuses the stable `knowledge` SA (defined
+# in base/knowledge) so its SPIFFE identity — and thus OPA's verdict AND the
+# `aud: knowledge` per-hop audience its callers exchange to — is identical to
+# stable. See deployment.yaml TRUST MODEL notes.
+resources:
+  - deployment.yaml
+  - service.yaml

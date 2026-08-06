@@ -17,7 +17,8 @@
             "search-access",
             "mail-access",
             "jobs-access",
-            "agents-access"
+            "agents-access",
+            "knowledge-access"
           ]
         }
       },
@@ -44,6 +45,14 @@
       {
         "name": "jobs-internal",
         "description": "Machine-only role for the jobs service account (azp=jobs, client-credentials) reaching producers' /internal/jobs/* stream + control on search+agents. Never a human; the acting human is audit metadata. Mirrors grants.py + data.json."
+      },
+      {
+        "name": "knowledge-access",
+        "description": "Human access to the knowledge API (/api/knowledge, all methods). Per-service access role — gates API access, not rows. Mirrors fm_runtime/grants.py + deploy/policy/data.json."
+      },
+      {
+        "name": "knowledge-internal",
+        "description": "Machine-only role for the knowledge service account (azp=knowledge, client-credentials): GET-only sync reads of mail/search/agents. Never a human. Mirrors grants.py + data.json."
       }
     ]
   },
@@ -116,6 +125,14 @@
       "serviceAccountClientId": "jobs",
       "realmRoles": [
         "jobs-internal"
+      ]
+    },
+    {
+      "username": "service-account-knowledge",
+      "enabled": true,
+      "serviceAccountClientId": "knowledge",
+      "realmRoles": [
+        "knowledge-internal"
       ]
     }
   ],
@@ -314,6 +331,25 @@
           }
         }
       ]
+    },
+    {
+      "name": "svc-knowledge",
+      "protocol": "openid-connect",
+      "description": "Adds the knowledge service to the token audience (used by RFC 8693 exchange)",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud-knowledge",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "knowledge",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "clients": [
@@ -477,7 +513,8 @@
         "svc-leads",
         "svc-search",
         "svc-jobs",
-        "svc-mail"
+        "svc-mail",
+        "svc-knowledge"
       ],
       "defaultClientScopes": [
         "basic",
@@ -543,6 +580,30 @@
         "basic",
         "profile",
         "roles"
+      ]
+    },
+    {
+      "clientId": "knowledge",
+      "name": "Knowledge backend service identity (scaffolded by new-service)",
+      "publicClient": false,
+      "secret": "dev-knowledge-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles",
+        "fm-origin"
+      ],
+      "optionalClientScopes": [
+        "svc-mail",
+        "svc-search",
+        "svc-agents"
       ]
     }
   ]

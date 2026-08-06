@@ -43,10 +43,10 @@ overlay, not in base).
 ## Names, labels, service accounts
 
 - App/workload names are the short service names: `search`, `leads`,
-  `mail`, `mcp`, `jobs`, `agents`, `frontend`, `searchui`, `mailui`,
+  `mail`, `mcp`, `jobs`, `agents`, `knowledge`, `frontend`, `searchui`, `mailui`,
   `agentsui`, `keycloak`, `opa`.
 - Data workloads: `app-db` (search's Postgres, CNPG), `mail-db` (CNPG),
-  `jobs-db` (CNPG), `agents-db` (CNPG), `kc-db` (CNPG, in `identity`),
+  `jobs-db` (CNPG), `agents-db` (CNPG), `knowledge-db` (CNPG), `kc-db` (CNPG, in `identity`),
   `mongo`, `milvus`, `etcd`, `minio`.
 - Scheduled job: `mongo-backup` (CronJob in `prod`; image
   `.../funnelmanager/backup` — mongodump inside the mongo pod → object
@@ -62,7 +62,7 @@ overlay, not in base).
   split-by-version. It goes on the Deployment/pod template only — never in
   Service or NetworkPolicy selectors (they key on `app.kubernetes.io/name`).
 - Container ports keep the compose numbers: search 8000, leads 8001,
-  mcp 8003, mail 8004, jobs 8005, agents 8006, static nginx 8080 (non-root
+  mcp 8003, mail 8004, jobs 8005, agents 8006, knowledge 8007, static nginx 8080 (non-root
   nginx), Keycloak 8080.
   Service port == container port; Service names == workload names.
 
@@ -94,6 +94,7 @@ istiod values (64Mi/256Mi). The summed budget lives in
 | mcp | 50m / 128Mi | 500m / 768Mi |
 | jobs | 50m / 128Mi | 500m / 512Mi |
 | agents | 50m / 128Mi | 500m / 768Mi |
+| knowledge | 50m / 128Mi | 500m / 768Mi |
 | frontend (nginx) | 10m / 16Mi | 100m / 64Mi |
 | searchui (nginx) | 10m / 16Mi | 100m / 64Mi |
 | mailui (nginx) | 10m / 16Mi | 100m / 64Mi |
@@ -158,7 +159,7 @@ dev is unaffected — it runs from `docker-compose.dev.yml`.
 ## Storage
 
 k3s default StorageClass `local-path`. PVCs: app-db 5Gi, mail-db 10Gi,
-jobs-db 5Gi, agents-db 5Gi, kc-db 2Gi, mongo 20Gi, milvus 10Gi, etcd 2Gi,
+jobs-db 5Gi, agents-db 5Gi, knowledge-db 5Gi, kc-db 2Gi, mongo 20Gi, milvus 10Gi, etcd 2Gi,
 minio 10Gi, prometheus 10Gi,
 loki 5Gi (cache; chunks go to object storage).
 

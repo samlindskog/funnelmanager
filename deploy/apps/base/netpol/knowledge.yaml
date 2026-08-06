@@ -1,0 +1,84 @@
+# knowledge: NetworkPolicy (layer 3 of 3 with OPA + Istio L4). Scaffolded by
+# new-service — least-privilege ingress/egress derived from the spec.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: knowledge
+  labels:
+    app.kubernetes.io/name: knowledge
+    app.kubernetes.io/part-of: funnelmanager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # mcp exchanges toward knowledge; OPA additionally gates the hop.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - protocol: TCP
+          port: 8007
+  egress:
+    # Dedicated Postgres (CNPG labels instance pods cnpg.io/cluster).
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: knowledge-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mail
+      ports:
+        - protocol: TCP
+          port: 8004
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: search
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agents
+      ports:
+        - protocol: TCP
+          port: 8006
+    # Graphiti's Neo4j store (bolt).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: knowledge-graph
+      ports:
+        - protocol: TCP
+          port: 7687
+    # OpenAI (Graphiti extraction + records-store embeddings). Same pattern as
+    # leads/mail/agents: 0.0.0.0/0:443 also matches in-cluster 443 targets,
+    # which is acceptable — everything sensitive in-cluster is further gated by
+    # its own ingress policy + mesh authz.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    # Keycloak (in-cluster token endpoint for RFC 8693 exchange).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 8080
