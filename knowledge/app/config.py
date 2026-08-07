@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # mail messages: how many newest pages are re-walked each cycle even past
     # the watermark (catches label flips / deletions near the head).
     mail_head_pages: int = 2
+    # Embedding-backfill budget: rows embedded per cycle across all sources
+    # (batched 256 at a time). Embeddings are cheap (text-embedding-3-small);
+    # this bounds burst API pressure, not spend.
+    embed_backfill_per_cycle: int = 2000
     # Per-cycle page budget per account; a capped walk resumes next cycle
     # (initial backfill) or holds the watermark (incremental) — never skips.
     mail_pages_per_cycle: int = 200

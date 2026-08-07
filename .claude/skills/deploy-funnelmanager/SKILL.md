@@ -42,8 +42,10 @@ in the driver — they come from the gitignored ops env (`$FM_OPS_ENV`, default
 
 ## Prerequisites
 
-Already present on this machine: `git`, `gh` (authed), ssh alias `usfr4` in
-`~/.ssh/config` (user `sam`, admin key). Nothing to install.
+Already present on this machine: `git`, `gh` (authed), an ssh alias for the control
+plane in `~/.ssh/config` (user `sam`, admin key) — `usfr4`, or a ProxyJump alias like
+`usfr4j` when the direct IP is unreachable (set it as `FM_CP_HOST` in the ops env).
+Nothing to install.
 
 ## Deploy to production (agent path)
 
@@ -55,6 +57,14 @@ git add -A && git commit -m "..." && git push
 #    commit, force Flux reconcile, wait for rollout, public smoke.
 .claude/skills/deploy-funnelmanager/deploy.sh release v1.3.0
 ```
+
+When the shared checkout is dirty or held by a concurrent job, run the release from
+a throwaway `git worktree` on a clean `main` instead of stashing:
+`git worktree add "$WT" main`, commit/push there, then
+`cd "$WT" && .claude/skills/deploy-funnelmanager/deploy.sh release vX.Y.Z`. The
+driver `cd`s to `git rev-parse --show-toplevel` (the worktree root) and the ops env
+lives outside the repo (`~/.config/fm-ops/env`), so everything works unchanged.
+Remove the worktree after the verify.
 
 `release` refuses to run off-main, with a dirty tree, or when local `main`
 diverges from origin. After the rollout wait it runs the prod-health `drift` +
@@ -102,15 +112,25 @@ ssh usfr4 'for d in frontend searchui mailui agentsui search leads mail mcp jobs
   143 mid-reconcile. The kill is local-only and usually cosmetic: the
   tag/push/annotation already landed, so check cluster state (or re-run just the
   reconcile tail) rather than assuming the release failed.
+  A release can also die with **exit 1 at "CI done; pulling the pin commit"** when
+  github SSH times out locally. Everything real already landed (tag → CI → pin);
+  recover forward: `gh run view <run-id>` to confirm the `pin` job, retry the fetch
+  (`GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=15' git fetch origin main`
+  — macOS has no `timeout(1)`), then `deploy.sh reconcile`. If ssh to the control
+  plane is also down, do nothing — Flux polls github ~1m and rolls out unaided;
+  verify later with prod-health `drift`/`smoke`. **Never re-tag** after a post-CI
+  failure.
 - **`flux`/`kubectl` on usfr4 need root's kubeconfig.** Bare `flux reconcile`
-  fails with `dial tcp [::1]:8080: connect: connection refused`. Use
+  fails with `dial tcp [::1]:8080: connect: connection refused` — or, over ssh,
+  `error loading config file ".../.kube/config": permission denied` /
+  `Unable to read /etc/rancher/k3s/k3s.yaml`. Use
   `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml flux …` (baked into the
   driver).
 - **Unauthenticated `/api/*/whoami` returns 403, not 401** — OPA default-deny
   answers before auth challenges. 403 is the healthy signal; don't "fix" it.
 - **`release`/`reconcile` force ONLY `apps-prod`.** The infra Kustomizations
   (`infra-istio`, `infra-mesh-policies`, `infra-gateway`, `infra-identity`,
-  `infra-observability`, `infra-opa`) are separate and land on Flux's own ~1m poll
+  `infra-observability`, `infra-dashboards`, `infra-opa`) are separate and land on Flux's own ~1m poll
   — a release does **not** force them. When an infra change must apply **now**, name
   it explicitly: `deploy.sh reconcile infra-gateway infra-mesh-policies` (extra args
   to `reconcile` are infra kustomizations to also force, after `apps-prod`).
@@ -140,15 +160,33 @@ ssh usfr4 'for d in frontend searchui mailui agentsui search leads mail mcp jobs
 - **Plain pushes to `main` never deploy.** Only `v*` tags or a manual
   `workflow_dispatch` trigger `release-prod`. CI (`ci.yml`) still runs
   checks on every push.
+- **Push-triggered workflows can silently STOP FIRING repo-wide** (hit
+  2026-08-06: no CI on any push and no release-prod on a `v*` tag, while
+  `workflow_dispatch` kept working — suspected GitHub Actions minutes/billing
+  on this private Free-plan repo). Symptom: the tag exists on origin but
+  `gh run list` shows no new run, and an old driver would grab the PREVIOUS
+  completed run and race ahead (rolling out stale pins; a brand-new service
+  then ImagePullBackOffs on a tag that was never built). The driver now
+  polls for the run matching the tag and fails closed with the remedy:
+  `gh workflow run release-prod.yml -f ref=<tag>` (dispatch bypasses the dead
+  push trigger), then `deploy.sh watch`. Never re-tag. Check
+  github.com/settings/billing (Actions minutes) when this fires.
+- **Some networks null-route usfr4's direct IP** (e.g. Stanford blocks
+  45.33.110.78). The fix is a ProxyJump ssh alias (`usfr4j`, jumping via usfr2, same
+  user/key) with `FM_CP_HOST=usfr4j` in the ops env — the driver and prod-health then
+  route through it automatically. When hand-running any `ssh usfr4 '…'` command from
+  this skill, substitute the ops-env `FM_CP_HOST` value, not the literal alias.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `gh run watch` exits non-zero | `gh run view <id> --log-failed`; nothing was deployed (pin commit only lands on success) |
+| tag pushed but NO release-prod run appears (driver dies "push trigger did not fire") | push-triggered workflows are dead (Actions minutes/billing) — `gh workflow run release-prod.yml -f ref=<tag>` then `deploy.sh watch`; do NOT re-tag |
+| release exits 1 at "CI done; pulling the pin commit" (github ssh timeout) | CI + pin already landed — `gh run view <id>` to confirm, retry the pull, then `deploy.sh reconcile`; or let Flux's own poll roll it out and verify with prod-health `drift` |
 | `git push origin vX.Y.Z` rejected / tag exists | you re-used a tag — bump the version; tags are immutable releases |
 | `push` to main rejected (non-fast-forward) | the CI pin commit landed — `git pull` then push |
-| `flux … connection refused` on usfr4 | missing `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml` prefix |
+| `flux …` on usfr4 fails: `connection refused` **or** `permission denied`/`Unable to read /etc/rancher/k3s/k3s.yaml` | missing `sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml` prefix |
 | Cloudflare "Invalid API Token" / "access token from location" | add `-4` to curl; ensure `FM_CF_ZONE_ID` is set in the ops env (`purge` errors if unset) |
 | Rollout hangs on one deploy | `ssh usfr4 'sudo -n kubectl -n prod describe pod <pod>'` — usually an image pull or probe failure; `deploy.sh rollback <last-good-tag>` |
 | New route/SPA 403s after release | Two separate deniers. (1) Stale OPA policy data — see the `infra-opa` gotcha (reconcile + restart the `opa` DaemonSet). (2) The `require-principal` AuthorizationPolicy (`infra-mesh-policies`): check the workload's istio-proxy log for `rbac_access_denied_matched_policy[require-principal-…]` — the policy needs a `/<app>/*` glob, not just `/<app>`. After reconciling, allow ~30s xDS propagation before concluding it didn't work |

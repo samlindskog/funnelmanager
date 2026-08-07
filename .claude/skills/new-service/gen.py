@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 # Container ports of the services a new one may declare as a dependency (for the
 # netpol egress rule). Extend when a new dependency target isn't listed.
-PORT_MAP = {"search": 8000, "leads": 8001, "mcp": 8003, "mail": 8004, "jobs": 8005, "agents": 8006}
+PORT_MAP = {"search": 8000, "leads": 8001, "mcp": 8003, "mail": 8004, "jobs": 8005, "agents": 8006, "knowledge": 8007}
 
 # Backend prod resource profile (CONVENTIONS.md; the jobs/search baseline).
 RES = {"cpu_req": "50m", "mem_req": "128Mi", "cpu_lim": "500m", "mem_lim": "512Mi", "compose_mem": "512m"}
@@ -915,6 +915,23 @@ def generate(spec: dict) -> None:
     # ---- 5. netpol ----------------------------------------------------------
     emit(f"deploy/apps/base/netpol/{name}.yaml", build_netpol(spec, stateful, browser))
     insert_after("deploy/apps/base/netpol/kustomization.yaml", "  - agents.yaml\n", f"  - {name}.yaml\n")
+    # NetworkPolicy is enforced on BOTH ends (ops-runbook §2): every dep also
+    # needs an ingress leg admitting the new service (+ its future canary
+    # label) or the dial is refused and surfaces as an Envoy 503.
+    for d in spec["deps"]:
+        insert_after(f"deploy/apps/base/netpol/{d}.yaml", "  ingress:\n",
+                     f"""    # {name}'s calls (scaffolded by new-service; canary label included).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {name}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {name}-canary
+      ports:
+        - protocol: TCP
+          port: {PORT_MAP[d]}
+""")
     if stateful:
         emit(f"deploy/apps/base/netpol/{name}-db.yaml", sub(TPL_DB_NETPOL, ctx))
         insert_after("deploy/apps/base/netpol/kustomization.yaml", "  - agents-db.yaml\n", f"  - {name}-db.yaml\n")
@@ -1004,8 +1021,18 @@ def generate(spec: dict) -> None:
     azp_list = ", ".join('"%s"' % a for a in azp)
     insert_after("deploy/policy/data.json", '      "azp_allow": {\n',
                  f'        "{name}": [{azp_list}],\n')
-    for d in spec["deps"]:
-        edit_re("deploy/policy/data.json", rf'("{d}": \[)([^\]]*)\]', rf'\1\2, "{name}"]', count=1)
+    if spec["deps"]:
+        # Block-scoped: operate only inside the azp_allow object — a bare
+        # regex over the whole file previously matched the same '"<d>": ['
+        # key inside `callers` and corrupted a nested path_prefixes array.
+        dj = _p("deploy/policy/data.json"); text = dj.read_text()
+        start = text.index('"azp_allow"')
+        end = text.index("}", start)
+        block = text[start:end]
+        for d in spec["deps"]:
+            block = re.sub(rf'("{d}": \[)([^\]]*)\]', rf'\1\2, "{name}"]', block, count=1)
+        dj.write_text(text[:start] + block + text[end:])
+        modified.add("deploy/policy/data.json")
     if browser:
         insert_after("deploy/policy/data.json", '            "/health",\n', f'            "/api/{name}/health",\n')
         insert_after("deploy/policy/data.json", '      "routes": {\n', f'        "/api/{name}/": "{name}",\n')

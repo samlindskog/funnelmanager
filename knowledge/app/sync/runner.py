@@ -193,6 +193,7 @@ class SyncManager:
 
     # ---------------------------------------------------------- embeddings --
     async def _embedding_pass(self, source_names: list[str], batch: int = 256) -> dict[str, int]:
+        budget = get_settings().embed_backfill_per_cycle
         done: dict[str, int] = {}
         for name in source_names:
             target = _EMBED_TARGETS.get(name)
@@ -204,18 +205,31 @@ class SyncManager:
                 for text_attr, emb_attr in pairs:
                     col_text = getattr(model, text_attr)
                     col_emb = getattr(model, emb_attr)
-                    rows = (
-                        (await session.execute(
-                            select(model).where(col_emb.is_(None), col_text != "").limit(batch)
-                        )).scalars().all()
-                    )
-                    if not rows:
-                        continue
-                    vectors = await embed_texts([getattr(r, text_attr) or "" for r in rows])
-                    for row, vec in zip(rows, vectors):
-                        if vec is not None:
-                            setattr(row, emb_attr, vec)
-                            count += 1
+                    # Drain the backlog batch-by-batch up to the shared budget
+                    # (one fixed batch per cycle made a 44k-row archive take
+                    # ~170 cycles to embed).
+                    while budget > 0:
+                        rows = (
+                            (await session.execute(
+                                select(model).where(col_emb.is_(None), col_text != "")
+                                .limit(min(batch, budget))
+                            )).scalars().all()
+                        )
+                        if not rows:
+                            break
+                        vectors = await embed_texts([getattr(r, text_attr) or "" for r in rows])
+                        embedded_any = False
+                        for row, vec in zip(rows, vectors):
+                            if vec is not None:
+                                setattr(row, emb_attr, vec)
+                                count += 1
+                                embedded_any = True
+                        budget -= len(rows)
+                        await session.commit()
+                        if not embedded_any:
+                            # Every row in the batch embedded to None (blank
+                            # text slipped the filter) — bail, don't spin.
+                            break
                 await session.commit()
             if count:
                 done[name] = count

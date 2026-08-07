@@ -50,7 +50,7 @@ reconcile() {
         $FLUX reconcile kustomization apps-prod 2>&1 | tail -2"
   # A release/reconcile forces ONLY apps-prod. The infra Kustomizations
   # (infra-istio, infra-mesh-policies, infra-gateway, infra-identity,
-  # infra-observability, infra-opa) are SEPARATE and land on Flux's own ~1m poll —
+  # infra-observability, infra-dashboards, infra-opa) are SEPARATE and land on Flux's own ~1m poll —
   # they are NOT forced here. When an infra change must apply NOW, name it/them:
   #   deploy.sh reconcile infra-gateway infra-mesh-policies
   if [ "$#" -gt 0 ]; then
@@ -83,14 +83,33 @@ verify() {
 }
 
 watch_run() {
-  sleep 5   # give GH a beat to register the run
-  local run_id
-  run_id=$(gh run list --workflow=release-prod --limit 1 --json databaseId --jq '.[0].databaseId')
+  # With a tag/ref arg: poll for the run belonging to THAT ref — never grab
+  # "latest" (a previous completed run makes the script race the whole
+  # reconcile/rollout tail ahead of a build that never started). Push-triggered
+  # workflows have silently stopped firing repo-wide before (2026-08-06;
+  # suspected Actions billing) — detect that here instead of misbehaving.
+  local want="${1:-}" run_id="" i
+  if [ -n "$want" ]; then
+    for i in $(seq 1 18); do
+      run_id=$(gh run list --workflow=release-prod --limit 5         --json databaseId,headBranch --jq ".[] | select(.headBranch == \"$want\") | .databaseId" | head -1)
+      [ -n "$run_id" ] && break
+      sleep 5
+    done
+    [ -n "$run_id" ] || die "no release-prod run appeared for $want within 90s — the v* push trigger did not fire (known failure mode: push-triggered workflows silently dead, e.g. Actions minutes exhausted). The tag IS pushed; do NOT re-tag. Fallback: gh workflow run release-prod.yml -f ref=$want   then: deploy.sh watch"
+  else
+    sleep 5   # attach mode: give GH a beat, then take the newest run
+    run_id=$(gh run list --workflow=release-prod --limit 1 --json databaseId --jq '.[0].databaseId')
+  fi
   echo "--- watching release-prod run $run_id ---"
   gh run watch "$run_id" --exit-status --interval 15 >/dev/null \
     || die "run $run_id failed — inspect with: gh run view $run_id --log-failed"
   echo "--- CI done; pulling the pin commit it pushed to main ---"
-  git pull -q origin main
+  # Bounded + retried: a transient github-SSH timeout here must not abort the
+  # reconcile/rollout tail — the tag, images, and sha-pin have already landed.
+  GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=15' git pull -q origin main \
+    || { echo "pin-pull failed (github ssh blip?) — retrying in 20s"; sleep 20;
+         GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=15' git pull -q origin main; } \
+    || die "cannot pull the pin commit — release IS built+pinned; Flux will roll it out on its own poll. Re-run 'deploy.sh reconcile' (then prod-health drift) once the network recovers; do NOT re-tag"
   git log -1 --oneline
   reconcile
   rollout
@@ -115,7 +134,7 @@ case "$cmd" in
     preflight
     echo "--- releasing $(git rev-parse --short HEAD) as $tag ---"
     git tag "$tag" && git push origin "$tag"
-    watch_run
+    watch_run "$tag"
     ;;
   rollback)
     ref=${2:-}; [ -n "$ref" ] || die "usage: deploy.sh rollback <tag|sha|branch>"
