@@ -202,7 +202,7 @@ async def _walk_account(
             gmail_id = str(item.get("gmail_id") or "")
             if not gmail_id:
                 continue
-            internal = str(item.get("internal_date") or "")
+            internal = str(item.get("internal_date") or item.get("date") or "")
             if internal and internal > newest_seen:
                 newest_seen = internal
             if marker and internal and internal < marker:
@@ -247,7 +247,8 @@ def parse_message_fields(item: dict[str, Any], account_email: str, owner: str) -
         subject=str(item.get("subject") or ""),
         snippet=str(item.get("snippet") or ""),
         is_deleted=bool(item.get("is_deleted", False)),
-        occurred_at=parse_dt(item.get("internal_date")),
+        # the mail API serializes the Gmail internalDate as `date`
+        occurred_at=parse_dt(item.get("internal_date") or item.get("date")),
     )
 
 
@@ -277,6 +278,9 @@ async def _upsert_message(
         result.new += 1
         return True
     changed = False
+    if fields["occurred_at"] is not None and existing.occurred_at != fields["occurred_at"]:
+        existing.occurred_at = fields["occurred_at"]
+        changed = True
     for key, value in fields.items():
         if key == "occurred_at":
             continue

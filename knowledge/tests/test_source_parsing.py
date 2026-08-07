@@ -81,3 +81,12 @@ def test_parse_dt_tolerance():
     assert parse_dt("2026-08-01T10:00:00Z") is not None
     assert parse_dt("") is None
     assert parse_dt("garbage") is None
+
+
+def test_message_fields_accept_wire_date_key():
+    fields = parse_message_fields(
+        {"gmail_id": "g9", "from_addr": "x@y.z", "date": "2026-08-01T10:00:00Z"},
+        account_email="me@box.com",
+        owner="sam",
+    )
+    assert fields["occurred_at"] is not None
