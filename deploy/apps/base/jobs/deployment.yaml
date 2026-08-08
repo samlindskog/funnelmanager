@@ -103,4 +103,4 @@ spec:
             # token-exchange audience (svc scope jobs->search). Cross-service
             # DNS: search.<ns>.svc — kustomize sets the namespace per overlay.
             - name: JOBS_PRODUCERS
-              value: search=http://search:8000
+              value: search=http://search:8000,agents=http://agents:8006
