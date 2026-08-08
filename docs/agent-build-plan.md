@@ -5,6 +5,19 @@ agent fleet (`.claude/agents/`). Each owning agent reads this plus the project
 `CLAUDE.md`. It is the source of truth for the target architecture **until
 `CLAUDE.md` is updated in Phase 0** to describe the same thing.
 
+> **STATUS (2026-08-06) — the jobs/agents program is DELIVERED.** `jobs`, `agents`,
+> and `agentsui` are built and running. Beyond this original plan, the `agents`
+> backend was rebuilt from one-shot **runs → interactive multi-turn SESSIONS** (chat):
+> NDJSON-streamed turns, per-session model choice, verbatim history + summarization,
+> per-turn token usage, in-chat HITL approvals, and an internal `schedule_agent_job`
+> tool (persisted schedules fired by an in-process poller; a non-terminal `SCHEDULED`
+> job status). Telemetry is **Pydantic Logfire** (dual-export to Tempo, gated to
+> dev/canary). The producer plumbing is the shared `fm_runtime.JobProducer` helper
+> (`docs/jobs-producer-api.md`). Full program plan + phase history:
+> `~/.claude/plans/immutable-swimming-frog.md`. The section below is the original
+> jobs/agents/campaigns spec; the sessions/scheduling/telemetry delta lives in
+> `agents-agent.md` / `agentsui-agent.md` and that plan.
+
 ## Glossary (three different "agents" — do not conflate)
 - **Claude agent** — a subagent in `.claude/agents/*.md` that *builds* a service
   (e.g. `search-agent`). This doc's topology.

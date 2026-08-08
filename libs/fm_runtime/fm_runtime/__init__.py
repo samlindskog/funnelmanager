@@ -6,12 +6,16 @@ Wire-up in each service's main.py, before any other middleware is added:
     install(app, service="search", ready_checks={"db": ping_db})
 
 That installs, uniformly across every service:
-- PrincipalMiddleware — parses the forwarded JWT into a Principal (sub +
-  RFC 8693 `act` chain), 401s non-@anonymous routes without one,
+- PrincipalMiddleware — parses the forwarded JWT into a Principal (the acting
+  client rides in `azp`; agent-initiated calls carry `fm_origin=agent`. KC 26.2
+  emits no nested `act` chain — the parser keeps it as future-proofing only),
+  401s non-@anonymous routes without one,
 - structured JSON logging to stdout (principal sub on every line),
 - /healthz, /readyz, /metrics,
 - /api/<service>/whoami — authenticated principal echo (the hub's discovery probe),
-- Prometheus HTTP metrics + structured access log.
+- Prometheus HTTP metrics + structured access log,
+- optional OTel/Logfire tracing — a hard no-op unless FM_LOGFIRE=1 (logfire is
+  not imported otherwise); requires the `fm-runtime[tracing]` extra to enable.
 
 Outbound internal calls go through InternalClient (token exchange + trace
 propagation) — never through a bare httpx client.
@@ -42,6 +46,7 @@ from fm_runtime.job_events import (
     JobStatus,
     control_path,
 )
+from fm_runtime.jobs_producer import JobProducer
 from fm_runtime.logging import configure_logging
 from fm_runtime.middleware import PrincipalMiddleware
 from fm_runtime.observability import install_observability
@@ -56,6 +61,7 @@ from fm_runtime.principal import (
 )
 from fm_runtime.settings import RuntimeSettings, get_runtime_settings
 from fm_runtime.tokens import ExchangeError, TokenBroker, get_broker, resolve_origin
+from fm_runtime.tracing import configure_tracing, tracing_enabled
 from fm_runtime.whoami import install_whoami
 
 __all__ = [
@@ -69,6 +75,7 @@ __all__ = [
     "InternalClient",
     "JobControlAction",
     "JobEvent",
+    "JobProducer",
     "JobStatus",
     "Peer",
     "Principal",
@@ -80,6 +87,7 @@ __all__ = [
     "approval_ref",
     "collect_anonymous",
     "configure_logging",
+    "configure_tracing",
     "confirmation_threshold",
     "control_path",
     "current_context",
@@ -93,6 +101,7 @@ __all__ = [
     "require_confirmation",
     "require_principal",
     "resolve_origin",
+    "tracing_enabled",
     "verify_human_approval",
 ]
 
@@ -105,6 +114,11 @@ def install(app: Any, service: str, ready_checks: dict | None = None) -> None:
     # Added first so any middleware the service adds afterwards (CORS, ...)
     # runs outside it.
     app.add_middleware(PrincipalMiddleware, service=service, settings=settings)
+    # Optional, gated OTel/Logfire tracing. Hard no-op unless FM_LOGFIRE=1
+    # (logfire is not even imported otherwise) — zero cost in prod. Wired last so
+    # it observes the fully-assembled app; instrumentation attaches out-of-band
+    # and does not affect middleware ordering.
+    configure_tracing(app, service_name=service, variant=settings.deployment_variant)
 
 
 async def require_principal(request: Request) -> Principal:

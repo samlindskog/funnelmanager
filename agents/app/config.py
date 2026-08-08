@@ -19,6 +19,20 @@ class Settings(BaseSettings):
     # Identity/authz plumbing (JWT parsing, audience=agents checks, token
     # exchange for the agents->mcp hop) is configured via the FM_* env vars read
     # by fm_runtime, not here.
+    #
+    # Phase 1 telemetry is likewise env-driven and read directly by
+    # fm_runtime/logfire (NOT fields here — nothing in this Settings reads them):
+    #   FM_LOGFIRE                   opt-in flag; "1" turns tracing on. Unset in
+    #                                prod (logfire is then never imported).
+    #                                `agents` is the ONE service that sets it.
+    #   LOGFIRE_TOKEN                Logfire-cloud write token. Spans ship to the
+    #                                cloud only when set (send_to_logfire=
+    #                                'if-token-present'); unset in prod.
+    #   OTEL_EXPORTER_OTLP_ENDPOINT  OTLP/gRPC collector (Tempo) for dual export
+    #                                so app + mesh spans share one trace id, no
+    #                                Logfire-cloud dependency. Optional.
+    # fm_runtime.install() -> configure_tracing() wires these; app/main.py then
+    # adds logfire.instrument_pydantic_ai() (fm_runtime can't depend on it).
 
     # This service owns a dedicated database (funnelmanager_agents). The database
     # is also created at startup if missing (see database.init_db), so pointing
@@ -54,6 +68,50 @@ class Settings(BaseSettings):
     # How long a terminal run's final job event lingers for late-subscriber
     # replay before the in-memory registry prunes it.
     job_terminal_retention_seconds: float = 120.0
+
+    # How often the in-process schedule poller wakes to fire due schedules
+    # (seconds). Small enough that a one-shot ``at`` fires promptly, large enough
+    # that idle polling is cheap. Multi-pod-safe: each firing is claimed atomically
+    # at the DB level (schedules.claim_due_schedule) so a shared agents-db never
+    # double-fires.
+    schedule_poll_interval_seconds: float = 10.0
+
+    # P4 Denial-of-Wallet floor (fix #2): the minimum interval a RECURRING schedule
+    # may fire at. A recurring turn spins up an LLM + expensive MCP tool calls, and
+    # a prompt-injection payload (the agent reasons over untrusted Apollo/Gmail
+    # content) could otherwise plant a self-perpetuating ``* * * * *`` — ~1440
+    # turns/day/session, reloaded from Postgres on every restart. The schedule tool
+    # rejects any cron whose tightest implied interval is below this. NOTE: a full
+    # per-run cost budget / circuit breaker (cumulative Apollo credits + OpenAI $,
+    # OWASP LLM10) is the proper long-term control — TODO; a min-interval + a
+    # per-session recurring cap is the Phase-3 mitigation.
+    schedule_min_recurring_interval_minutes: int = 15
+    # Bound on how many ACTIVE (scheduled) recurring schedules one session may hold
+    # — a fire-rate cap complementing the min-interval (row-count alone is not a
+    # rate bound). Also a total-pending cap below.
+    schedule_max_recurring_per_session: int = 10
+    # Bound on total pending schedules per session (one-shot + recurring) so a
+    # looping agent can't flood the table with cheap one-shots.
+    schedule_max_pending_per_session: int = 25
+
+    # Single-writer control for the schedule poll loop (its captured-token cache +
+    # serial-chat guard are per-pod, so exactly one pod must run it). Env
+    # SCHEDULER_ENABLED:
+    #   "auto" (default) — run on every pod EXCEPT an explicit canary
+    #     (FM_DEPLOYMENT_VARIANT=canary), so the canary sharing the prod agents-db
+    #     never competes with stable.
+    #   "on"  — force the poller on (e.g. to drive a scheduling E2E on the canary
+    #     while stable has no scheduler yet — safe only when no OTHER pod runs it).
+    #   "off" — never run the poller here.
+    scheduler_enabled: str = "auto"  # auto | on | off
+
+    def should_run_scheduler(self, *, is_canary: bool) -> bool:
+        mode = (self.scheduler_enabled or "auto").strip().lower()
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        return not is_canary  # auto
 
     @property
     def cors_origin_list(self) -> list[str]:

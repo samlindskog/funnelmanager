@@ -52,6 +52,14 @@ class JobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     PAUSED = "paused"
+    #: Work that is registered but not yet executing — a persisted schedule
+    #: awaiting its ``next_run_at`` (agents), a queued-but-not-started run, etc.
+    #: **Non-terminal** (it is not in :data:`TERMINAL_STATUSES`) and, like
+    #: ``QUEUED``, represents *not-yet-running* work: a downstream ``jobs`` store
+    #: must **not** stamp ``started_at`` on a ``SCHEDULED`` event (real work has
+    #: not begun). Included in the active-only subscribe snapshot so a schedule is
+    #: replayed to a late subscriber.
+    SCHEDULED = "scheduled"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"
@@ -62,6 +70,8 @@ class JobStatus(str, Enum):
         **validate** a value (e.g. a user-supplied query filter or a control
         reply) where an unrecognized word should be rejected. To read a value off
         the job-event wire without ever dropping it, use :meth:`parse`."""
+        if isinstance(value, cls):
+            return value
         try:
             return cls(str(value))
         except ValueError as exc:
@@ -104,6 +114,8 @@ class JobControlAction(str, Enum):
 
     @classmethod
     def coerce(cls, value: object) -> JobControlAction:
+        if isinstance(value, cls):
+            return value
         try:
             return cls(str(value))
         except ValueError as exc:

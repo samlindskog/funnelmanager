@@ -1,8 +1,14 @@
 """Producer side of the jobs contract — ``/internal/jobs/v1/*`` (agents).
 
-The ``agents`` service is a **v1 job producer**: each runtime-agent run is a job.
-It publishes lifecycle ``JobEvent``s on the stream and exposes control so the
-``jobs`` service can pause/resume/cancel a run.
+The ``agents`` service is a **v1 job producer**: runtime-agent **turns** and
+**schedules** are jobs. It publishes lifecycle ``JobEvent``s on the stream and
+exposes control so the ``jobs`` service can pause/resume/cancel them. The producer
+machinery (broadcast hub, active-only snapshot incl. reloaded schedules, TTL
+prune, never-raise NDJSON generator, control apply-then-republish) lives in
+:class:`fm_runtime.JobProducer`; the single instance and the engine callbacks are
+wired in ``app.jobs_registry``. These two routes are thin adapters onto
+``job_producer`` that keep the trust boundary — the sibling of search's producer
+router.
 
 INTERNAL-JOBS TRUST BOUNDARY (binding — identical to search's producer side):
 - These routes are callable **only by the ``jobs`` service**, authorized by the
@@ -22,14 +28,12 @@ strictly per fm_runtime (in ``jobs_registry``).
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from fm_runtime import JobControlAction, Principal, require_principal
 
-from app.jobs_registry import job_registry
-from app.runner import run_manager
+from app.jobs_registry import job_producer
 
 logger = logging.getLogger(__name__)
 
@@ -40,23 +44,14 @@ router = APIRouter(prefix="/internal/jobs/v1", tags=["internal-jobs"])
 async def jobs_stream(
     _: Principal = Depends(require_principal),
 ) -> StreamingResponse:
-    """NDJSON stream of ``JobEvent``s for agent runs (jobs service only).
+    """NDJSON stream of ``JobEvent``s for agent turns + schedules (jobs service
+    only).
 
-    Replays a snapshot of every still-running run on connect, then streams live
-    events. Never raises once the response has started (the jobs subscriber
-    reconnects on a clean close)."""
-
-    async def event_stream() -> AsyncIterator[str]:
-        try:
-            async for event in job_registry.subscribe():
-                yield event.to_json_line()
-        except Exception:
-            # Never raise out of a started stream — the jobs subscriber reconnects.
-            logger.exception("agents jobs stream terminated early")
-            return
-
+    Replays a snapshot of every non-terminal job (running/paused turns +
+    scheduled schedules) on connect, then streams live events. Never raises once
+    the response has started (the jobs subscriber reconnects on a clean close)."""
     return StreamingResponse(
-        event_stream(),
+        job_producer.stream_ndjson(),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -69,9 +64,14 @@ async def jobs_control(
     principal: Principal = Depends(require_principal),
     x_fm_acting_user: str | None = Header(default=None),
 ) -> dict:
-    """Pause/resume/cancel an agent run (jobs service only). Idempotent; returns
-    the new status. ``X-FM-Acting-User`` is recorded for attribution only — the
-    call is authorized as the jobs service account, not the human."""
+    """Pause/resume/cancel an agent turn or schedule (jobs service only).
+    Idempotent; returns the new status. ``X-FM-Acting-User`` is recorded for
+    attribution only — the call is authorized as the jobs service account, not the
+    human.
+
+    ``(status, applied)`` are derived directly from the ``JobEvent``
+    ``dispatch_control`` returns (an event ⇒ the control applied; ``None`` ⇒ a
+    no-op / unknown job) — no request-scoped contextvars needed."""
     try:
         control = JobControlAction.coerce(action)
     except ValueError as exc:
@@ -90,11 +90,15 @@ async def jobs_control(
         acting_user or "-",
     )
 
-    new_status, applied = await run_manager.control(cleaned, control.value)
+    # Apply the action to the agents engine and re-publish the outcome onto the
+    # stream (both handled by JobProducer.dispatch_control -> apply_control).
+    event = await job_producer.dispatch_control(cleaned, control.value)
+    applied = event is not None
+    status = event.status.value if event is not None else "completed"
     return {
         "job_id": cleaned,
         "action": control.value,
-        "status": new_status,
+        "status": status,
         "applied": applied,
         "acting_user": acting_user or None,
     }

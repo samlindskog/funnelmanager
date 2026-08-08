@@ -10,3 +10,11 @@ greenlet==3.2.1
 # whatever model builds this service. `mcp` extra pulls the FastMCP client used
 # to reach the internal MCP server; `openai` pulls the OpenAI provider.
 pydantic-ai-slim[openai,mcp]==2.18.0
+# Opt-in Phase 1 telemetry (logfire + OTLP-gRPC exporter) is pinned in ONE place —
+# the fm-runtime[tracing] extra (libs/fm_runtime/pyproject.toml). `agents` is the one
+# service that opts in, so its Dockerfile installs `./libs/fm_runtime[tracing]`; the
+# versions are NOT re-declared here (two copies would risk an otel api/sdk/exporter
+# skew). fm_runtime.install() -> configure_tracing() does logfire.configure +
+# instrument_fastapi/httpx; agents additionally calls instrument_pydantic_ai() in
+# app/main.py (fm_runtime must not depend on pydantic-ai). With FM_LOGFIRE unset,
+# prod pays nothing.
