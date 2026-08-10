@@ -247,6 +247,43 @@ def lead_embedding_text(doc: dict[str, Any]) -> str:
     return person_embedding_text(doc)
 
 
+def lead_embedding_texts(doc: dict[str, Any]) -> dict[str, str]:
+    """Per-kind embedding texts for a lead: ``{kind: text}``.
+
+    - ``apollo``: the existing ``lead_embedding_text`` passage (unchanged builder).
+    - ``name`` / ``title`` (people only): the raw name / title strings, added
+      alongside the apollo passage; a kind is skipped when its field is absent.
+
+    Organizations get ``apollo`` only. Each (doc, kind) becomes one Milvus row
+    (schema v2), so the caller can rank by the average similarity across a
+    caller-selected subset of kinds.
+    """
+    entity_type = doc.get("entity_type") or "person"
+    if entity_type == "organization":
+        text = organization_embedding_text(doc)
+        return {"apollo": text} if text.strip() else {}
+
+    texts: dict[str, str] = {}
+    apollo = person_embedding_text(doc)
+    if apollo.strip():
+        texts["apollo"] = apollo
+
+    person = person_payload_from_doc(doc) or {}
+    name = person.get("name") or " ".join(
+        str(part).strip()
+        for part in (person.get("first_name"), person.get("last_name"))
+        if part
+    )
+    if isinstance(name, str) and name.strip():
+        texts["name"] = name.strip()
+
+    title = person.get("title")
+    if isinstance(title, str) and title.strip():
+        texts["title"] = title.strip()
+
+    return texts
+
+
 async def embed_texts(
     texts: list[str],
     *,

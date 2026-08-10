@@ -30,6 +30,7 @@ from app.apollo_endpoints import (
 )
 from app.config import Settings, get_settings
 from app.database import get_database, get_db
+from app.derived import derive_top_fields
 from app.embeddings import (
     EMBED_SOURCE_COMPLETE_INFO,
     EMBED_SOURCE_MATCH,
@@ -106,6 +107,12 @@ def _serialize_lead(doc: dict[str, Any]) -> LeadOut:
         embedding=bool(doc.get("embedding")),
         apollo_enriched=ApolloEnrichedFlags(**flags),
         apollo_responses=_serialize_responses(responses),
+        name=doc.get("name"),
+        title=doc.get("title"),
+        company_id=doc.get("company_id"),
+        email=doc.get("email"),
+        phone=doc.get("phone"),
+        linkedin=doc.get("linkedin"),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
@@ -326,6 +333,9 @@ async def _upsert_search_records(
             if existing:
                 responses = responses_from_doc(existing)
                 responses[endpoint] = entry
+                # Derived top-level index fields recomputed from the merged
+                # responses (per-field precedence => only upgrades, never regresses).
+                derived = derive_top_fields(entity_type, responses)
                 await db.leads.update_one(
                     {"_id": existing["_id"]},
                     {
@@ -334,6 +344,7 @@ async def _upsert_search_records(
                             "apollo_responses": responses,
                             "embedding": _embedding_flag_after_update(existing, endpoint),
                             "updated_at": now,
+                            **derived,
                         },
                         "$unset": {"apollo_response": ""},
                     },
@@ -349,6 +360,7 @@ async def _upsert_search_records(
                 "embedding": False,
                 "created_at": now,
                 "updated_at": now,
+                **derive_top_fields(entity_type, {endpoint: entry}),
             }
             try:
                 result = await db.leads.insert_one(doc)
@@ -390,6 +402,7 @@ async def _upsert_enriched_record(
                 email=email,
                 phone=phone,
             )
+            derived = derive_top_fields(entity_type, responses)
             await db.leads.update_one(
                 {"_id": existing["_id"]},
                 {
@@ -399,6 +412,7 @@ async def _upsert_enriched_record(
                         "apollo_enriched": flags,
                         "embedding": _embedding_flag_after_update(existing, endpoint),
                         "updated_at": now,
+                        **derived,
                     },
                     "$unset": {"apollo_response": ""},
                 },
@@ -422,6 +436,7 @@ async def _upsert_enriched_record(
                     "embedding": False,
                     "created_at": now,
                     "updated_at": now,
+                    **derive_top_fields(entity_type, {endpoint: entry}),
                 }
             )
         except DuplicateKeyError:
@@ -1872,6 +1887,9 @@ async def apollo_people_match_webhook(
                 email=has_email_payload,
                 phone=has_phone_payload,
             )
+            # Async phone-reveal / waterfall payload upserts email/phone/linkedin
+            # onto the already-stored doc (the §1.3 upsert guarantee).
+            derived = derive_top_fields("person", responses)
             if existing:
                 await db.leads.update_one(
                     {"_id": existing["_id"]},
@@ -1882,6 +1900,7 @@ async def apollo_people_match_webhook(
                             "apollo_enriched": flags,
                             "embedding": False,
                             "updated_at": now,
+                            **derived,
                         },
                         "$unset": {"apollo_response": ""},
                     },
@@ -1898,6 +1917,7 @@ async def apollo_people_match_webhook(
                         "embedding": False,
                         "created_at": now,
                         "updated_at": now,
+                        **derived,
                     }
                 )
             except DuplicateKeyError:
@@ -1913,24 +1933,144 @@ async def apollo_people_match_webhook(
     return {"status": "ok", "updated": updated_ids, "count": len(updated_ids)}
 
 
+def _milvus_str_literal(value: str) -> str:
+    """Quote a string for a Milvus boolean expr (escape backslash and quote)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _milvus_scalar_expr(company_apollo_id: str | None, body: SimilaritySearchRequest) -> str:
+    """Milvus filter expr over the derived scalar fields (recall; re-checked in Mongo)."""
+    parts: list[str] = []
+    if company_apollo_id:
+        parts.append(f"company_id == {_milvus_str_literal(company_apollo_id)}")
+    if body.email_exists is not None:
+        parts.append(f"has_email == {'true' if body.email_exists else 'false'}")
+    if body.phone_exists is not None:
+        parts.append(f"has_phone == {'true' if body.phone_exists else 'false'}")
+    if body.linkedin_exists is not None:
+        parts.append(f"has_linkedin == {'true' if body.linkedin_exists else 'false'}")
+    return " and ".join(parts)
+
+
+def _doc_passes_filters(
+    doc: dict[str, Any],
+    company_apollo_id: str | None,
+    body: SimilaritySearchRequest,
+) -> bool:
+    """Authoritative re-check of every requested filter against the hydrated Mongo doc."""
+    if company_apollo_id is not None:
+        if str(doc.get("company_id") or "") != company_apollo_id:
+            return False
+    if body.email_exists is not None:
+        if (doc.get("email") is not None) != body.email_exists:
+            return False
+    if body.phone_exists is not None:
+        if (doc.get("phone") is not None) != body.phone_exists:
+            return False
+    if body.linkedin_exists is not None:
+        if (doc.get("linkedin") is not None) != body.linkedin_exists:
+            return False
+    return True
+
+
+async def _resolve_company_apollo_id(
+    db: AsyncIOMotorDatabase,
+    company_id: str | None,
+) -> str | None:
+    """Load the org doc by Mongo _id and return its apollo_id (the people filter value)."""
+    if company_id is None:
+        return None
+    try:
+        org_object_id = ObjectId(company_id.strip())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="company_id must be a valid Mongo _id (hex ObjectId)",
+        ) from exc
+    org_doc = await db.leads.find_one({"_id": org_object_id})
+    if not org_doc or (org_doc.get("entity_type") or "person") != "organization":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No organization lead found for company_id {company_id}",
+        )
+    apollo_id = str(org_doc.get("apollo_id") or "").strip()
+    if not apollo_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization lead {company_id} has no Apollo id to filter by",
+        )
+    return apollo_id
+
+
+async def _pure_filter_similarity(
+    db: AsyncIOMotorDatabase,
+    body: SimilaritySearchRequest,
+    company_apollo_id: str | None,
+) -> SimilaritySearchResponse:
+    """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
+    query: dict[str, Any] = {}
+    if company_apollo_id is not None:
+        query["entity_type"] = "person"
+        query["company_id"] = company_apollo_id
+    for field, flag in (
+        ("email", body.email_exists),
+        ("phone", body.phone_exists),
+        ("linkedin", body.linkedin_exists),
+    ):
+        if flag is True:
+            query[field] = {"$ne": None}
+        elif flag is False:
+            query[field] = None  # matches missing or null
+    cursor = db.leads.find(query).sort("updated_at", -1).limit(body.limit)
+    docs = await cursor.to_list(length=body.limit)
+    results = [SimilarityHitOut(score=None, lead=_serialize_lead(doc)) for doc in docs]
+    return SimilaritySearchResponse(results=results)
+
+
 @router.post("/similarity-search", response_model=SimilaritySearchResponse)
 async def similarity_search(
     body: SimilaritySearchRequest,
     db: AsyncIOMotorDatabase = Depends(get_database),
     settings: Settings = Depends(get_settings),
 ) -> SimilaritySearchResponse:
-    """Embed `query` and return top similar leads from Milvus + Mongo."""
-    query = body.query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="query must not be empty")
+    """Rank leads by mean similarity across a selected subset of embed kinds, with filters.
+
+    ``embeds`` (omitted => ``["apollo"]``; ``[]`` => pure filter search) selects the
+    per-kind embeddings to average; ``company_id`` / ``email_exists`` /
+    ``phone_exists`` / ``linkedin_exists`` filter the result set. Milvus scalar
+    filters provide recall; the hydrated Mongo docs are re-checked authoritatively.
+    """
+    company_apollo_id = await _resolve_company_apollo_id(db, body.company_id)
+    embeds = body.embeds if body.embeds is not None else ["apollo"]
+
+    # Pure filter search: no Milvus / OpenAI (works even when either is down).
+    if not embeds:
+        return await _pure_filter_similarity(db, body, company_apollo_id)
+
     if not settings.openai_configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="OPENAI_API_KEY is not configured",
         )
+    query = (body.query or "").strip()
+
     try:
         vectors = await embed_texts([query], settings=settings)
-        hits = await search_similar(vectors[0], limit=body.limit, settings=settings)
+        query_vector = vectors[0]
+        scalar_expr = _milvus_scalar_expr(company_apollo_id, body)
+        oversample = min(body.limit * 4, 16384)
+        # score contributions per doc, keyed by the kinds it appears in.
+        per_doc_scores: dict[str, dict[str, float]] = {}
+        for kind in embeds:
+            expr = f"embed_kind == {_milvus_str_literal(kind)}"
+            if scalar_expr:
+                expr = f"{expr} and {scalar_expr}"
+            hits = await search_similar(
+                query_vector, expr=expr, limit=oversample, settings=settings
+            )
+            for mongo_id, score in hits:
+                per_doc_scores.setdefault(mongo_id, {})[kind] = score
     except HTTPException:
         raise
     except Exception as exc:
@@ -1940,18 +2080,24 @@ async def similarity_search(
             detail=f"Similarity search unavailable: {exc}",
         ) from exc
 
+    # Mean similarity over the selected kinds each doc actually has (no zero-penalty).
+    merged: list[tuple[str, float]] = []
+    for mongo_id, kind_scores in per_doc_scores.items():
+        if not kind_scores:
+            continue
+        merged.append((mongo_id, sum(kind_scores.values()) / len(kind_scores)))
+    merged.sort(key=lambda item: item[1], reverse=True)
+    merged = merged[: body.limit]
+
+    ordered: list[tuple[str, float]] = []
     object_ids: list[ObjectId] = []
-    scores_by_id: dict[str, float] = {}
-    for mongo_id, score in hits:
+    for mongo_id, score in merged:
         try:
             object_id = ObjectId(mongo_id)
         except Exception:
             continue
-        key = str(object_id)
-        if key in scores_by_id:
-            continue
         object_ids.append(object_id)
-        scores_by_id[key] = score
+        ordered.append((str(object_id), score))
 
     docs_by_id: dict[str, dict[str, Any]] = {}
     if object_ids:
@@ -1960,14 +2106,14 @@ async def similarity_search(
             docs_by_id[str(doc["_id"])] = doc
 
     results: list[SimilarityHitOut] = []
-    for object_id in object_ids:
-        key = str(object_id)
-        doc = docs_by_id.get(key)
+    for mongo_id, score in ordered:
+        doc = docs_by_id.get(mongo_id)
         if not doc:
             continue
-        results.append(
-            SimilarityHitOut(score=scores_by_id.get(key, 0.0), lead=_serialize_lead(doc))
-        )
+        # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
+        if not _doc_passes_filters(doc, company_apollo_id, body):
+            continue
+        results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
     return SimilaritySearchResponse(results=results)
 
 

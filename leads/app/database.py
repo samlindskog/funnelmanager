@@ -36,6 +36,12 @@ async def init_db() -> None:
     await db.leads.create_index("apollo_enriched.email")
     await db.leads.create_index("apollo_enriched.phone")
     await db.leads.create_index("updated_at")
+    # Derived top-level index fields (semantic-search v2): support company filtering
+    # and email/phone/linkedin exists-filters ({"$ne": None} / {"$eq": None}).
+    await db.leads.create_index("company_id")
+    await db.leads.create_index("email")
+    await db.leads.create_index("phone")
+    await db.leads.create_index("linkedin")
 
 
 async def close_db() -> None:

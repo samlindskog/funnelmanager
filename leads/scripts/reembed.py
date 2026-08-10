@@ -1,16 +1,22 @@
-"""Rebuild the Milvus collection from Mongo docs already marked embedding=True.
+"""Combined semantic-search-v2 migration: backfill derived fields + rebuild Milvus.
 
 Run inside the leads container (CWD /app):
 
     docker compose ... exec leads python scripts/reembed.py
 
-Drops and recreates the collection, then re-embeds every lead whose Mongo doc
-has ``embedding: true``. Mongo is the source of truth, so this is safe to run
-after seeding Mongo on a fresh box (avoids copying Milvus' bloated object
-storage) or any time the vector store needs to be rebuilt. Idempotent.
+Pass 1 — backfill the derived top-level fields (name / title / company_id /
+email / phone / linkedin) on **every** lead doc (not just embedded ones), so
+existing docs gain the fields new writes already carry. Only non-null derived
+keys are ``$set`` (a field is never regressed to null).
 
-Mongo's ``embedding_source`` precedence is left untouched (the Milvus schema
-stores no precedence), so a high ``source_precedence`` is passed purely to keep
+Pass 2 — drop and recreate the (v2) Milvus collection, then re-embed every lead
+whose Mongo doc has ``embedding: true`` into all applicable per-kind rows
+(apollo / name / title). Mongo is the source of truth, so this is safe to run
+after seeding Mongo on a fresh box or any time the vector store needs rebuilding.
+Idempotent.
+
+Mongo's ``embedding_source`` precedence is left untouched (Milvus stores no
+precedence), so a high ``source_precedence`` is passed purely to keep
 ``index_lead_docs`` from skipping any doc during a from-scratch rebuild.
 """
 
@@ -21,7 +27,9 @@ import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymilvus import utility
 
+from app.apollo_endpoints import responses_from_doc
 from app.config import get_settings
+from app.derived import derive_top_fields
 from app.milvus_client import connect_milvus, ensure_collection_async, index_lead_docs
 
 BATCH = 128
@@ -35,23 +43,44 @@ async def _flush(batch: list[dict]) -> int:
     return len(await index_lead_docs(batch, source_precedence=SOURCE_PRECEDENCE))
 
 
-async def main() -> None:
-    cfg = get_settings()
-    if not cfg.openai_configured:
-        raise SystemExit("OPENAI_API_KEY not configured; cannot embed.")
+async def _backfill_top_fields(db) -> int:
+    """Pass 1: derive + write top-level fields on every doc. Returns docs updated."""
+    total = await db.leads.count_documents({})
+    print(f"pass 1: backfilling derived top-level fields on {total} doc(s)", flush=True)
+    updated = 0
+    scanned = 0
+    projection = {
+        "entity_type": 1,
+        "apollo_responses": 1,
+        "apollo_response": 1,
+        "apollo_enriched": 1,
+        "updated_at": 1,
+        "created_at": 1,
+    }
+    async for doc in db.leads.find({}, projection=projection):
+        scanned += 1
+        entity_type = doc.get("entity_type") or "person"
+        derived = derive_top_fields(entity_type, responses_from_doc(doc))
+        if derived:
+            await db.leads.update_one({"_id": doc["_id"]}, {"$set": derived})
+            updated += 1
+        if scanned % 5000 == 0:
+            print(f"  scanned {scanned}/{total} (updated {updated})", flush=True)
+    print(f"pass 1 DONE: updated {updated}/{total} doc(s)", flush=True)
+    return updated
 
-    client = AsyncIOMotorClient(cfg.mongodb_url)
-    db = client[cfg.mongodb_db]
 
+async def _rebuild_embeddings(db, cfg) -> int:
+    """Pass 2: drop/recreate the v2 collection and re-embed embedded docs."""
     connect_milvus(cfg)
     name = cfg.milvus_collection
     if utility.has_collection(name):
         utility.drop_collection(name)
-        print(f"dropped existing collection {name}", flush=True)
+        print(f"pass 2: dropped existing collection {name}", flush=True)
     await ensure_collection_async(cfg)
 
     total = await db.leads.count_documents({"embedding": True})
-    print(f"{total} lead(s) marked embedding=True", flush=True)
+    print(f"pass 2: {total} lead(s) marked embedding=True", flush=True)
 
     indexed = 0
     batch: list[dict] = []
@@ -60,10 +89,28 @@ async def main() -> None:
         if len(batch) >= BATCH:
             indexed += await _flush(batch)
             batch = []
-            print(f"indexed {indexed}/{total}", flush=True)
+            print(f"  indexed {indexed}/{total}", flush=True)
     indexed += await _flush(batch)
+    print(f"pass 2 DONE: {indexed} doc(s) re-embedded into {name}", flush=True)
+    return indexed
 
-    print(f"DONE: {indexed} vector(s) upserted into {name}", flush=True)
+
+async def main() -> None:
+    cfg = get_settings()
+
+    client = AsyncIOMotorClient(cfg.mongodb_url)
+    db = client[cfg.mongodb_db]
+
+    await _backfill_top_fields(db)
+
+    if not cfg.openai_configured:
+        print(
+            "OPENAI_API_KEY not configured; skipping pass 2 (Milvus rebuild). "
+            "Derived-field backfill (pass 1) completed.",
+            flush=True,
+        )
+        return
+    await _rebuild_embeddings(db, cfg)
 
 
 if __name__ == "__main__":
