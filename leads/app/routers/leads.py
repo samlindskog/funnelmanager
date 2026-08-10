@@ -41,6 +41,7 @@ from app.embeddings import (
 from app.milvus_client import (
     NICE_BACKFILL,
     NICE_SEARCH_EMBED,
+    _milvus_str_literal,
     index_lead_docs,
     search_similar,
 )
@@ -113,6 +114,7 @@ def _serialize_lead(doc: dict[str, Any]) -> LeadOut:
         email=doc.get("email"),
         phone=doc.get("phone"),
         linkedin=doc.get("linkedin"),
+        derived_at=doc.get("derived_at"),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
@@ -339,11 +341,16 @@ async def _upsert_search_records(
                 await db.leads.update_one(
                     {"_id": existing["_id"]},
                     {
+                        # $set only THIS endpoint's entry via a dotted path (never
+                        # the whole apollo_responses map) so a concurrent writer's
+                        # entry for a different endpoint is not lost (lost-update
+                        # race, e.g. enrich racing its own phone-reveal webhook).
                         "$set": {
                             "entity_type": entity_type,
-                            "apollo_responses": responses,
+                            f"apollo_responses.{endpoint}": entry,
                             "embedding": _embedding_flag_after_update(existing, endpoint),
                             "updated_at": now,
+                            "derived_at": now,
                             **derived,
                         },
                         "$unset": {"apollo_response": ""},
@@ -360,6 +367,7 @@ async def _upsert_search_records(
                 "embedding": False,
                 "created_at": now,
                 "updated_at": now,
+                "derived_at": now,
                 **derive_top_fields(entity_type, {endpoint: entry}),
             }
             try:
@@ -406,12 +414,16 @@ async def _upsert_enriched_record(
             await db.leads.update_one(
                 {"_id": existing["_id"]},
                 {
+                    # $set only THIS endpoint's entry via a dotted path (never the
+                    # whole apollo_responses map) so a concurrent writer's entry for
+                    # a different endpoint is not lost (lost-update race).
                     "$set": {
                         "entity_type": entity_type,
-                        "apollo_responses": responses,
+                        f"apollo_responses.{endpoint}": entry,
                         "apollo_enriched": flags,
                         "embedding": _embedding_flag_after_update(existing, endpoint),
                         "updated_at": now,
+                        "derived_at": now,
                         **derived,
                     },
                     "$unset": {"apollo_response": ""},
@@ -436,6 +448,7 @@ async def _upsert_enriched_record(
                     "embedding": False,
                     "created_at": now,
                     "updated_at": now,
+                    "derived_at": now,
                     **derive_top_fields(entity_type, {endpoint: entry}),
                 }
             )
@@ -1863,7 +1876,8 @@ async def apollo_people_match_webhook(
                 data = {}
 
             data = _merge_async_person_into_match_data(data, entry, payload=payload)
-            responses[PERSON_MATCH] = endpoint_entry(data, now)
+            new_match_entry = endpoint_entry(data, now)
+            responses[PERSON_MATCH] = new_match_entry
             targets = payload.get("target_fields")
             target_set = (
                 {str(item).lower() for item in targets}
@@ -1894,12 +1908,16 @@ async def apollo_people_match_webhook(
                 await db.leads.update_one(
                     {"_id": existing["_id"]},
                     {
+                        # $set only the people/match entry via a dotted path (never
+                        # the whole apollo_responses map) so a concurrent enrich /
+                        # match writer's entry for another endpoint is not lost.
                         "$set": {
                             "entity_type": "person",
-                            "apollo_responses": responses,
+                            f"apollo_responses.{PERSON_MATCH}": new_match_entry,
                             "apollo_enriched": flags,
                             "embedding": False,
                             "updated_at": now,
+                            "derived_at": now,
                             **derived,
                         },
                         "$unset": {"apollo_response": ""},
@@ -1917,6 +1935,7 @@ async def apollo_people_match_webhook(
                         "embedding": False,
                         "created_at": now,
                         "updated_at": now,
+                        "derived_at": now,
                         **derived,
                     }
                 )
@@ -1936,12 +1955,6 @@ async def apollo_people_match_webhook(
 # Batch size for hydrating similarity candidates from Mongo (matches the 500-doc
 # batch convention used elsewhere, e.g. the search-side get_by_mongo_ids chunking).
 _HYDRATE_CHUNK = 500
-
-
-def _milvus_str_literal(value: str) -> str:
-    """Quote a string for a Milvus boolean expr (escape backslash and quote)."""
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
 
 
 def _milvus_scalar_expr(company_apollo_id: str | None, body: SimilaritySearchRequest) -> str:
@@ -2098,7 +2111,12 @@ async def similarity_search(
         vectors = await embed_texts([query], settings=settings)
         query_vector = vectors[0]
         scalar_expr = _milvus_scalar_expr(company_apollo_id, body)
-        oversample = min(body.limit * 4, 16384)
+        # Split the ANN candidate budget across the selected kinds so the TOTAL
+        # per-kind candidate work stays ~bounded at the old single-search ceiling
+        # (16384) regardless of how many kinds are requested. This endpoint is
+        # agent-reachable and each kind is one ANN search on the serializing
+        # Milvus gate, so N kinds * 16384 would N-multiply the work (P4 amplification).
+        oversample = min(body.limit * 4, max(body.limit, 16384 // len(embeds)))
         # score contributions per doc, keyed by the kinds it appears in.
         per_doc_scores: dict[str, dict[str, float]] = {}
         for kind in embeds:
@@ -2132,11 +2150,18 @@ async def similarity_search(
     # per doc and accumulating passing hits until ``limit`` is reached or candidates
     # are exhausted. Truncating to ``limit`` before the re-check could return fewer
     # than ``limit`` rows when the head of the list carries stale Milvus scalars.
+    # Bound the fill-to-limit hydration scan: examine at most this many merged
+    # candidates (each hydrated from Mongo in 500-doc chunks). Caps the worst-case
+    # sequential Mongo work on this agent-reachable endpoint; when the cap
+    # truncates before ``limit`` results accumulate we log (no silent caps) and
+    # return what passed.
+    hydration_cap = max(body.limit * 10, 2000)
+    candidates = merged[:hydration_cap]
     results: list[SimilarityHitOut] = []
-    for chunk_start in range(0, len(merged), _HYDRATE_CHUNK):
+    for chunk_start in range(0, len(candidates), _HYDRATE_CHUNK):
         if len(results) >= body.limit:
             break
-        chunk = merged[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        chunk = candidates[chunk_start : chunk_start + _HYDRATE_CHUNK]
         object_ids: list[ObjectId] = []
         for mongo_id, _score in chunk:
             try:
@@ -2160,6 +2185,15 @@ async def similarity_search(
             results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
             if len(results) >= body.limit:
                 break
+    if len(results) < body.limit and len(merged) > hydration_cap:
+        logger.warning(
+            "similarity_search hydration cap reached: examined %s of %s merged "
+            "candidate(s), returning %s of requested %s result(s)",
+            len(candidates),
+            len(merged),
+            len(results),
+            body.limit,
+        )
     return SimilaritySearchResponse(results=results)
 
 

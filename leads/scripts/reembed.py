@@ -23,6 +23,7 @@ precedence), so a high ``source_precedence`` is passed purely to keep
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymilvus import utility
@@ -61,9 +62,14 @@ async def _backfill_top_fields(db) -> int:
         scanned += 1
         entity_type = doc.get("entity_type") or "person"
         derived = derive_top_fields(entity_type, responses_from_doc(doc))
-        if derived:
-            await db.leads.update_one({"_id": doc["_id"]}, {"$set": derived})
-            updated += 1
+        # Always stamp derived_at (the v2 authoritative-top-fields marker), even
+        # when no derived field is present, so downstream consumers can trust the
+        # top-level fields without proxying off name-presence.
+        await db.leads.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {**derived, "derived_at": datetime.now(timezone.utc)}},
+        )
+        updated += 1
         if scanned % 5000 == 0:
             print(f"  scanned {scanned}/{total} (updated {updated})", flush=True)
     print(f"pass 1 DONE: updated {updated}/{total} doc(s)", flush=True)
@@ -97,19 +103,17 @@ async def _rebuild_embeddings(db, cfg) -> int:
 
 async def main() -> None:
     cfg = get_settings()
+    # Fail fast before touching anything: the migration is a single unit (pass 1
+    # backfill + pass 2 Milvus rebuild). Skipping pass 2 would look like success
+    # while leaving the vector store un-rebuilt. An operator fixes the key and
+    # re-runs (both passes are idempotent).
+    if not cfg.openai_configured:
+        raise SystemExit("OPENAI_API_KEY not configured; cannot embed.")
 
     client = AsyncIOMotorClient(cfg.mongodb_url)
     db = client[cfg.mongodb_db]
 
     await _backfill_top_fields(db)
-
-    if not cfg.openai_configured:
-        print(
-            "OPENAI_API_KEY not configured; skipping pass 2 (Milvus rebuild). "
-            "Derived-field backfill (pass 1) completed.",
-            flush=True,
-        )
-        return
     await _rebuild_embeddings(db, cfg)
 
 

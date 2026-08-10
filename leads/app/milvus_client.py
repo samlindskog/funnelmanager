@@ -264,6 +264,44 @@ class LeadVectorRow:
     embedding: list[float]
 
 
+@dataclass
+class _Prepared:
+    """A lead doc resolved to its per-kind embed texts + scalar fields, ready to embed."""
+
+    mongo_id: str
+    apollo_id: str
+    entity_type: str
+    company_id: str
+    has_email: bool
+    has_phone: bool
+    has_linkedin: bool
+    texts: dict[str, str]
+    stored_precedence: int
+
+
+def _prepare_lead_row(doc: dict[str, Any], source_precedence: int) -> _Prepared | None:
+    """Resolve a Mongo lead doc to a ``_Prepared`` (None when it has no embed text).
+
+    The stored precedence is never lowered: it is ``max`` over the doc's own data
+    tier (``lead_embedding_precedence``) and the requesting ``source_precedence``.
+    """
+    texts = lead_embedding_texts(doc)
+    if not texts:
+        return None
+    stored_precedence = max(lead_embedding_precedence(doc), source_precedence)
+    return _Prepared(
+        mongo_id=str(doc.get("_id") or "").strip(),
+        apollo_id=str(doc.get("apollo_id") or "").strip(),
+        entity_type=doc.get("entity_type") or "person",
+        company_id=str(doc.get("company_id") or ""),
+        has_email=doc.get("email") is not None,
+        has_phone=doc.get("phone") is not None,
+        has_linkedin=doc.get("linkedin") is not None,
+        texts=texts,
+        stored_precedence=stored_precedence,
+    )
+
+
 def _upsert_lead_vectors_sync(
     rows: list[LeadVectorRow],
     *,
@@ -417,6 +455,63 @@ async def query_apollo_scalars(
         )
 
 
+async def _reindex_scalar_drift(
+    skipped_by_precedence: list[dict[str, Any]],
+    *,
+    source_precedence: int,
+    nice: int,
+    settings: Settings,
+) -> list[_Prepared]:
+    """Re-prepare precedence-skipped docs whose derived scalars drifted from Milvus.
+
+    ``index_lead_docs`` skips docs whose stored vector came from a strictly higher
+    precedence source. But the derived scalar fields (``has_email`` …,
+    ``company_id``) may have advanced since (e.g. a MATCH-embedded doc later
+    BY_ID-enriched), leaving the stored Milvus row stale. For each skipped doc
+    whose current scalars differ from its stored apollo-kind row, return a
+    ``_Prepared`` so it is re-indexed. never-downgrade precedence is preserved
+    (``_prepare_lead_row`` takes ``max(doc-tier, source)``). A scalar-query failure
+    must never break ingest — it is logged and every skipped doc is left as-is.
+    """
+    if not skipped_by_precedence:
+        return []
+    drift_ids = [
+        mongo_id
+        for mongo_id in (str(doc.get("_id") or "").strip() for doc in skipped_by_precedence)
+        if mongo_id
+    ]
+    try:
+        stored_scalars = await query_apollo_scalars(drift_ids, nice=nice, settings=settings)
+    except Exception:
+        logger.exception(
+            "Scalar-drift check failed; leaving %s skipped doc(s) as-is", len(drift_ids)
+        )
+        return []
+    out: list[_Prepared] = []
+    for doc in skipped_by_precedence:
+        row = stored_scalars.get(str(doc.get("_id") or "").strip())
+        if not row:
+            continue
+        current = (
+            doc.get("email") is not None,
+            doc.get("phone") is not None,
+            doc.get("linkedin") is not None,
+            str(doc.get("company_id") or ""),
+        )
+        stored = (
+            bool(row.get("has_email")),
+            bool(row.get("has_phone")),
+            bool(row.get("has_linkedin")),
+            str(row.get("company_id") or ""),
+        )
+        if current == stored:
+            continue
+        item = _prepare_lead_row(doc, source_precedence)
+        if item is not None:
+            out.append(item)
+    return out
+
+
 async def index_lead_docs(
     docs: list[dict[str, Any]],
     *,
@@ -458,37 +553,6 @@ async def index_lead_docs(
         logger.warning("Skipping lead embedding: OPENAI_API_KEY not configured")
         return []
 
-    @dataclass
-    class _Prepared:
-        mongo_id: str
-        apollo_id: str
-        entity_type: str
-        company_id: str
-        has_email: bool
-        has_phone: bool
-        has_linkedin: bool
-        texts: dict[str, str]
-        stored_precedence: int
-
-    def _prepare(doc: dict[str, Any]) -> _Prepared | None:
-        texts = lead_embedding_texts(doc)
-        if not texts:
-            return None
-        # The vector reflects the best data available for this doc; the stored
-        # precedence is never lowered (max over the doc's own tier + this source).
-        stored_precedence = max(lead_embedding_precedence(doc), source_precedence)
-        return _Prepared(
-            mongo_id=str(doc.get("_id") or "").strip(),
-            apollo_id=str(doc.get("apollo_id") or "").strip(),
-            entity_type=doc.get("entity_type") or "person",
-            company_id=str(doc.get("company_id") or ""),
-            has_email=doc.get("email") is not None,
-            has_phone=doc.get("phone") is not None,
-            has_linkedin=doc.get("linkedin") is not None,
-            texts=texts,
-            stored_precedence=stored_precedence,
-        )
-
     prepared: list[_Prepared] = []
     skipped_by_precedence: list[dict[str, Any]] = []
     for doc in docs:
@@ -509,49 +573,20 @@ async def index_lead_docs(
             # MATCH-embedded doc later BY_ID-enriched), leaving Milvus stale.
             skipped_by_precedence.append(doc)
             continue
-        item = _prepare(doc)
+        item = _prepare_lead_row(doc, source_precedence)
         if item is not None:
             prepared.append(item)
 
-    # Re-index precedence-skipped docs ONLY when their current derived scalars differ
-    # from the stored apollo-kind Milvus row. never-downgrade precedence is preserved
-    # (``_prepare`` computes stored_precedence = max(doc-tier, source), which can't
-    # lower the recorded tier). A scalar-query failure must never break ingest — log
-    # and fall back to the plain skip.
-    if skipped_by_precedence:
-        drift_ids = [
-            mongo_id
-            for mongo_id in (str(doc.get("_id") or "").strip() for doc in skipped_by_precedence)
-            if mongo_id
-        ]
-        try:
-            stored_scalars = await query_apollo_scalars(drift_ids, nice=nice, settings=cfg)
-        except Exception:
-            logger.exception(
-                "Scalar-drift check failed; leaving %s skipped doc(s) as-is", len(drift_ids)
-            )
-            stored_scalars = {}
-        for doc in skipped_by_precedence:
-            row = stored_scalars.get(str(doc.get("_id") or "").strip())
-            if not row:
-                continue
-            current = (
-                doc.get("email") is not None,
-                doc.get("phone") is not None,
-                doc.get("linkedin") is not None,
-                str(doc.get("company_id") or ""),
-            )
-            stored = (
-                bool(row.get("has_email")),
-                bool(row.get("has_phone")),
-                bool(row.get("has_linkedin")),
-                str(row.get("company_id") or ""),
-            )
-            if current == stored:
-                continue
-            item = _prepare(doc)
-            if item is not None:
-                prepared.append(item)
+    # Re-index precedence-skipped docs whose current derived scalars have drifted
+    # from their stored Milvus row (helper preserves never-downgrade precedence).
+    prepared.extend(
+        await _reindex_scalar_drift(
+            skipped_by_precedence,
+            source_precedence=source_precedence,
+            nice=nice,
+            settings=cfg,
+        )
+    )
 
     if not prepared:
         return []

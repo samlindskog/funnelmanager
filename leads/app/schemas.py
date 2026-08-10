@@ -46,6 +46,11 @@ class LeadOut(BaseModel):
     email: str | None = None
     phone: str | None = None
     linkedin: str | None = None
+    # v2 marker: when the derived top-level fields above were last (re)computed.
+    # Present => those fields are authoritative (a name-less doc's has_email/
+    # has_phone can be trusted rather than inferred from name-presence). Null on
+    # legacy docs not yet touched by a v2 write or the migration backfill.
+    derived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
