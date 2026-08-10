@@ -49,7 +49,7 @@ import {
 import { isEditableTarget, type ListFocus } from '../keyboard'
 import { useProgress, type ProgressRun } from '../progress'
 import { toggleOrRangeSelect } from '../rangeSelect'
-import type { ApolloEnrichedFlags, ApolloRecord, PersonRecord, SearchHistoryDetail } from '../types'
+import type { ApolloRecord, PersonRecord, SearchHistoryDetail } from '../types'
 import { RecordDetail } from './RecordDetail'
 
 /** Session-scoped: skip enrich confirmation after the user opts out. */
@@ -73,18 +73,6 @@ const APOLLO_TOKEN_COST: Record<keyof EnrichChannels, number> = {
   linkedin: 1,
   email: 7,
   phone: 15,
-}
-
-function enrichedFlags(record: ApolloRecord): ApolloEnrichedFlags {
-  const raw = record.apollo_enriched
-  if (raw && typeof raw === 'object') {
-    return {
-      linkedin: Boolean(raw.linkedin),
-      email: Boolean(raw.email),
-      phone: Boolean(raw.phone),
-    }
-  }
-  return { linkedin: false, email: false, phone: false }
 }
 
 function recordKey(record: ApolloRecord) {
@@ -192,6 +180,22 @@ function recordTitle(record: ApolloRecord): string | null {
   return (record.title || record.headline || '').trim() || null
 }
 
+/** Row-icon flags keyed off VALUE PRESENCE on the normalized record (a real,
+ * unlocked contact value) rather than the narrower `apollo_enriched`
+ * "enrichment revealed this" signal. `apollo_enriched` stays visible in the
+ * record detail pane. */
+function contactPresence(record: ApolloRecord): {
+  linkedin: boolean
+  email: boolean
+  phone: boolean
+} {
+  return {
+    linkedin: Boolean((record.linkedin_url || '').trim()),
+    email: Boolean(resolvedRecordEmail(record)),
+    phone: Boolean(resolvedRecordPhone(record)),
+  }
+}
+
 function csvEscape(value: string): string {
   // Neutralize spreadsheet formula injection (mirrors the backend's _csv_cell):
   // Excel/Sheets evaluate cells starting with = + - @ (or tab/CR) even when quoted.
@@ -247,7 +251,7 @@ const ResultRow = memo(function ResultRow({
 }) {
   const key = recordKey(record)
   const secondary = secondaryText(record)
-  const flags = enrichedFlags(record)
+  const flags = contactPresence(record)
   const selectable = isSelectablePerson(record)
 
   return (
@@ -307,13 +311,13 @@ const ResultRow = memo(function ResultRow({
                   }}
                 >
                   {flags.linkedin && (
-                    <LinkedInIcon sx={{ fontSize: 14 }} titleAccess="LinkedIn enrich run" />
+                    <LinkedInIcon sx={{ fontSize: 14 }} titleAccess="Has LinkedIn URL" />
                   )}
                   {flags.email && (
-                    <EmailOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Email enrich run" />
+                    <EmailOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Has email" />
                   )}
                   {flags.phone && (
-                    <PhoneOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Phone enrich run" />
+                    <PhoneOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Has phone" />
                   )}
                 </Box>
               )}

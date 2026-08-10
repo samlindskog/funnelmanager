@@ -12,6 +12,7 @@ import {
   CircularProgress,
   Divider,
   FormControl,
+  FormHelperText,
   IconButton,
   InputLabel,
   List,
@@ -22,6 +23,8 @@ import {
   Select,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Toolbar,
   Typography,
 } from '@mui/material'
@@ -37,6 +40,7 @@ import {
   listSearches,
   runSearch,
   runSimilaritySearch,
+  type EmbedKind,
   type RunSearchParams,
 } from '../api'
 import { useAuth } from '../auth'
@@ -60,8 +64,21 @@ const ALL_OWNERS = ''
 type CompanyFilterMode = 'id' | 'name'
 type MainView = 'search' | 'results'
 type SearchSource = 'apollo' | 'similarity'
+/** Contact exists filter: Any = omit, Has = require present, Missing = require absent. */
+type TriState = 'any' | 'has' | 'missing'
 
 const SIMILARITY_LIMIT_MAX = 10000
+
+const EMBED_KINDS: Array<{ value: EmbedKind; label: string }> = [
+  { value: 'apollo', label: 'Apollo profile' },
+  { value: 'name', label: 'Name' },
+  { value: 'title', label: 'Title' },
+]
+
+/** Tri-state select value → the leads exists-filter boolean (Any omits). */
+function triToBool(state: TriState): boolean | undefined {
+  return state === 'has' ? true : state === 'missing' ? false : undefined
+}
 
 export function SearchPage() {
   const theme = useTheme()
@@ -74,6 +91,18 @@ export function SearchPage() {
   const [searchSource, setSearchSource] = useState<SearchSource>('apollo')
   const [query, setQuery] = useState('')
   const [similarityLimit, setSimilarityLimit] = useState(25)
+  // Similarity (saved-leads) filters. All three embed kinds default checked —
+  // the UI always sends `embeds` explicitly, so the server legacy default never
+  // applies. Unchecking all three = pure filter search (query disabled).
+  const [simEmbeds, setSimEmbeds] = useState<Record<EmbedKind, boolean>>({
+    apollo: true,
+    name: true,
+    title: true,
+  })
+  const [simCompanyId, setSimCompanyId] = useState('')
+  const [simEmailFilter, setSimEmailFilter] = useState<TriState>('any')
+  const [simPhoneFilter, setSimPhoneFilter] = useState<TriState>('any')
+  const [simLinkedinFilter, setSimLinkedinFilter] = useState<TriState>('any')
   const [companyDomainQuery, setCompanyDomainQuery] = useState('')
   const [entityType, setEntityType] = useState<EntityType>('people')
   const [companyFilterMode, setCompanyFilterMode] = useState<CompanyFilterMode>('name')
@@ -208,8 +237,17 @@ export function SearchPage() {
   const companyValue = companyFilterValue.trim()
   const companyDomainValue = companyDomainQuery.trim()
   const isSimilaritySource = searchSource === 'similarity'
+  const selectedEmbeds = EMBED_KINDS.map((k) => k.value).filter((value) => simEmbeds[value])
+  const hasEmbeds = selectedEmbeds.length > 0
+  const simCompanyValue = simCompanyId.trim()
+  const hasSimFilter =
+    Boolean(simCompanyValue) ||
+    simEmailFilter !== 'any' ||
+    simPhoneFilter !== 'any' ||
+    simLinkedinFilter !== 'any'
   const canSubmit = isSimilaritySource
-    ? Boolean(query.trim()) && similarityLimit >= 1
+    ? similarityLimit >= 1 &&
+      (hasEmbeds ? Boolean(query.trim()) : hasSimFilter)
     : entityType === 'companies'
       ? Boolean(companyDomainValue)
       : Boolean(companyValue)
@@ -230,8 +268,12 @@ export function SearchPage() {
 
   async function executeSimilaritySearch() {
     const passage = query.trim()
-    if (!passage) {
+    if (hasEmbeds && !passage) {
       setError('Enter a passage to search saved people')
+      return
+    }
+    if (!hasEmbeds && !hasSimFilter) {
+      setError('Select at least one filter for a pure filter search')
       return
     }
     const limit = Math.min(
@@ -245,6 +287,11 @@ export function SearchPage() {
       const response = await runSimilaritySearch({
         query: passage,
         limit,
+        embeds: selectedEmbeds,
+        companyId: simCompanyValue,
+        emailExists: triToBool(simEmailFilter),
+        phoneExists: triToBool(simPhoneFilter),
+        linkedinExists: triToBool(simLinkedinFilter),
       })
       showResults(response.history)
       await refreshHistory()
@@ -884,8 +931,45 @@ export function SearchPage() {
 
                   {isSimilaritySource ? (
                     <>
+                      <FormControl>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 0.75 }}>
+                          Rank by embeddings
+                        </Typography>
+                        <ToggleButtonGroup
+                          size="small"
+                          value={selectedEmbeds}
+                          onChange={(_, next: EmbedKind[]) =>
+                            setSimEmbeds({
+                              apollo: next.includes('apollo'),
+                              name: next.includes('name'),
+                              title: next.includes('title'),
+                            })
+                          }
+                          aria-label="Embedding set"
+                        >
+                          {EMBED_KINDS.map((kind) => (
+                            <ToggleButton
+                              key={kind.value}
+                              value={kind.value}
+                              data-testid={`similarity-embed-${kind.value}`}
+                              sx={{ textTransform: 'none' }}
+                            >
+                              {kind.label}
+                            </ToggleButton>
+                          ))}
+                        </ToggleButtonGroup>
+                        <FormHelperText>
+                          {hasEmbeds
+                            ? 'Ranked by mean similarity across the selected embeddings.'
+                            : 'No embeddings selected — pure filter search (query ignored).'}
+                        </FormHelperText>
+                      </FormControl>
                       <TextField
-                        label="Describe who you’re looking for"
+                        label={
+                          hasEmbeds
+                            ? 'Describe who you’re looking for'
+                            : 'Describe who you’re looking for (optional)'
+                        }
                         placeholder="e.g. series A fintech CRO in NYC"
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
@@ -893,7 +977,63 @@ export function SearchPage() {
                         autoFocus
                         multiline
                         minRows={2}
+                        disabled={!hasEmbeds}
                       />
+                      <TextField
+                        label="Company (record id)"
+                        placeholder="e.g. 5e66b6381e05b4008c8331b8"
+                        value={simCompanyId}
+                        onChange={(e) => setSimCompanyId(e.target.value)}
+                        fullWidth
+                        helperText="The Mongo id shown on a company record’s detail pane."
+                        data-testid="similarity-company-id"
+                      />
+                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                        {(
+                          [
+                            {
+                              id: 'email',
+                              label: 'Email',
+                              value: simEmailFilter,
+                              set: setSimEmailFilter,
+                            },
+                            {
+                              id: 'phone',
+                              label: 'Phone',
+                              value: simPhoneFilter,
+                              set: setSimPhoneFilter,
+                            },
+                            {
+                              id: 'linkedin',
+                              label: 'LinkedIn',
+                              value: simLinkedinFilter,
+                              set: setSimLinkedinFilter,
+                            },
+                          ] as Array<{
+                            id: string
+                            label: string
+                            value: TriState
+                            set: (next: TriState) => void
+                          }>
+                        ).map((filter) => (
+                          <FormControl key={filter.id} sx={{ minWidth: 140 }} fullWidth>
+                            <InputLabel id={`similarity-${filter.id}-filter-label`}>
+                              {filter.label}
+                            </InputLabel>
+                            <Select
+                              labelId={`similarity-${filter.id}-filter-label`}
+                              label={filter.label}
+                              value={filter.value}
+                              onChange={(e) => filter.set(e.target.value as TriState)}
+                              data-testid={`similarity-${filter.id}-filter`}
+                            >
+                              <MenuItem value="any">Any</MenuItem>
+                              <MenuItem value="has">Has</MenuItem>
+                              <MenuItem value="missing">Missing</MenuItem>
+                            </Select>
+                          </FormControl>
+                        ))}
+                      </Stack>
                       <TextField
                         label="Result limit"
                         type="number"

@@ -656,25 +656,48 @@ export async function getApolloCredits(): Promise<ApolloCredits> {
   return request<ApolloCredits>('/api/search/apollo/credits')
 }
 
+/** Per-kind embeddings the similarity search may rank by (leads v2 contract). */
+export type EmbedKind = 'apollo' | 'name' | 'title'
+
 export type SimilaritySearchParams = {
   query: string
   limit?: number
+  /** Which per-kind embeddings to rank by. `[]` = pure filter search. Always
+   * sent explicitly by the UI (the server's omitted-param legacy default —
+   * `["apollo"]` — never applies here). */
+  embeds: EmbedKind[]
+  /** Mongo `_id` of a stored organization doc; filters people by company. */
+  companyId?: string
+  /** Tri-state exists filters (true=has, false=missing, undefined=no filter). */
+  emailExists?: boolean
+  phoneExists?: boolean
+  linkedinExists?: boolean
 }
 
 export type SimilaritySearchResponse = {
   query: string
-  results: Array<{ score: number; record: ApolloRecord }>
+  // Pure filter search (embeds == []) returns null scores (no vector ranking).
+  results: Array<{ score: number | null; record: ApolloRecord }>
   history: SearchHistoryDetail
 }
 
 export async function runSimilaritySearch(
   params: SimilaritySearchParams,
 ): Promise<SimilaritySearchResponse> {
+  const body: Record<string, unknown> = {
+    query: params.query,
+    limit: params.limit ?? 25,
+    embeds: params.embeds,
+  }
+  // Map camelCase params to the snake_case leads contract, omitting undefined.
+  if (params.companyId != null && params.companyId !== '') {
+    body.company_id = params.companyId
+  }
+  if (params.emailExists !== undefined) body.email_exists = params.emailExists
+  if (params.phoneExists !== undefined) body.phone_exists = params.phoneExists
+  if (params.linkedinExists !== undefined) body.linkedin_exists = params.linkedinExists
   return request<SimilaritySearchResponse>('/api/search/similarity-search', {
     method: 'POST',
-    body: JSON.stringify({
-      query: params.query,
-      limit: params.limit ?? 25,
-    }),
+    body: JSON.stringify(body),
   })
 }
