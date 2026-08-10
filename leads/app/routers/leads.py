@@ -1933,6 +1933,11 @@ async def apollo_people_match_webhook(
     return {"status": "ok", "updated": updated_ids, "count": len(updated_ids)}
 
 
+# Batch size for hydrating similarity candidates from Mongo (matches the 500-doc
+# batch convention used elsewhere, e.g. the search-side get_by_mongo_ids chunking).
+_HYDRATE_CHUNK = 500
+
+
 def _milvus_str_literal(value: str) -> str:
     """Quote a string for a Milvus boolean expr (escape backslash and quote)."""
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
@@ -1944,6 +1949,8 @@ def _milvus_scalar_expr(company_apollo_id: str | None, body: SimilaritySearchReq
     parts: list[str] = []
     if company_apollo_id:
         parts.append(f"company_id == {_milvus_str_literal(company_apollo_id)}")
+    if body.entity_type is not None:
+        parts.append(f"entity_type == {_milvus_str_literal(body.entity_type)}")
     if body.email_exists is not None:
         parts.append(f"has_email == {'true' if body.email_exists else 'false'}")
     if body.phone_exists is not None:
@@ -1962,6 +1969,9 @@ def _doc_passes_filters(
     if company_apollo_id is not None:
         if str(doc.get("company_id") or "") != company_apollo_id:
             return False
+    if body.entity_type is not None:
+        if (doc.get("entity_type") or "person") != body.entity_type:
+            return False
     if body.email_exists is not None:
         if (doc.get("email") is not None) != body.email_exists:
             return False
@@ -1978,21 +1988,45 @@ async def _resolve_company_apollo_id(
     db: AsyncIOMotorDatabase,
     company_id: str | None,
 ) -> str | None:
-    """Load the org doc by Mongo _id and return its apollo_id (the people filter value)."""
+    """Resolve ``company_id`` to the org's Apollo id (the people filter value).
+
+    Accepts either a company record's Mongo ``_id`` or its Apollo organization id
+    (the two live in different id spaces, so a caller cannot know which they hold).
+    Tries the Mongo ``_id`` first (when the value parses as an ObjectId); on a miss
+    (or a non-ObjectId value) falls back to the org doc's ``apollo_id``. 404 only
+    when both lookups miss. The resolved org's ``apollo_id`` is the filter value.
+    """
     if company_id is None:
         return None
+    value = company_id.strip()
+    if not value:
+        return None
+
+    org_doc: dict[str, Any] | None = None
+    # Prefer the Mongo _id space (only when the value is a valid ObjectId).
     try:
-        org_object_id = ObjectId(company_id.strip())
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="company_id must be a valid Mongo _id (hex ObjectId)",
-        ) from exc
-    org_doc = await db.leads.find_one({"_id": org_object_id})
-    if not org_doc or (org_doc.get("entity_type") or "person") != "organization":
+        org_object_id = ObjectId(value)
+    except Exception:
+        org_object_id = None
+    if org_object_id is not None:
+        candidate = await db.leads.find_one({"_id": org_object_id})
+        if candidate and (candidate.get("entity_type") or "person") == "organization":
+            org_doc = candidate
+
+    # Fall back to the Apollo organization id (a non-ObjectId string is a legit
+    # Apollo org id, not a client error).
+    if org_doc is None:
+        org_doc = await db.leads.find_one(
+            {"apollo_id": value, "entity_type": "organization"}
+        )
+
+    if org_doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No organization lead found for company_id {company_id}",
+            detail=(
+                f"No organization lead found for company_id {company_id} "
+                "(accepts a company record's Mongo id or Apollo organization id)"
+            ),
         )
     apollo_id = str(org_doc.get("apollo_id") or "").strip()
     if not apollo_id:
@@ -2010,9 +2044,14 @@ async def _pure_filter_similarity(
 ) -> SimilaritySearchResponse:
     """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
     query: dict[str, Any] = {}
+    if body.entity_type is not None:
+        query["entity_type"] = body.entity_type
     if company_apollo_id is not None:
-        query["entity_type"] = "person"
         query["company_id"] = company_apollo_id
+        # company_id is a people-only field; default to person unless the caller
+        # already pinned an entity_type (an incompatible pin ANDs to no results,
+        # consistent with the vector path).
+        query.setdefault("entity_type", "person")
     for field, flag in (
         ("email", body.email_exists),
         ("phone", body.phone_exists),
@@ -2087,33 +2126,40 @@ async def similarity_search(
             continue
         merged.append((mongo_id, sum(kind_scores.values()) / len(kind_scores)))
     merged.sort(key=lambda item: item[1], reverse=True)
-    merged = merged[: body.limit]
 
-    ordered: list[tuple[str, float]] = []
-    object_ids: list[ObjectId] = []
-    for mongo_id, score in merged:
-        try:
-            object_id = ObjectId(mongo_id)
-        except Exception:
+    # Fill to ``limit`` AFTER the authoritative Mongo re-check: hydrate the merged
+    # candidates in score order, chunked (the 500 convention), applying the filters
+    # per doc and accumulating passing hits until ``limit`` is reached or candidates
+    # are exhausted. Truncating to ``limit`` before the re-check could return fewer
+    # than ``limit`` rows when the head of the list carries stale Milvus scalars.
+    results: list[SimilarityHitOut] = []
+    for chunk_start in range(0, len(merged), _HYDRATE_CHUNK):
+        if len(results) >= body.limit:
+            break
+        chunk = merged[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        object_ids: list[ObjectId] = []
+        for mongo_id, _score in chunk:
+            try:
+                object_ids.append(ObjectId(mongo_id))
+            except Exception:
+                continue
+        if not object_ids:
             continue
-        object_ids.append(object_id)
-        ordered.append((str(object_id), score))
-
-    docs_by_id: dict[str, dict[str, Any]] = {}
-    if object_ids:
+        docs_by_id: dict[str, dict[str, Any]] = {}
         cursor = db.leads.find({"_id": {"$in": object_ids}})
         async for doc in cursor:
             docs_by_id[str(doc["_id"])] = doc
-
-    results: list[SimilarityHitOut] = []
-    for mongo_id, score in ordered:
-        doc = docs_by_id.get(mongo_id)
-        if not doc:
-            continue
-        # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
-        if not _doc_passes_filters(doc, company_apollo_id, body):
-            continue
-        results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
+        # Preserve merged score order within the chunk.
+        for mongo_id, score in chunk:
+            doc = docs_by_id.get(mongo_id)
+            if not doc:
+                continue
+            # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
+            if not _doc_passes_filters(doc, company_apollo_id, body):
+                continue
+            results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
+            if len(results) >= body.limit:
+                break
     return SimilaritySearchResponse(results=results)
 
 

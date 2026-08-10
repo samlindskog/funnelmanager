@@ -366,6 +366,57 @@ async def search_similar(
         )
 
 
+def _milvus_str_literal(value: str) -> str:
+    """Quote a string for a Milvus boolean expr (escape backslash and quote)."""
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _query_apollo_scalars_sync(
+    mongo_ids: list[str],
+    *,
+    settings: Settings | None = None,
+) -> dict[str, dict[str, Any]]:
+    if not mongo_ids:
+        return {}
+    cfg = settings or get_settings()
+    collection = ensure_collection(cfg)
+    id_list = ", ".join(_milvus_str_literal(mid) for mid in mongo_ids)
+    expr = f'mongo_id in [{id_list}] and embed_kind == "apollo"'
+    rows = collection.query(
+        expr=expr,
+        output_fields=["mongo_id", "company_id", "has_email", "has_phone", "has_linkedin"],
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        mongo_id = str(row.get("mongo_id") or "")
+        if mongo_id:
+            out[mongo_id] = row
+    return out
+
+
+async def query_apollo_scalars(
+    mongo_ids: list[str],
+    *,
+    nice: int = NICE_SEARCH_EMBED,
+    settings: Settings | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return ``{mongo_id: {company_id, has_email, has_phone, has_linkedin}}`` from the
+    stored apollo-kind rows (a doc with no stored row is simply absent).
+
+    Used to detect scalar drift on docs skipped by the never-downgrade precedence
+    guard in ``index_lead_docs`` — a doc embedded at MATCH then enriched via BY_ID
+    otherwise keeps stale ``has_email`` etc. in Milvus forever. Serializes on the
+    gate like every pymilvus call.
+    """
+    if not mongo_ids:
+        return {}
+    async with _gate()(nice):
+        return await asyncio.to_thread(
+            _query_apollo_scalars_sync, mongo_ids, settings=settings
+        )
+
+
 async def index_lead_docs(
     docs: list[dict[str, Any]],
     *,
@@ -419,7 +470,27 @@ async def index_lead_docs(
         texts: dict[str, str]
         stored_precedence: int
 
+    def _prepare(doc: dict[str, Any]) -> _Prepared | None:
+        texts = lead_embedding_texts(doc)
+        if not texts:
+            return None
+        # The vector reflects the best data available for this doc; the stored
+        # precedence is never lowered (max over the doc's own tier + this source).
+        stored_precedence = max(lead_embedding_precedence(doc), source_precedence)
+        return _Prepared(
+            mongo_id=str(doc.get("_id") or "").strip(),
+            apollo_id=str(doc.get("apollo_id") or "").strip(),
+            entity_type=doc.get("entity_type") or "person",
+            company_id=str(doc.get("company_id") or ""),
+            has_email=doc.get("email") is not None,
+            has_phone=doc.get("phone") is not None,
+            has_linkedin=doc.get("linkedin") is not None,
+            texts=texts,
+            stored_precedence=stored_precedence,
+        )
+
     prepared: list[_Prepared] = []
+    skipped_by_precedence: list[dict[str, Any]] = []
     for doc in docs:
         entity_type = doc.get("entity_type") or "person"
         if entity_type not in ("person", "organization"):
@@ -433,25 +504,54 @@ async def index_lead_docs(
         # (unless force — a re-embed must rewrite every doc regardless of precedence,
         # e.g. after an embedding-model or embedding-text change).
         if not force and existing_precedence and source_precedence < existing_precedence:
+            # Defer for a scalar-drift check: the derived scalar fields (has_email,
+            # …, company_id) may have advanced since this doc was embedded (e.g. a
+            # MATCH-embedded doc later BY_ID-enriched), leaving Milvus stale.
+            skipped_by_precedence.append(doc)
             continue
-        texts = lead_embedding_texts(doc)
-        if not texts:
-            continue
-        # The vector reflects the best data available for this doc.
-        stored_precedence = max(lead_embedding_precedence(doc), source_precedence)
-        prepared.append(
-            _Prepared(
-                mongo_id=mongo_id,
-                apollo_id=apollo_id,
-                entity_type=entity_type,
-                company_id=str(doc.get("company_id") or ""),
-                has_email=doc.get("email") is not None,
-                has_phone=doc.get("phone") is not None,
-                has_linkedin=doc.get("linkedin") is not None,
-                texts=texts,
-                stored_precedence=stored_precedence,
+        item = _prepare(doc)
+        if item is not None:
+            prepared.append(item)
+
+    # Re-index precedence-skipped docs ONLY when their current derived scalars differ
+    # from the stored apollo-kind Milvus row. never-downgrade precedence is preserved
+    # (``_prepare`` computes stored_precedence = max(doc-tier, source), which can't
+    # lower the recorded tier). A scalar-query failure must never break ingest — log
+    # and fall back to the plain skip.
+    if skipped_by_precedence:
+        drift_ids = [
+            mongo_id
+            for mongo_id in (str(doc.get("_id") or "").strip() for doc in skipped_by_precedence)
+            if mongo_id
+        ]
+        try:
+            stored_scalars = await query_apollo_scalars(drift_ids, nice=nice, settings=cfg)
+        except Exception:
+            logger.exception(
+                "Scalar-drift check failed; leaving %s skipped doc(s) as-is", len(drift_ids)
             )
-        )
+            stored_scalars = {}
+        for doc in skipped_by_precedence:
+            row = stored_scalars.get(str(doc.get("_id") or "").strip())
+            if not row:
+                continue
+            current = (
+                doc.get("email") is not None,
+                doc.get("phone") is not None,
+                doc.get("linkedin") is not None,
+                str(doc.get("company_id") or ""),
+            )
+            stored = (
+                bool(row.get("has_email")),
+                bool(row.get("has_phone")),
+                bool(row.get("has_linkedin")),
+                str(row.get("company_id") or ""),
+            )
+            if current == stored:
+                continue
+            item = _prepare(doc)
+            if item is not None:
+                prepared.append(item)
 
     if not prepared:
         return []
