@@ -328,9 +328,12 @@ async def _upsert_search_records(
             continue
 
         entry = endpoint_entry(record, now)
-        # Two attempts: a concurrent stream may insert the same apollo_id between
-        # our find and insert (unique index); retry lands on the update path.
-        for _attempt in range(2):
+        # Up to 4 attempts. Two failure modes retry: (a) a concurrent stream
+        # inserts the same apollo_id between our find and insert (unique index) —
+        # retry lands on the update path; (b) the optimistic-concurrency guard
+        # below matches 0 because a racing writer changed the doc — retry re-reads
+        # the fuller doc and re-derives so the top-level fields converge.
+        for _attempt in range(4):
             existing = await db.leads.find_one({"apollo_id": apollo_id})
             if existing:
                 responses = responses_from_doc(existing)
@@ -338,8 +341,19 @@ async def _upsert_search_records(
                 # Derived top-level index fields recomputed from the merged
                 # responses (per-field precedence => only upgrades, never regresses).
                 derived = derive_top_fields(entity_type, responses)
-                await db.leads.update_one(
-                    {"_id": existing["_id"]},
+                # Optimistic guard: write only if the doc still matches the snapshot
+                # we derived from (updated_at + derived_at; equality-with-missing
+                # covers legacy docs where derived_at is absent). A racing writer
+                # bumps updated_at, so matched_count==0 => re-read, merge their entry,
+                # re-derive from the fuller map. Residual: ms-precision timestamps
+                # mean a same-millisecond write pair can slip the guard (vanishingly
+                # narrow; self-heals on the next write).
+                update_result = await db.leads.update_one(
+                    {
+                        "_id": existing["_id"],
+                        "updated_at": existing.get("updated_at"),
+                        "derived_at": existing.get("derived_at"),
+                    },
                     {
                         # $set only THIS endpoint's entry via a dotted path (never
                         # the whole apollo_responses map) so a concurrent writer's
@@ -356,6 +370,8 @@ async def _upsert_search_records(
                         "$unset": {"apollo_response": ""},
                     },
                 )
+                if update_result.matched_count == 0:
+                    continue
                 mongo_ids.append(str(existing["_id"]))
                 break
 
@@ -376,6 +392,31 @@ async def _upsert_search_records(
                 continue
             mongo_ids.append(str(result.inserted_id))
             break
+        else:
+            # Pathological contention: write ONLY the safe additive parts (payload
+            # entry + embedding flag), never derived fields/derived_at, so a
+            # stale-snapshot derived value can't overwrite a fresher one. Derived
+            # converges on the next successful write.
+            fallback = await db.leads.find_one({"apollo_id": apollo_id})
+            if fallback:
+                await db.leads.update_one(
+                    {"_id": fallback["_id"]},
+                    {
+                        "$set": {
+                            "entity_type": entity_type,
+                            f"apollo_responses.{endpoint}": entry,
+                            "embedding": _embedding_flag_after_update(fallback, endpoint),
+                            "updated_at": now,
+                        },
+                        "$unset": {"apollo_response": ""},
+                    },
+                )
+                logger.warning(
+                    "Optimistic guard exhausted for apollo_id %s; wrote payload "
+                    "without re-deriving top-level fields (converges next write)",
+                    apollo_id,
+                )
+                mongo_ids.append(str(fallback["_id"]))
 
     return mongo_ids
 
@@ -397,13 +438,14 @@ async def _upsert_enriched_record(
     entry = endpoint_entry(apollo_response, now)
 
     doc: dict[str, Any] | None = None
-    # Two attempts: a concurrent stream may insert the same apollo_id between
-    # our find and insert (unique index); retry lands on the update path.
-    for _attempt in range(2):
+    # Up to 4 attempts: covers the insert unique-index race AND the optimistic-
+    # concurrency guard miss below (re-read merges the racer's entry + re-derives).
+    for _attempt in range(4):
         existing = await db.leads.find_one({"apollo_id": apollo_id})
         if existing:
             responses = responses_from_doc(existing)
             responses[endpoint] = entry
+            # flags recomputed per attempt from the fresh existing (OR-merge only).
             flags = merge_enriched_flags(
                 normalize_apollo_enriched(existing, responses=responses),
                 linkedin=linkedin,
@@ -411,8 +453,14 @@ async def _upsert_enriched_record(
                 phone=phone,
             )
             derived = derive_top_fields(entity_type, responses)
-            await db.leads.update_one(
-                {"_id": existing["_id"]},
+            # Optimistic guard on the read snapshot (see _upsert_search_records):
+            # matched_count==0 means a racing writer changed the doc => re-read.
+            update_result = await db.leads.update_one(
+                {
+                    "_id": existing["_id"],
+                    "updated_at": existing.get("updated_at"),
+                    "derived_at": existing.get("derived_at"),
+                },
                 {
                     # $set only THIS endpoint's entry via a dotted path (never the
                     # whole apollo_responses map) so a concurrent writer's entry for
@@ -429,6 +477,8 @@ async def _upsert_enriched_record(
                     "$unset": {"apollo_response": ""},
                 },
             )
+            if update_result.matched_count == 0:
+                continue
             doc = await db.leads.find_one({"_id": existing["_id"]})
             break
 
@@ -456,6 +506,30 @@ async def _upsert_enriched_record(
             continue
         doc = await db.leads.find_one({"_id": result.inserted_id})
         break
+    else:
+        # Pathological contention: safe additive write only — the payload entry +
+        # embedding flag, never derived fields/derived_at (nor apollo_enriched,
+        # which an unguarded write could regress). Derived converges next write.
+        fallback = await db.leads.find_one({"apollo_id": apollo_id})
+        if fallback:
+            await db.leads.update_one(
+                {"_id": fallback["_id"]},
+                {
+                    "$set": {
+                        "entity_type": entity_type,
+                        f"apollo_responses.{endpoint}": entry,
+                        "embedding": _embedding_flag_after_update(fallback, endpoint),
+                        "updated_at": now,
+                    },
+                    "$unset": {"apollo_response": ""},
+                },
+            )
+            logger.warning(
+                "Optimistic guard exhausted for apollo_id %s; wrote payload without "
+                "re-deriving top-level fields (converges next write)",
+                apollo_id,
+            )
+            doc = await db.leads.find_one({"_id": fallback["_id"]})
 
     assert doc is not None
     if index:
@@ -1864,9 +1938,10 @@ async def apollo_people_match_webhook(
             continue
 
         doc = None
-        # Two attempts: a concurrent upsert may insert the same apollo_id between
-        # our find and insert (unique index); retry lands on the update path.
-        for _attempt in range(2):
+        # Up to 4 attempts: covers the insert unique-index race AND the optimistic-
+        # concurrency guard miss below (re-read merges the racer's match data +
+        # re-derives so the top-level fields converge).
+        for _attempt in range(4):
             existing = await db.leads.find_one({"apollo_id": apollo_id})
             responses = responses_from_doc(existing) if existing else {}
             match_entry = responses.get(PERSON_MATCH)
@@ -1905,8 +1980,14 @@ async def apollo_people_match_webhook(
             # onto the already-stored doc (the §1.3 upsert guarantee).
             derived = derive_top_fields("person", responses)
             if existing:
-                await db.leads.update_one(
-                    {"_id": existing["_id"]},
+                # Optimistic guard on the read snapshot (see _upsert_search_records):
+                # matched_count==0 means a racing writer changed the doc => re-read.
+                update_result = await db.leads.update_one(
+                    {
+                        "_id": existing["_id"],
+                        "updated_at": existing.get("updated_at"),
+                        "derived_at": existing.get("derived_at"),
+                    },
                     {
                         # $set only the people/match entry via a dotted path (never
                         # the whole apollo_responses map) so a concurrent enrich /
@@ -1923,6 +2004,8 @@ async def apollo_people_match_webhook(
                         "$unset": {"apollo_response": ""},
                     },
                 )
+                if update_result.matched_count == 0:
+                    continue
                 doc = await db.leads.find_one({"_id": existing["_id"]})
                 break
             try:
@@ -1943,6 +2026,39 @@ async def apollo_people_match_webhook(
                 continue
             doc = await db.leads.find_one({"_id": insert_result.inserted_id})
             break
+        else:
+            # Pathological contention: re-read to merge the freshest stored match
+            # data, then a safe additive write only — the merged people/match entry
+            # + updated_at, never derived fields/derived_at (nor apollo_enriched).
+            existing = await db.leads.find_one({"apollo_id": apollo_id})
+            if existing:
+                responses = responses_from_doc(existing)
+                prev = responses.get(PERSON_MATCH)
+                data = (
+                    dict(prev["data"])
+                    if isinstance(prev, dict) and isinstance(prev.get("data"), dict)
+                    else {}
+                )
+                data = _merge_async_person_into_match_data(data, entry, payload=payload)
+                new_match_entry = endpoint_entry(data, now)
+                await db.leads.update_one(
+                    {"_id": existing["_id"]},
+                    {
+                        "$set": {
+                            "entity_type": "person",
+                            f"apollo_responses.{PERSON_MATCH}": new_match_entry,
+                            "embedding": False,
+                            "updated_at": now,
+                        },
+                        "$unset": {"apollo_response": ""},
+                    },
+                )
+                logger.warning(
+                    "Optimistic guard exhausted for apollo_id %s (webhook); wrote "
+                    "payload without re-deriving top-level fields",
+                    apollo_id,
+                )
+                doc = await db.leads.find_one({"_id": existing["_id"]})
         if doc:
             indexed = await index_lead_docs([doc], source_precedence=EMBED_SOURCE_MATCH)
             if indexed:
@@ -2111,11 +2227,13 @@ async def similarity_search(
         vectors = await embed_texts([query], settings=settings)
         query_vector = vectors[0]
         scalar_expr = _milvus_scalar_expr(company_apollo_id, body)
-        # Split the ANN candidate budget across the selected kinds so the TOTAL
-        # per-kind candidate work stays ~bounded at the old single-search ceiling
-        # (16384) regardless of how many kinds are requested. This endpoint is
-        # agent-reachable and each kind is one ANN search on the serializing
-        # Milvus gate, so N kinds * 16384 would N-multiply the work (P4 amplification).
+        # Split the ANN candidate budget across the selected kinds. Total candidate
+        # work is bounded by max(16384, limit * len(embeds)): the per-kind floor of
+        # `limit` is deliberate (each kind must be able to contribute a full result
+        # set), so a large limit CAN exceed 16384 (e.g. limit=10000 x 3 kinds =
+        # 30000) — but it never N-multiplies the 16384 ceiling the way an unsplit
+        # min(limit*4, 16384) per kind would. This endpoint is agent-reachable and
+        # each kind is one ANN search on the serializing Milvus gate (P4 amplification).
         oversample = min(body.limit * 4, max(body.limit, 16384 // len(embeds)))
         # score contributions per doc, keyed by the kinds it appears in.
         per_doc_scores: dict[str, dict[str, float]] = {}
