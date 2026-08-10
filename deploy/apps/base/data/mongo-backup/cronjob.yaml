@@ -76,12 +76,13 @@ spec:
                   memory: 128Mi
                 limits:
                   cpu: 250m
-                  # `mc pipe` buffers a multipart-upload part in memory while it
-                  # streams the gzipped mongodump to object storage, so peak RSS
-                  # scales with the upload part size (not a leak). At 256Mi a spike
-                  # occasionally OOM-killed the first attempt (backoffLimit retry
-                  # then succeeded); 512Mi gives ~2x headroom over the observed peak
-                  # and room as funnelmanager_leads grows. Trivial on the 16Gi workers.
+                  # The pod runs `kubectl exec … mongodump | mc pipe` (both stream
+                  # to object storage; the gzipped archive is small — ~12MB for
+                  # ~100k docs), so steady-state RSS is low (kubectl + mc baseline)
+                  # and a run completes fine at 256Mi. But a transient spike
+                  # occasionally OOM-killed the first attempt at 256Mi (backoffLimit
+                  # retry then succeeded — backups still completed); 512Mi is
+                  # defensive headroom for those spikes + growth. Trivial on 16Gi.
                   memory: 512Mi
               volumeMounts:
                 - name: tmp
