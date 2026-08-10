@@ -5,6 +5,7 @@ import LinkedInIcon from '@mui/icons-material/LinkedIn'
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore'
 import NavigateNextIcon from '@mui/icons-material/NavigateNext'
 import PhoneOutlinedIcon from '@mui/icons-material/PhoneOutlined'
+import RefreshIcon from '@mui/icons-material/Refresh'
 import {
   Alert,
   Box,
@@ -22,6 +23,8 @@ import {
   ListItem,
   ListItemButton,
   ListItemText,
+  Radio,
+  RadioGroup,
   Stack,
   Tooltip,
   Typography,
@@ -62,6 +65,14 @@ const DEFAULT_CHANNELS: EnrichChannels = {
   linkedin: true,
   email: false,
   phone: false,
+}
+
+/** Apollo credits consumed per selected person, per enrich channel. Single-select
+ * now, so exactly one weight applies to the estimate. */
+const APOLLO_TOKEN_COST: Record<keyof EnrichChannels, number> = {
+  linkedin: 1,
+  email: 7,
+  phone: 15,
 }
 
 function enrichedFlags(record: ApolloRecord): ApolloEnrichedFlags {
@@ -440,9 +451,18 @@ const ResultsListPane = memo(function ResultsListPane({
     })
   }, [results])
 
-  const toggleChannel = useCallback((key: keyof EnrichChannels) => {
-    setChannels((prev) => ({ ...prev, [key]: !prev[key] }))
+  // Single-select: choosing one channel clears the others (radio semantics).
+  const selectChannel = useCallback((key: keyof EnrichChannels) => {
+    setChannels({ linkedin: false, email: false, phone: false, [key]: true })
   }, [])
+
+  const selectedChannel: keyof EnrichChannels | '' = channels.linkedin
+    ? 'linkedin'
+    : channels.email
+      ? 'email'
+      : channels.phone
+        ? 'phone'
+        : ''
 
   const getSelectedRecords = useCallback(() => {
     return results.filter((record) => checkedKeys.has(recordKey(record)))
@@ -478,10 +498,19 @@ const ResultsListPane = memo(function ResultsListPane({
   }, [exporting, getSelectedRecords, searchId])
 
   const selectedChannelCount = useMemo(() => channelCount(channels), [channels])
+  // Sum is single-term today (one channel selected) but stays correct if the
+  // single-select invariant ever loosens.
+  const selectedChannelCost = useMemo(
+    () =>
+      (channels.linkedin ? APOLLO_TOKEN_COST.linkedin : 0) +
+      (channels.email ? APOLLO_TOKEN_COST.email : 0) +
+      (channels.phone ? APOLLO_TOKEN_COST.phone : 0),
+    [channels],
+  )
   const estimatedTokens = useMemo(() => {
     const people = getSelectedPeople().length
-    return people * selectedChannelCount
-  }, [getSelectedPeople, selectedChannelCount])
+    return people * selectedChannelCost
+  }, [getSelectedPeople, selectedChannelCost])
 
   const runEnrich = useCallback(async () => {
     const selected = getSelectedPeople()
@@ -936,55 +965,48 @@ const ResultsListPane = memo(function ResultsListPane({
           </Box>
 
           <Stack direction="row" spacing={0.25} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-            <Tooltip title="LinkedIn / complete profile">
-              <FormControlLabel
-                sx={{ mr: 0.5, ml: 0 }}
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={channels.linkedin}
-                    onChange={() => toggleChannel('linkedin')}
-                  />
-                }
-                label={<LinkedInIcon fontSize="small" color={channels.linkedin ? 'primary' : 'action'} />}
-              />
-            </Tooltip>
-            <Tooltip title="Waterfall email enrich">
-              <FormControlLabel
-                sx={{ mr: 0.5, ml: 0 }}
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={channels.email}
-                    onChange={() => toggleChannel('email')}
-                  />
-                }
-                label={
-                  <EmailOutlinedIcon
-                    fontSize="small"
-                    color={channels.email ? 'primary' : 'action'}
-                  />
-                }
-              />
-            </Tooltip>
-            <Tooltip title="Waterfall phone enrich">
-              <FormControlLabel
-                sx={{ mr: 0.5, ml: 0 }}
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={channels.phone}
-                    onChange={() => toggleChannel('phone')}
-                  />
-                }
-                label={
-                  <PhoneOutlinedIcon
-                    fontSize="small"
-                    color={channels.phone ? 'primary' : 'action'}
-                  />
-                }
-              />
-            </Tooltip>
+            <RadioGroup
+              row
+              name="enrich-channel"
+              value={selectedChannel}
+              onChange={(_, value) => selectChannel(value as keyof EnrichChannels)}
+              sx={{ flexWrap: 'nowrap' }}
+            >
+              <Tooltip title="LinkedIn / complete profile">
+                <FormControlLabel
+                  value="linkedin"
+                  sx={{ mr: 0.5, ml: 0 }}
+                  control={<Radio size="small" data-testid="search-channel-linkedin" />}
+                  label={<LinkedInIcon fontSize="small" color={channels.linkedin ? 'primary' : 'action'} />}
+                />
+              </Tooltip>
+              <Tooltip title="Waterfall email enrich">
+                <FormControlLabel
+                  value="email"
+                  sx={{ mr: 0.5, ml: 0 }}
+                  control={<Radio size="small" data-testid="search-channel-email" />}
+                  label={
+                    <EmailOutlinedIcon
+                      fontSize="small"
+                      color={channels.email ? 'primary' : 'action'}
+                    />
+                  }
+                />
+              </Tooltip>
+              <Tooltip title="Waterfall phone enrich">
+                <FormControlLabel
+                  value="phone"
+                  sx={{ mr: 0.5, ml: 0 }}
+                  control={<Radio size="small" data-testid="search-channel-phone" />}
+                  label={
+                    <PhoneOutlinedIcon
+                      fontSize="small"
+                      color={channels.phone ? 'primary' : 'action'}
+                    />
+                  }
+                />
+              </Tooltip>
+            </RadioGroup>
             {checkedCount > 0 && (
               <Typography variant="body2" sx={{ fontWeight: 600, ml: 0.5 }}>
                 {checkedCount} selected
@@ -1134,6 +1156,34 @@ export const SearchResultsView = memo(
     setSelectedId(key)
   }, [])
 
+  const [refreshingAll, setRefreshingAll] = useState(false)
+  // Re-hydrate every record on the current page from Mongo (same helper as the
+  // per-record refresh). Best-effort per record — a single failed fetch never
+  // aborts the batch; successes are patched in via onRecordsUpdated.
+  const handleRefreshAll = useCallback(async () => {
+    if (refreshingAll) return
+    const hydratable = (search?.results ?? []).filter((record) => record.mongo_id || record.id)
+    if (!hydratable.length) return
+    setRefreshingAll(true)
+    try {
+      const updated: ApolloRecord[] = []
+      await Promise.all(
+        hydratable.map(async (record) => {
+          const mongoId = record.mongo_id || String(record.id || '')
+          if (!mongoId) return
+          try {
+            updated.push(await getPersonLead(mongoId))
+          } catch {
+            // Best-effort refresh; other records still update.
+          }
+        }),
+      )
+      if (updated.length) onRecordsUpdated?.(updated)
+    } finally {
+      setRefreshingAll(false)
+    }
+  }, [refreshingAll, search, onRecordsUpdated])
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (listFocusRef.current !== 'results') return
@@ -1172,6 +1222,21 @@ export const SearchResultsView = memo(
             </Typography>
           )}
         </Box>
+        {search && results.length > 0 && (
+          <Button
+            data-testid="record-refresh-all"
+            size="small"
+            disableRipple
+            startIcon={
+              refreshingAll ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />
+            }
+            disabled={refreshingAll}
+            onClick={() => void handleRefreshAll()}
+            sx={{ textTransform: 'none' }}
+          >
+            Refresh
+          </Button>
+        )}
         {onChangePage && search && (
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
             <Button
