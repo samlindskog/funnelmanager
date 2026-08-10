@@ -30,6 +30,7 @@ from app.apollo_endpoints import (
 )
 from app.config import Settings, get_settings
 from app.database import get_database, get_db
+from app.derived import derive_top_fields
 from app.embeddings import (
     EMBED_SOURCE_COMPLETE_INFO,
     EMBED_SOURCE_MATCH,
@@ -40,6 +41,7 @@ from app.embeddings import (
 from app.milvus_client import (
     NICE_BACKFILL,
     NICE_SEARCH_EMBED,
+    _milvus_str_literal,
     index_lead_docs,
     search_similar,
 )
@@ -106,6 +108,13 @@ def _serialize_lead(doc: dict[str, Any]) -> LeadOut:
         embedding=bool(doc.get("embedding")),
         apollo_enriched=ApolloEnrichedFlags(**flags),
         apollo_responses=_serialize_responses(responses),
+        name=doc.get("name"),
+        title=doc.get("title"),
+        company_id=doc.get("company_id"),
+        email=doc.get("email"),
+        phone=doc.get("phone"),
+        linkedin=doc.get("linkedin"),
+        derived_at=doc.get("derived_at"),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
@@ -319,25 +328,50 @@ async def _upsert_search_records(
             continue
 
         entry = endpoint_entry(record, now)
-        # Two attempts: a concurrent stream may insert the same apollo_id between
-        # our find and insert (unique index); retry lands on the update path.
-        for _attempt in range(2):
+        # Up to 4 attempts. Two failure modes retry: (a) a concurrent stream
+        # inserts the same apollo_id between our find and insert (unique index) —
+        # retry lands on the update path; (b) the optimistic-concurrency guard
+        # below matches 0 because a racing writer changed the doc — retry re-reads
+        # the fuller doc and re-derives so the top-level fields converge.
+        for _attempt in range(4):
             existing = await db.leads.find_one({"apollo_id": apollo_id})
             if existing:
                 responses = responses_from_doc(existing)
                 responses[endpoint] = entry
-                await db.leads.update_one(
-                    {"_id": existing["_id"]},
+                # Derived top-level index fields recomputed from the merged
+                # responses (per-field precedence => only upgrades, never regresses).
+                derived = derive_top_fields(entity_type, responses)
+                # Optimistic guard: write only if the doc still matches the snapshot
+                # we derived from (updated_at + derived_at; equality-with-missing
+                # covers legacy docs where derived_at is absent). A racing writer
+                # bumps updated_at, so matched_count==0 => re-read, merge their entry,
+                # re-derive from the fuller map. Residual: ms-precision timestamps
+                # mean a same-millisecond write pair can slip the guard (vanishingly
+                # narrow; self-heals on the next write).
+                update_result = await db.leads.update_one(
                     {
+                        "_id": existing["_id"],
+                        "updated_at": existing.get("updated_at"),
+                        "derived_at": existing.get("derived_at"),
+                    },
+                    {
+                        # $set only THIS endpoint's entry via a dotted path (never
+                        # the whole apollo_responses map) so a concurrent writer's
+                        # entry for a different endpoint is not lost (lost-update
+                        # race, e.g. enrich racing its own phone-reveal webhook).
                         "$set": {
                             "entity_type": entity_type,
-                            "apollo_responses": responses,
+                            f"apollo_responses.{endpoint}": entry,
                             "embedding": _embedding_flag_after_update(existing, endpoint),
                             "updated_at": now,
+                            "derived_at": now,
+                            **derived,
                         },
                         "$unset": {"apollo_response": ""},
                     },
                 )
+                if update_result.matched_count == 0:
+                    continue
                 mongo_ids.append(str(existing["_id"]))
                 break
 
@@ -349,6 +383,8 @@ async def _upsert_search_records(
                 "embedding": False,
                 "created_at": now,
                 "updated_at": now,
+                "derived_at": now,
+                **derive_top_fields(entity_type, {endpoint: entry}),
             }
             try:
                 result = await db.leads.insert_one(doc)
@@ -356,6 +392,31 @@ async def _upsert_search_records(
                 continue
             mongo_ids.append(str(result.inserted_id))
             break
+        else:
+            # Pathological contention: write ONLY the safe additive parts (payload
+            # entry + embedding flag), never derived fields/derived_at, so a
+            # stale-snapshot derived value can't overwrite a fresher one. Derived
+            # converges on the next successful write.
+            fallback = await db.leads.find_one({"apollo_id": apollo_id})
+            if fallback:
+                await db.leads.update_one(
+                    {"_id": fallback["_id"]},
+                    {
+                        "$set": {
+                            "entity_type": entity_type,
+                            f"apollo_responses.{endpoint}": entry,
+                            "embedding": _embedding_flag_after_update(fallback, endpoint),
+                            "updated_at": now,
+                        },
+                        "$unset": {"apollo_response": ""},
+                    },
+                )
+                logger.warning(
+                    "Optimistic guard exhausted for apollo_id %s; wrote payload "
+                    "without re-deriving top-level fields (converges next write)",
+                    apollo_id,
+                )
+                mongo_ids.append(str(fallback["_id"]))
 
     return mongo_ids
 
@@ -377,32 +438,47 @@ async def _upsert_enriched_record(
     entry = endpoint_entry(apollo_response, now)
 
     doc: dict[str, Any] | None = None
-    # Two attempts: a concurrent stream may insert the same apollo_id between
-    # our find and insert (unique index); retry lands on the update path.
-    for _attempt in range(2):
+    # Up to 4 attempts: covers the insert unique-index race AND the optimistic-
+    # concurrency guard miss below (re-read merges the racer's entry + re-derives).
+    for _attempt in range(4):
         existing = await db.leads.find_one({"apollo_id": apollo_id})
         if existing:
             responses = responses_from_doc(existing)
             responses[endpoint] = entry
+            # flags recomputed per attempt from the fresh existing (OR-merge only).
             flags = merge_enriched_flags(
                 normalize_apollo_enriched(existing, responses=responses),
                 linkedin=linkedin,
                 email=email,
                 phone=phone,
             )
-            await db.leads.update_one(
-                {"_id": existing["_id"]},
+            derived = derive_top_fields(entity_type, responses)
+            # Optimistic guard on the read snapshot (see _upsert_search_records):
+            # matched_count==0 means a racing writer changed the doc => re-read.
+            update_result = await db.leads.update_one(
                 {
+                    "_id": existing["_id"],
+                    "updated_at": existing.get("updated_at"),
+                    "derived_at": existing.get("derived_at"),
+                },
+                {
+                    # $set only THIS endpoint's entry via a dotted path (never the
+                    # whole apollo_responses map) so a concurrent writer's entry for
+                    # a different endpoint is not lost (lost-update race).
                     "$set": {
                         "entity_type": entity_type,
-                        "apollo_responses": responses,
+                        f"apollo_responses.{endpoint}": entry,
                         "apollo_enriched": flags,
                         "embedding": _embedding_flag_after_update(existing, endpoint),
                         "updated_at": now,
+                        "derived_at": now,
+                        **derived,
                     },
                     "$unset": {"apollo_response": ""},
                 },
             )
+            if update_result.matched_count == 0:
+                continue
             doc = await db.leads.find_one({"_id": existing["_id"]})
             break
 
@@ -422,12 +498,38 @@ async def _upsert_enriched_record(
                     "embedding": False,
                     "created_at": now,
                     "updated_at": now,
+                    "derived_at": now,
+                    **derive_top_fields(entity_type, {endpoint: entry}),
                 }
             )
         except DuplicateKeyError:
             continue
         doc = await db.leads.find_one({"_id": result.inserted_id})
         break
+    else:
+        # Pathological contention: safe additive write only — the payload entry +
+        # embedding flag, never derived fields/derived_at (nor apollo_enriched,
+        # which an unguarded write could regress). Derived converges next write.
+        fallback = await db.leads.find_one({"apollo_id": apollo_id})
+        if fallback:
+            await db.leads.update_one(
+                {"_id": fallback["_id"]},
+                {
+                    "$set": {
+                        "entity_type": entity_type,
+                        f"apollo_responses.{endpoint}": entry,
+                        "embedding": _embedding_flag_after_update(fallback, endpoint),
+                        "updated_at": now,
+                    },
+                    "$unset": {"apollo_response": ""},
+                },
+            )
+            logger.warning(
+                "Optimistic guard exhausted for apollo_id %s; wrote payload without "
+                "re-deriving top-level fields (converges next write)",
+                apollo_id,
+            )
+            doc = await db.leads.find_one({"_id": fallback["_id"]})
 
     assert doc is not None
     if index:
@@ -1836,9 +1938,10 @@ async def apollo_people_match_webhook(
             continue
 
         doc = None
-        # Two attempts: a concurrent upsert may insert the same apollo_id between
-        # our find and insert (unique index); retry lands on the update path.
-        for _attempt in range(2):
+        # Up to 4 attempts: covers the insert unique-index race AND the optimistic-
+        # concurrency guard miss below (re-read merges the racer's match data +
+        # re-derives so the top-level fields converge).
+        for _attempt in range(4):
             existing = await db.leads.find_one({"apollo_id": apollo_id})
             responses = responses_from_doc(existing) if existing else {}
             match_entry = responses.get(PERSON_MATCH)
@@ -1848,7 +1951,8 @@ async def apollo_people_match_webhook(
                 data = {}
 
             data = _merge_async_person_into_match_data(data, entry, payload=payload)
-            responses[PERSON_MATCH] = endpoint_entry(data, now)
+            new_match_entry = endpoint_entry(data, now)
+            responses[PERSON_MATCH] = new_match_entry
             targets = payload.get("target_fields")
             target_set = (
                 {str(item).lower() for item in targets}
@@ -1872,20 +1976,36 @@ async def apollo_people_match_webhook(
                 email=has_email_payload,
                 phone=has_phone_payload,
             )
+            # Async phone-reveal / waterfall payload upserts email/phone/linkedin
+            # onto the already-stored doc (the §1.3 upsert guarantee).
+            derived = derive_top_fields("person", responses)
             if existing:
-                await db.leads.update_one(
-                    {"_id": existing["_id"]},
+                # Optimistic guard on the read snapshot (see _upsert_search_records):
+                # matched_count==0 means a racing writer changed the doc => re-read.
+                update_result = await db.leads.update_one(
                     {
+                        "_id": existing["_id"],
+                        "updated_at": existing.get("updated_at"),
+                        "derived_at": existing.get("derived_at"),
+                    },
+                    {
+                        # $set only the people/match entry via a dotted path (never
+                        # the whole apollo_responses map) so a concurrent enrich /
+                        # match writer's entry for another endpoint is not lost.
                         "$set": {
                             "entity_type": "person",
-                            "apollo_responses": responses,
+                            f"apollo_responses.{PERSON_MATCH}": new_match_entry,
                             "apollo_enriched": flags,
                             "embedding": False,
                             "updated_at": now,
+                            "derived_at": now,
+                            **derived,
                         },
                         "$unset": {"apollo_response": ""},
                     },
                 )
+                if update_result.matched_count == 0:
+                    continue
                 doc = await db.leads.find_one({"_id": existing["_id"]})
                 break
             try:
@@ -1898,12 +2018,47 @@ async def apollo_people_match_webhook(
                         "embedding": False,
                         "created_at": now,
                         "updated_at": now,
+                        "derived_at": now,
+                        **derived,
                     }
                 )
             except DuplicateKeyError:
                 continue
             doc = await db.leads.find_one({"_id": insert_result.inserted_id})
             break
+        else:
+            # Pathological contention: re-read to merge the freshest stored match
+            # data, then a safe additive write only — the merged people/match entry
+            # + updated_at, never derived fields/derived_at (nor apollo_enriched).
+            existing = await db.leads.find_one({"apollo_id": apollo_id})
+            if existing:
+                responses = responses_from_doc(existing)
+                prev = responses.get(PERSON_MATCH)
+                data = (
+                    dict(prev["data"])
+                    if isinstance(prev, dict) and isinstance(prev.get("data"), dict)
+                    else {}
+                )
+                data = _merge_async_person_into_match_data(data, entry, payload=payload)
+                new_match_entry = endpoint_entry(data, now)
+                await db.leads.update_one(
+                    {"_id": existing["_id"]},
+                    {
+                        "$set": {
+                            "entity_type": "person",
+                            f"apollo_responses.{PERSON_MATCH}": new_match_entry,
+                            "embedding": False,
+                            "updated_at": now,
+                        },
+                        "$unset": {"apollo_response": ""},
+                    },
+                )
+                logger.warning(
+                    "Optimistic guard exhausted for apollo_id %s (webhook); wrote "
+                    "payload without re-deriving top-level fields",
+                    apollo_id,
+                )
+                doc = await db.leads.find_one({"_id": existing["_id"]})
         if doc:
             indexed = await index_lead_docs([doc], source_precedence=EMBED_SOURCE_MATCH)
             if indexed:
@@ -1913,24 +2068,184 @@ async def apollo_people_match_webhook(
     return {"status": "ok", "updated": updated_ids, "count": len(updated_ids)}
 
 
+# Batch size for hydrating similarity candidates from Mongo (matches the 500-doc
+# batch convention used elsewhere, e.g. the search-side get_by_mongo_ids chunking).
+_HYDRATE_CHUNK = 500
+
+
+def _milvus_scalar_expr(company_apollo_id: str | None, body: SimilaritySearchRequest) -> str:
+    """Milvus filter expr over the derived scalar fields (recall; re-checked in Mongo)."""
+    parts: list[str] = []
+    if company_apollo_id:
+        parts.append(f"company_id == {_milvus_str_literal(company_apollo_id)}")
+    if body.entity_type is not None:
+        parts.append(f"entity_type == {_milvus_str_literal(body.entity_type)}")
+    if body.email_exists is not None:
+        parts.append(f"has_email == {'true' if body.email_exists else 'false'}")
+    if body.phone_exists is not None:
+        parts.append(f"has_phone == {'true' if body.phone_exists else 'false'}")
+    if body.linkedin_exists is not None:
+        parts.append(f"has_linkedin == {'true' if body.linkedin_exists else 'false'}")
+    return " and ".join(parts)
+
+
+def _doc_passes_filters(
+    doc: dict[str, Any],
+    company_apollo_id: str | None,
+    body: SimilaritySearchRequest,
+) -> bool:
+    """Authoritative re-check of every requested filter against the hydrated Mongo doc."""
+    if company_apollo_id is not None:
+        if str(doc.get("company_id") or "") != company_apollo_id:
+            return False
+    if body.entity_type is not None:
+        if (doc.get("entity_type") or "person") != body.entity_type:
+            return False
+    if body.email_exists is not None:
+        if (doc.get("email") is not None) != body.email_exists:
+            return False
+    if body.phone_exists is not None:
+        if (doc.get("phone") is not None) != body.phone_exists:
+            return False
+    if body.linkedin_exists is not None:
+        if (doc.get("linkedin") is not None) != body.linkedin_exists:
+            return False
+    return True
+
+
+async def _resolve_company_apollo_id(
+    db: AsyncIOMotorDatabase,
+    company_id: str | None,
+) -> str | None:
+    """Resolve ``company_id`` to the org's Apollo id (the people filter value).
+
+    Accepts either a company record's Mongo ``_id`` or its Apollo organization id
+    (the two live in different id spaces, so a caller cannot know which they hold).
+    Tries the Mongo ``_id`` first (when the value parses as an ObjectId); on a miss
+    (or a non-ObjectId value) falls back to the org doc's ``apollo_id``. 404 only
+    when both lookups miss. The resolved org's ``apollo_id`` is the filter value.
+    """
+    if company_id is None:
+        return None
+    value = company_id.strip()
+    if not value:
+        return None
+
+    org_doc: dict[str, Any] | None = None
+    # Prefer the Mongo _id space (only when the value is a valid ObjectId).
+    try:
+        org_object_id = ObjectId(value)
+    except Exception:
+        org_object_id = None
+    if org_object_id is not None:
+        candidate = await db.leads.find_one({"_id": org_object_id})
+        if candidate and (candidate.get("entity_type") or "person") == "organization":
+            org_doc = candidate
+
+    # Fall back to the Apollo organization id (a non-ObjectId string is a legit
+    # Apollo org id, not a client error).
+    if org_doc is None:
+        org_doc = await db.leads.find_one(
+            {"apollo_id": value, "entity_type": "organization"}
+        )
+
+    if org_doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No organization lead found for company_id {company_id} "
+                "(accepts a company record's Mongo id or Apollo organization id)"
+            ),
+        )
+    apollo_id = str(org_doc.get("apollo_id") or "").strip()
+    if not apollo_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization lead {company_id} has no Apollo id to filter by",
+        )
+    return apollo_id
+
+
+async def _pure_filter_similarity(
+    db: AsyncIOMotorDatabase,
+    body: SimilaritySearchRequest,
+    company_apollo_id: str | None,
+) -> SimilaritySearchResponse:
+    """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
+    query: dict[str, Any] = {}
+    if body.entity_type is not None:
+        query["entity_type"] = body.entity_type
+    if company_apollo_id is not None:
+        query["company_id"] = company_apollo_id
+        # company_id is a people-only field; default to person unless the caller
+        # already pinned an entity_type (an incompatible pin ANDs to no results,
+        # consistent with the vector path).
+        query.setdefault("entity_type", "person")
+    for field, flag in (
+        ("email", body.email_exists),
+        ("phone", body.phone_exists),
+        ("linkedin", body.linkedin_exists),
+    ):
+        if flag is True:
+            query[field] = {"$ne": None}
+        elif flag is False:
+            query[field] = None  # matches missing or null
+    cursor = db.leads.find(query).sort("updated_at", -1).limit(body.limit)
+    docs = await cursor.to_list(length=body.limit)
+    results = [SimilarityHitOut(score=None, lead=_serialize_lead(doc)) for doc in docs]
+    return SimilaritySearchResponse(results=results)
+
+
 @router.post("/similarity-search", response_model=SimilaritySearchResponse)
 async def similarity_search(
     body: SimilaritySearchRequest,
     db: AsyncIOMotorDatabase = Depends(get_database),
     settings: Settings = Depends(get_settings),
 ) -> SimilaritySearchResponse:
-    """Embed `query` and return top similar leads from Milvus + Mongo."""
-    query = body.query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="query must not be empty")
+    """Rank leads by mean similarity across a selected subset of embed kinds, with filters.
+
+    ``embeds`` (omitted => ``["apollo"]``; ``[]`` => pure filter search) selects the
+    per-kind embeddings to average; ``company_id`` / ``email_exists`` /
+    ``phone_exists`` / ``linkedin_exists`` filter the result set. Milvus scalar
+    filters provide recall; the hydrated Mongo docs are re-checked authoritatively.
+    """
+    company_apollo_id = await _resolve_company_apollo_id(db, body.company_id)
+    embeds = body.embeds if body.embeds is not None else ["apollo"]
+
+    # Pure filter search: no Milvus / OpenAI (works even when either is down).
+    if not embeds:
+        return await _pure_filter_similarity(db, body, company_apollo_id)
+
     if not settings.openai_configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="OPENAI_API_KEY is not configured",
         )
+    query = (body.query or "").strip()
+
     try:
         vectors = await embed_texts([query], settings=settings)
-        hits = await search_similar(vectors[0], limit=body.limit, settings=settings)
+        query_vector = vectors[0]
+        scalar_expr = _milvus_scalar_expr(company_apollo_id, body)
+        # Split the ANN candidate budget across the selected kinds. Total candidate
+        # work is bounded by max(16384, limit * len(embeds)): the per-kind floor of
+        # `limit` is deliberate (each kind must be able to contribute a full result
+        # set), so a large limit CAN exceed 16384 (e.g. limit=10000 x 3 kinds =
+        # 30000) — but it never N-multiplies the 16384 ceiling the way an unsplit
+        # min(limit*4, 16384) per kind would. This endpoint is agent-reachable and
+        # each kind is one ANN search on the serializing Milvus gate (P4 amplification).
+        oversample = min(body.limit * 4, max(body.limit, 16384 // len(embeds)))
+        # score contributions per doc, keyed by the kinds it appears in.
+        per_doc_scores: dict[str, dict[str, float]] = {}
+        for kind in embeds:
+            expr = f"embed_kind == {_milvus_str_literal(kind)}"
+            if scalar_expr:
+                expr = f"{expr} and {scalar_expr}"
+            hits = await search_similar(
+                query_vector, expr=expr, limit=oversample, settings=settings
+            )
+            for mongo_id, score in hits:
+                per_doc_scores.setdefault(mongo_id, {})[kind] = score
     except HTTPException:
         raise
     except Exception as exc:
@@ -1940,33 +2255,62 @@ async def similarity_search(
             detail=f"Similarity search unavailable: {exc}",
         ) from exc
 
-    object_ids: list[ObjectId] = []
-    scores_by_id: dict[str, float] = {}
-    for mongo_id, score in hits:
-        try:
-            object_id = ObjectId(mongo_id)
-        except Exception:
+    # Mean similarity over the selected kinds each doc actually has (no zero-penalty).
+    merged: list[tuple[str, float]] = []
+    for mongo_id, kind_scores in per_doc_scores.items():
+        if not kind_scores:
             continue
-        key = str(object_id)
-        if key in scores_by_id:
-            continue
-        object_ids.append(object_id)
-        scores_by_id[key] = score
+        merged.append((mongo_id, sum(kind_scores.values()) / len(kind_scores)))
+    merged.sort(key=lambda item: item[1], reverse=True)
 
-    docs_by_id: dict[str, dict[str, Any]] = {}
-    if object_ids:
+    # Fill to ``limit`` AFTER the authoritative Mongo re-check: hydrate the merged
+    # candidates in score order, chunked (the 500 convention), applying the filters
+    # per doc and accumulating passing hits until ``limit`` is reached or candidates
+    # are exhausted. Truncating to ``limit`` before the re-check could return fewer
+    # than ``limit`` rows when the head of the list carries stale Milvus scalars.
+    # Bound the fill-to-limit hydration scan: examine at most this many merged
+    # candidates (each hydrated from Mongo in 500-doc chunks). Caps the worst-case
+    # sequential Mongo work on this agent-reachable endpoint; when the cap
+    # truncates before ``limit`` results accumulate we log (no silent caps) and
+    # return what passed.
+    hydration_cap = max(body.limit * 10, 2000)
+    candidates = merged[:hydration_cap]
+    results: list[SimilarityHitOut] = []
+    for chunk_start in range(0, len(candidates), _HYDRATE_CHUNK):
+        if len(results) >= body.limit:
+            break
+        chunk = candidates[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        object_ids: list[ObjectId] = []
+        for mongo_id, _score in chunk:
+            try:
+                object_ids.append(ObjectId(mongo_id))
+            except Exception:
+                continue
+        if not object_ids:
+            continue
+        docs_by_id: dict[str, dict[str, Any]] = {}
         cursor = db.leads.find({"_id": {"$in": object_ids}})
         async for doc in cursor:
             docs_by_id[str(doc["_id"])] = doc
-
-    results: list[SimilarityHitOut] = []
-    for object_id in object_ids:
-        key = str(object_id)
-        doc = docs_by_id.get(key)
-        if not doc:
-            continue
-        results.append(
-            SimilarityHitOut(score=scores_by_id.get(key, 0.0), lead=_serialize_lead(doc))
+        # Preserve merged score order within the chunk.
+        for mongo_id, score in chunk:
+            doc = docs_by_id.get(mongo_id)
+            if not doc:
+                continue
+            # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
+            if not _doc_passes_filters(doc, company_apollo_id, body):
+                continue
+            results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
+            if len(results) >= body.limit:
+                break
+    if len(results) < body.limit and len(merged) > hydration_cap:
+        logger.warning(
+            "similarity_search hydration cap reached: examined %s of %s merged "
+            "candidate(s), returning %s of requested %s result(s)",
+            len(candidates),
+            len(merged),
+            len(results),
+            body.limit,
         )
     return SimilaritySearchResponse(results=results)
 

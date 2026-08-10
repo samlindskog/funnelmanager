@@ -92,24 +92,13 @@ Source is bind-mounted:
 Default login: `admin` / `admin` (seeded by the dev Keycloak realm import;
 manage users in the Keycloak console afterwards).
 
-## Production (Docker + nginx)
+## Production (k3s + Flux GitOps)
 
-```bash
-cp .env.prod.example .env.prod
-# Set DOMAIN, KC_* / FM_OIDC_*, APOLLO_API_KEY, POSTGRES_PASSWORD, CORS_ORIGINS, DATABASE_URL
-
-# Prod uses prebuilt images from GHCR (no local builds) — built and pushed by
-# .github/workflows/release-prod.yml; see deploy/README.md for the full flow.
-docker compose -f docker-compose.prod.yml --env-file .env.prod pull
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
-```
-
-- nginx serves the built SPA on port 80 for `${DOMAIN}`
-- `/api/search/*` → search FastAPI (Postgres), which relays to leads internally; `/api/mail/*` → mail
-- Keycloak must be reachable at `KC_HOSTNAME` (browser-facing HTTPS; TLS in front of its published port)
-- Postgres and MongoDB data are stored in Docker volumes
-
-Point your DNS A/AAAA record for `${DOMAIN}` at the host. Put TLS in front (Cloudflare, Caddy, Traefik, or certbot) as needed.
+Production runs on a k3s cluster reconciled by Flux — never Compose, never local
+builds. Images are built and pushed to GHCR by `.github/workflows/release-prod.yml`
+(tag `v*` or manual dispatch) and sha-pinned into `deploy/apps/overlays/prod`.
+See `deploy/README.md` for the full release/rollback flow. (The legacy
+single-box `docker-compose.prod.yml` path was removed 2026-08-10.)
 
 ## Local non-Docker (optional)
 

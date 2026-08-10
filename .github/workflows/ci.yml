@@ -124,9 +124,6 @@ jobs:
           # dev compose references env_file: .env (gitignored); a stub satisfies parsing.
           touch .env
           docker compose -f docker-compose.dev.yml config -q
-          # prod compose guards KEYCLOAK_REALM_FILE with ${...:?}; a placeholder value
-          # satisfies interpolation for a parse-only check (config -q reads no files).
-          KEYCLOAK_REALM_FILE=/tmp/realm.json docker compose -f docker-compose.prod.yml config -q
 
   keycloak-provider:
     # The fm-origin script-provider JAR + its k3s ConfigMap are CI-reproduced

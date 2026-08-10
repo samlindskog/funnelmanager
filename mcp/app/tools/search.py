@@ -19,7 +19,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from app.deps import Deps
-from app.tools._shared import effective_token
+from app.tools._shared import build_similarity_body, effective_token
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
 # Creates new work / mutates the store, but never deletes and is not safe to
@@ -77,19 +77,56 @@ def register(mcp: FastMCP, deps: Deps) -> None:
 
     @mcp.tool(annotations=_WRITE)
     async def start_semantic_search(
-        query: str,
+        query: str | None = None,
         limit: int = 25,
+        embeds: list[Literal["apollo", "name", "title"]] | None = None,
+        company_id: str | None = None,
+        entity_type: Literal["person", "organization"] | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
         session_token: str | None = None,
         ctx: Context = None,
     ) -> dict[str, Any]:
         """Semantic (Milvus) search via the search backend; persists a
         cross-user-visible history row (hence a write). Synchronous — returns the
         scored results directly. To search leads WITHOUT recording history, use the
-        leads similarity_search tool instead."""
+        leads similarity_search tool instead.
+
+        Additive v2 params (omit any to keep exact legacy behavior):
+        - embeds: which per-kind embeddings to rank by — any of "apollo" (the
+          Apollo profile passage), "name", "title". The score is the mean
+          similarity across the selected kinds a doc actually has. Omitted =>
+          ["apollo"] (legacy). [] => pure-filter mode: no vector ranking (ranked
+          by recency), query is ignored, and at least one filter is required.
+        - company_id: accepts EITHER a company record's Mongo _id (the same value
+          returned as `mongo_id` on that company's summary) OR the Apollo
+          organization id (the `company_id` field on a person summary) — the two
+          live in different id spaces and leads resolves whichever you pass. Keeps
+          only people whose company is that org.
+        - entity_type: restrict to "person" or "organization".
+        - email_exists / phone_exists / linkedin_exists: tri-state contact-field
+          filters (True=must have, False=must be missing, None=no filter).
+
+        query is required whenever embeds is non-empty (the default); it may be
+        omitted only in pure-filter mode (embeds=[]), where company_id,
+        entity_type, or any contact filter each counts as the required filter. A
+        history row is written in every mode — that is the contrast with the leads
+        similarity_search tool, which records none."""
+        body = build_similarity_body(
+            query=query,
+            limit=limit,
+            embeds=embeds,
+            company_id=company_id,
+            email_exists=email_exists,
+            phone_exists=phone_exists,
+            linkedin_exists=linkedin_exists,
+            entity_type=entity_type,
+        )
         return await search.request(
             "POST",
             "/api/search/mcp/v1/searches/semantic",
-            json_body={"query": query, "limit": max(1, min(int(limit), 10000))},
+            json_body=body,
             token=effective_token(session_token, ctx),
         )
 

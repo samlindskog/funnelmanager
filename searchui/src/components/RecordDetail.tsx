@@ -580,6 +580,7 @@ function CompanyDetail({
           <Fact label="Phone">{record.phone || null}</Fact>
           <Fact label="Organization ID">{organizationId || null}</Fact>
           <Fact label="Account ID">{record.account_id || null}</Fact>
+          <Fact label="Record ID">{record.mongo_id || null}</Fact>
         </FactGrid>
       </Section>
 

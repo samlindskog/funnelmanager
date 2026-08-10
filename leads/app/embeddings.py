@@ -240,11 +240,43 @@ def organization_embedding_text(doc: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def lead_embedding_text(doc: dict[str, Any]) -> str:
-    """Embedding passage for a person or organization lead document."""
-    if (doc.get("entity_type") or "person") == "organization":
-        return organization_embedding_text(doc)
-    return person_embedding_text(doc)
+def lead_embedding_texts(doc: dict[str, Any]) -> dict[str, str]:
+    """Per-kind embedding texts for a lead: ``{kind: text}``.
+
+    - ``apollo``: the ``person_embedding_text`` / ``organization_embedding_text``
+      passage (unchanged builder).
+    - ``name`` / ``title`` (people only): the doc's TOP-LEVEL derived ``name`` /
+      ``title`` fields, added alongside the apollo passage; a kind is skipped when
+      its field is absent.
+
+    ``name`` / ``title`` read from the derived top-level fields (written before
+    embedding in every write path, with per-field precedence) rather than
+    re-extracting from a single best payload, so these embeds agree with the
+    ``name`` / ``title`` the API and UI report.
+
+    Organizations get ``apollo`` only. Each (doc, kind) becomes one Milvus row
+    (schema v2), so the caller can rank by the average similarity across a
+    caller-selected subset of kinds.
+    """
+    entity_type = doc.get("entity_type") or "person"
+    if entity_type == "organization":
+        text = organization_embedding_text(doc)
+        return {"apollo": text} if text.strip() else {}
+
+    texts: dict[str, str] = {}
+    apollo = person_embedding_text(doc)
+    if apollo.strip():
+        texts["apollo"] = apollo
+
+    name = doc.get("name")
+    if isinstance(name, str) and name.strip():
+        texts["name"] = name.strip()
+
+    title = doc.get("title")
+    if isinstance(title, str) and title.strip():
+        texts["title"] = title.strip()
+
+    return texts
 
 
 async def embed_texts(

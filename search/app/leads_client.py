@@ -331,20 +331,136 @@ def contact_signals_from_person_search(lead: dict[str, Any]) -> dict[str, bool |
     }
 
 
+def _top_field(lead: dict[str, Any], key: str) -> str | None:
+    """Read a derived top-level index field (semantic-search v2), None if absent/blank."""
+    value = lead.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _has_derived_marker(lead: dict[str, Any]) -> bool:
+    """True if leads stamped a ``derived_at`` marker on this doc — the authoritative
+    signal that the derived top-level fields (name/title/email/phone/linkedin) were
+    (re)computed and can be trusted verbatim. Absent/null on legacy docs not yet
+    touched by a v2 write or the migration backfill. Do NOT use name-presence as a
+    v2 proxy: a phone-reveal-webhook person has authoritative email/phone but no
+    name, so it would be mis-classified as legacy and read stale contact signals."""
+    return bool(lead.get("derived_at"))
+
+
+# Apollo emits this local-part when a person's email is locked / not revealed.
+# It is a placeholder, not a real address, and must be treated as absent — same
+# constant/semantics leads applies in ``leads/app/derived.py`` (re-declared here,
+# not imported, since search never imports from leads).
+_EMAIL_PLACEHOLDER_PREFIX = "email_not_unlocked@"
+
+
+def _is_placeholder_email(value: object) -> bool:
+    """True if ``value`` is Apollo's locked-email placeholder (case-insensitive)."""
+    return (
+        isinstance(value, str)
+        and value.strip().lower().startswith(_EMAIL_PLACEHOLDER_PREFIX)
+    )
+
+
+def _strip_placeholder_emails(value: object) -> object:
+    """Drop locked-placeholder entries from an Apollo ``emails`` list.
+
+    Preserves the value's shape: a non-list is returned unchanged so the record's
+    ``emails`` field keeps whatever type it had.
+    """
+    if not isinstance(value, list):
+        return value
+    kept: list[Any] = []
+    for item in value:
+        candidate = item.get("email") if isinstance(item, dict) else item
+        if _is_placeholder_email(candidate):
+            continue
+        kept.append(item)
+    return kept
+
+
+def _has_resolvable_phone(numbers: object) -> bool:
+    """Mirror the UI's ``phoneNumbersFromValue``: does ``numbers`` yield any number?"""
+    if not isinstance(numbers, list):
+        return False
+    for item in numbers:
+        if isinstance(item, str) and item.strip():
+            return True
+        if isinstance(item, dict):
+            for key in ("sanitized_number", "raw_number", "number"):
+                candidate = item.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return True
+    return False
+
+
 def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
     entity_type = lead.get("entity_type")
     raw = display_payload_from_lead(lead)
     if not isinstance(raw, dict):
         return None
+    # Derived top-level index fields (semantic-search v2). When present they are the
+    # authoritative, precedence-resolved values (placeholder-aware email) — prefer
+    # them over re-deriving from raw payloads. Absent (old docs) => fall back.
+    # A doc is "v2/authoritative" iff leads stamped a ``derived_at`` marker, NOT iff
+    # a derived name happens to be present (a name-less reveal-webhook doc is still v2).
+    is_derived = _has_derived_marker(lead)
+    top_name = _top_field(lead, "name")
+    top_title = _top_field(lead, "title")
+    top_email = _top_field(lead, "email")
+    top_phone = _top_field(lead, "phone")
+    top_linkedin = _top_field(lead, "linkedin")
     record: dict[str, Any] | None = None
     if entity_type == "person":
         record = normalize_person(raw)
-        # Contact availability chips always reflect People API Search signals.
-        signals = contact_signals_from_person_search(lead)
-        record["has_email"] = signals["has_email"]
-        record["has_phone"] = signals["has_phone"]
+        # A locked Apollo email (email_not_unlocked@…) is a placeholder set verbatim
+        # by normalize_person; never let it survive on the normalized record (it
+        # would make has_email=False contradict a non-empty email and leak the
+        # placeholder into CSV export + every consumer). Strip it from BOTH the
+        # scalar and the emails list for ALL docs (v2 + legacy) BEFORE applying the
+        # placeholder-aware top-level override.
+        if _is_placeholder_email(record.get("email")):
+            record["email"] = None
+        record["emails"] = _strip_placeholder_emails(record.get("emails"))
+        if top_name:
+            record["name"] = top_name
+        if top_title is not None:
+            record["title"] = top_title
+        if top_email is not None:
+            record["email"] = top_email
+        if top_linkedin is not None:
+            record["linkedin_url"] = top_linkedin
+        # Surface a reveal-webhook phone that only exists at the derived top level:
+        # without this a person can show has_phone=True yet resolve to no number
+        # (the display payload's phone_numbers is empty). Append it in the shape the
+        # UI's resolvedRecordPhone reads (sanitized_number) — shape unchanged.
+        if top_phone is not None and not _has_resolvable_phone(record.get("phone_numbers")):
+            existing = record.get("phone_numbers")
+            numbers = list(existing) if isinstance(existing, list) else []
+            numbers.append({"sanitized_number": top_phone})
+            record["phone_numbers"] = numbers
+        # Contact availability chips: a v2 doc (recognizable by leads' `derived_at`
+        # marker) keys them off actual top-level value presence; old docs lacking the
+        # marker fall back to People API Search signals. Gating on the marker rather
+        # than name-presence is what lets a name-less reveal-webhook person (real,
+        # resolvable email/phone but no name) report has_email/has_phone truthfully
+        # instead of reading stale signals from a payload it may not even have.
+        if is_derived:
+            record["has_email"] = top_email is not None
+            record["has_phone"] = top_phone is not None
+        else:
+            signals = contact_signals_from_person_search(lead)
+            record["has_email"] = signals["has_email"]
+            record["has_phone"] = signals["has_phone"]
     elif entity_type == "organization":
         record = normalize_company(raw)
+        if top_linkedin is not None:
+            record["linkedin_url"] = top_linkedin
+        if top_phone is not None:
+            record["phone"] = top_phone
     if record is None:
         return None
     record["mongo_id"] = str(lead.get("id") or "").strip() or None
@@ -841,15 +957,40 @@ class LeadsClient:
 
     async def similarity_search(
         self,
-        query: str,
+        query: str | None = None,
         *,
         limit: int = 25,
+        embeds: list[str] | None = None,
+        company_id: str | None = None,
+        entity_type: str | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """Search Milvus via leads; return scored hits with raw LeadOut payloads."""
+        """Search Milvus via leads; return scored hits with raw LeadOut payloads.
+
+        v2 (additive): forward the optional embed-subset + filter params, omitting
+        any that are ``None`` so leads applies its own defaults (omitted ``embeds``
+        => ``["apollo"]``, exact legacy behavior)."""
+        json_body: dict[str, Any] = {"limit": limit}
+        if query is not None:
+            json_body["query"] = query
+        if embeds is not None:
+            json_body["embeds"] = embeds
+        if company_id is not None:
+            json_body["company_id"] = company_id
+        if entity_type is not None:
+            json_body["entity_type"] = entity_type
+        if email_exists is not None:
+            json_body["email_exists"] = email_exists
+        if phone_exists is not None:
+            json_body["phone_exists"] = phone_exists
+        if linkedin_exists is not None:
+            json_body["linkedin_exists"] = linkedin_exists
         data = await self._request(
             "POST",
             "/api/leads/similarity-search",
-            json_body={"query": query, "limit": limit},
+            json_body=json_body,
         )
         if not isinstance(data, dict):
             raise HTTPException(

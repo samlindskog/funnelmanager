@@ -14,7 +14,7 @@ from mcp.types import ToolAnnotations
 
 from app.deps import Deps
 from app.summarize import summarize_lead
-from app.tools._shared import effective_token
+from app.tools._shared import build_similarity_body, effective_token
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
@@ -90,18 +90,54 @@ def register(mcp: FastMCP, deps: Deps) -> None:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def similarity_search(
-        query: str,
+        query: str | None = None,
         limit: int = 25,
+        embeds: list[Literal["apollo", "name", "title"]] | None = None,
+        company_id: str | None = None,
+        entity_type: Literal["person", "organization"] | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
         session_token: str | None = None,
         ctx: Context = None,
     ) -> list[dict[str, Any]]:
         """Semantic search over already-stored leads (OpenAI embedding + Milvus).
         Searches only what's in MongoDB — never calls Apollo and writes no search
-        history. Returns scored compact summaries."""
+        history (unlike start_semantic_search, which persists a history row).
+        Returns scored compact summaries (score is null in pure-filter mode).
+
+        Additive v2 params (omit any to keep exact legacy behavior):
+        - embeds: which per-kind embeddings to rank by — any of "apollo" (the
+          Apollo profile passage), "name", "title". The score is the mean
+          similarity across the selected kinds a doc actually has. Omitted =>
+          ["apollo"] (legacy). [] => pure-filter mode: no vector ranking (ranked
+          by recency), query is ignored, and at least one filter is required.
+        - company_id: accepts EITHER a company record's Mongo _id (the same value
+          returned as `mongo_id` on that company's summary) OR the Apollo
+          organization id (the `company_id` field on a person summary) — the two
+          live in different id spaces and leads resolves whichever you pass. Keeps
+          only people whose company is that org.
+        - entity_type: restrict to "person" or "organization".
+        - email_exists / phone_exists / linkedin_exists: tri-state contact-field
+          filters (True=must have, False=must be missing, None=no filter).
+
+        query is required whenever embeds is non-empty (the default); it may be
+        omitted only in pure-filter mode (embeds=[]), where company_id,
+        entity_type, or any contact filter each counts as the required filter."""
+        body = build_similarity_body(
+            query=query,
+            limit=limit,
+            embeds=embeds,
+            company_id=company_id,
+            email_exists=email_exists,
+            phone_exists=phone_exists,
+            linkedin_exists=linkedin_exists,
+            entity_type=entity_type,
+        )
         data = await leads.request(
             "POST",
             "/api/leads/similarity-search",
-            json_body={"query": query, "limit": max(1, min(limit, 10000))},
+            json_body=body,
             token=effective_token(session_token, ctx),
         )
         results = data.get("results") if isinstance(data, dict) else None

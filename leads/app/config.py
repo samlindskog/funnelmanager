@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # Max page-sized embedding batches running at once during a live search.
     embed_batch_concurrency: int = 4
     milvus_uri: str = "http://milvus:19530"
-    milvus_collection: str = "leads_people"
+    milvus_collection: str = "leads_embeds_v2"
 
     @field_validator(
         "apollo_api_key",

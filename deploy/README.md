@@ -72,9 +72,9 @@ CI build/pin → Flux rollout → verify → optional rollback + Cloudflare purg
 
 Compose is the **local and dev-box** path only. `usfr3` is the shared
 develop-here box (source checkout + hot-reload dev stack behind a host-nginx TLS
-proxy); the same `docker-compose.dev.yml` runs on a laptop. `docker-compose.prod.yml`
-still exists for a single-box compose deployment, but the running production is
-the k3s cluster above.
+proxy); the same `docker-compose.dev.yml` runs on a laptop. Production is
+exclusively the k3s cluster above (the legacy `docker-compose.prod.yml`
+single-box path was removed 2026-08-10).
 
 ```bash
 cp .env.example .env      # set APOLLO_API_KEY

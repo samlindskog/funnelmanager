@@ -23,13 +23,15 @@ from pymilvus import (
 )
 
 from app.config import Settings, get_settings
-from app.embeddings import embed_texts, lead_embedding_precedence, lead_embedding_text
+from app.embeddings import embed_texts, lead_embedding_precedence, lead_embedding_texts
 
 logger = logging.getLogger(__name__)
 
 _ALIAS = "default"
+_PK_MAX = 96
 _MONGO_ID_MAX = 64
 _APOLLO_ID_MAX = 128
+_SHORT_MAX = 16
 
 # UNIX-nice priority tiers for the Milvus gate: lower runs first. The pymilvus
 # SDK is not reliably concurrent-safe, so every op still serializes through one
@@ -194,11 +196,19 @@ def ensure_collection(settings: Settings | None = None) -> Collection:
         return collection
 
     fields = [
+        # Primary key is per (doc, kind): a doc contributes up to three rows
+        # (apollo / name / title) so the endpoint can average similarity across a
+        # caller-selected subset of embed kinds.
         FieldSchema(
-            name="mongo_id",
+            name="pk",
             dtype=DataType.VARCHAR,
             is_primary=True,
             auto_id=False,
+            max_length=_PK_MAX,
+        ),
+        FieldSchema(
+            name="mongo_id",
+            dtype=DataType.VARCHAR,
             max_length=_MONGO_ID_MAX,
         ),
         FieldSchema(
@@ -206,9 +216,19 @@ def ensure_collection(settings: Settings | None = None) -> Collection:
             dtype=DataType.VARCHAR,
             max_length=_APOLLO_ID_MAX,
         ),
+        FieldSchema(name="entity_type", dtype=DataType.VARCHAR, max_length=_SHORT_MAX),
+        FieldSchema(name="embed_kind", dtype=DataType.VARCHAR, max_length=_SHORT_MAX),
+        # Derived top-level scalar filters ("" when absent for company_id).
+        FieldSchema(name="company_id", dtype=DataType.VARCHAR, max_length=_APOLLO_ID_MAX),
+        FieldSchema(name="has_email", dtype=DataType.BOOL),
+        FieldSchema(name="has_phone", dtype=DataType.BOOL),
+        FieldSchema(name="has_linkedin", dtype=DataType.BOOL),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim),
     ]
-    schema = CollectionSchema(fields=fields, description="Lead embeddings (person and organization)")
+    schema = CollectionSchema(
+        fields=fields,
+        description="Lead embeddings, one row per (doc, embed_kind); person and organization",
+    )
     collection = Collection(name=name, schema=schema)
     collection.create_index(
         field_name="embedding",
@@ -228,8 +248,62 @@ async def ensure_collection_async(settings: Settings | None = None) -> Collectio
         return await asyncio.to_thread(ensure_collection, settings)
 
 
+@dataclass
+class LeadVectorRow:
+    """One Milvus row per (doc, embed_kind) in the v2 schema."""
+
+    pk: str
+    mongo_id: str
+    apollo_id: str
+    entity_type: str
+    embed_kind: str
+    company_id: str
+    has_email: bool
+    has_phone: bool
+    has_linkedin: bool
+    embedding: list[float]
+
+
+@dataclass
+class _Prepared:
+    """A lead doc resolved to its per-kind embed texts + scalar fields, ready to embed."""
+
+    mongo_id: str
+    apollo_id: str
+    entity_type: str
+    company_id: str
+    has_email: bool
+    has_phone: bool
+    has_linkedin: bool
+    texts: dict[str, str]
+    stored_precedence: int
+
+
+def _prepare_lead_row(doc: dict[str, Any], source_precedence: int) -> _Prepared | None:
+    """Resolve a Mongo lead doc to a ``_Prepared`` (None when it has no embed text).
+
+    The stored precedence is never lowered: it is ``max`` over the doc's own data
+    tier (``lead_embedding_precedence``) and the requesting ``source_precedence``.
+    """
+    texts = lead_embedding_texts(doc)
+    if not texts:
+        return None
+    stored_precedence = max(lead_embedding_precedence(doc), source_precedence)
+    return _Prepared(
+        mongo_id=str(doc.get("_id") or "").strip(),
+        apollo_id=str(doc.get("apollo_id") or "").strip(),
+        entity_type=doc.get("entity_type") or "person",
+        company_id=str(doc.get("company_id") or ""),
+        has_email=doc.get("email") is not None,
+        has_phone=doc.get("phone") is not None,
+        has_linkedin=doc.get("linkedin") is not None,
+        texts=texts,
+        stored_precedence=stored_precedence,
+    )
+
+
 def _upsert_lead_vectors_sync(
-    rows: list[tuple[str, str, list[float]]],
+    rows: list[LeadVectorRow],
     *,
     settings: Settings | None = None,
 ) -> None:
@@ -237,20 +311,31 @@ def _upsert_lead_vectors_sync(
         return
     cfg = settings or get_settings()
     collection = ensure_collection(cfg)
-    mongo_ids = [mongo_id for mongo_id, _, _ in rows]
-    apollo_ids = [apollo_id[:_APOLLO_ID_MAX] for _, apollo_id, _ in rows]
-    vectors = [vector for _, _, vector in rows]
-    collection.upsert([mongo_ids, apollo_ids, vectors])
+    # Column order must match the schema field order in ensure_collection.
+    collection.upsert(
+        [
+            [row.pk[:_PK_MAX] for row in rows],
+            [row.mongo_id[:_MONGO_ID_MAX] for row in rows],
+            [row.apollo_id[:_APOLLO_ID_MAX] for row in rows],
+            [row.entity_type[:_SHORT_MAX] for row in rows],
+            [row.embed_kind[:_SHORT_MAX] for row in rows],
+            [row.company_id[:_APOLLO_ID_MAX] for row in rows],
+            [bool(row.has_email) for row in rows],
+            [bool(row.has_phone) for row in rows],
+            [bool(row.has_linkedin) for row in rows],
+            [row.embedding for row in rows],
+        ]
+    )
     collection.flush()
 
 
 async def upsert_lead_vectors(
-    rows: list[tuple[str, str, list[float]]],
+    rows: list[LeadVectorRow],
     *,
     nice: int = NICE_SEARCH_EMBED,
     settings: Settings | None = None,
 ) -> None:
-    """Upsert (mongo_id, apollo_id, embedding) rows into Milvus (thread offload).
+    """Upsert per-(doc, kind) lead vector rows into Milvus (thread offload).
 
     ``nice`` sets the gate priority of this write: live-search embeds pass
     ``NICE_SEARCH_EMBED`` and backfills ``NICE_BACKFILL`` so an interactive
@@ -265,6 +350,7 @@ async def upsert_lead_vectors(
 def _search_similar_sync(
     query_vector: list[float],
     *,
+    expr: str | None = None,
     limit: int = 10,
     settings: Settings | None = None,
 ) -> list[tuple[str, float]]:
@@ -272,20 +358,21 @@ def _search_similar_sync(
         return []
     cfg = settings or get_settings()
     collection = ensure_collection(cfg)
-    results = collection.search(
+    search_kwargs: dict[str, Any] = dict(
         data=[query_vector],
         anns_field="embedding",
         param={"metric_type": "COSINE", "params": {"nprobe": 16}},
         limit=limit,
-        output_fields=["mongo_id", "apollo_id"],
+        output_fields=["mongo_id"],
     )
+    if expr:
+        search_kwargs["expr"] = expr
+    results = collection.search(**search_kwargs)
     hits: list[tuple[str, float]] = []
     if not results:
         return hits
     for hit in results[0]:
         mongo_id = hit.entity.get("mongo_id") if hasattr(hit, "entity") else None
-        if mongo_id is None:
-            mongo_id = getattr(hit, "id", None)
         if not mongo_id:
             continue
         score = float(hit.score)
@@ -296,18 +383,133 @@ def _search_similar_sync(
 async def search_similar(
     query_vector: list[float],
     *,
+    expr: str | None = None,
     limit: int = 10,
     settings: Settings | None = None,
 ) -> list[tuple[str, float]]:
-    """Return [(mongo_id, score), ...] ordered by similarity (COSINE)."""
+    """Return [(mongo_id, score), ...] ordered by similarity (COSINE).
+
+    ``expr`` is a Milvus boolean filter over the scalar fields (e.g.
+    ``embed_kind == "apollo" and has_email == true``); the caller runs one search
+    per embed kind and merges by ``mongo_id``.
+    """
     # Interactive user query: jumps ahead of any queued embedding writes.
     async with _gate()(NICE_INTERACTIVE):
         return await asyncio.to_thread(
             _search_similar_sync,
             query_vector,
+            expr=expr,
             limit=limit,
             settings=settings,
         )
+
+
+def _milvus_str_literal(value: str) -> str:
+    """Quote a string for a Milvus boolean expr (escape backslash and quote)."""
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _query_apollo_scalars_sync(
+    mongo_ids: list[str],
+    *,
+    settings: Settings | None = None,
+) -> dict[str, dict[str, Any]]:
+    if not mongo_ids:
+        return {}
+    cfg = settings or get_settings()
+    collection = ensure_collection(cfg)
+    id_list = ", ".join(_milvus_str_literal(mid) for mid in mongo_ids)
+    expr = f'mongo_id in [{id_list}] and embed_kind == "apollo"'
+    rows = collection.query(
+        expr=expr,
+        output_fields=["mongo_id", "company_id", "has_email", "has_phone", "has_linkedin"],
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        mongo_id = str(row.get("mongo_id") or "")
+        if mongo_id:
+            out[mongo_id] = row
+    return out
+
+
+async def query_apollo_scalars(
+    mongo_ids: list[str],
+    *,
+    nice: int = NICE_SEARCH_EMBED,
+    settings: Settings | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return ``{mongo_id: {company_id, has_email, has_phone, has_linkedin}}`` from the
+    stored apollo-kind rows (a doc with no stored row is simply absent).
+
+    Used to detect scalar drift on docs skipped by the never-downgrade precedence
+    guard in ``index_lead_docs`` — a doc embedded at MATCH then enriched via BY_ID
+    otherwise keeps stale ``has_email`` etc. in Milvus forever. Serializes on the
+    gate like every pymilvus call.
+    """
+    if not mongo_ids:
+        return {}
+    async with _gate()(nice):
+        return await asyncio.to_thread(
+            _query_apollo_scalars_sync, mongo_ids, settings=settings
+        )
+
+
+async def _reindex_scalar_drift(
+    skipped_by_precedence: list[dict[str, Any]],
+    *,
+    source_precedence: int,
+    nice: int,
+    settings: Settings,
+) -> list[_Prepared]:
+    """Re-prepare precedence-skipped docs whose derived scalars drifted from Milvus.
+
+    ``index_lead_docs`` skips docs whose stored vector came from a strictly higher
+    precedence source. But the derived scalar fields (``has_email`` …,
+    ``company_id``) may have advanced since (e.g. a MATCH-embedded doc later
+    BY_ID-enriched), leaving the stored Milvus row stale. For each skipped doc
+    whose current scalars differ from its stored apollo-kind row, return a
+    ``_Prepared`` so it is re-indexed. never-downgrade precedence is preserved
+    (``_prepare_lead_row`` takes ``max(doc-tier, source)``). A scalar-query failure
+    must never break ingest — it is logged and every skipped doc is left as-is.
+    """
+    if not skipped_by_precedence:
+        return []
+    drift_ids = [
+        mongo_id
+        for mongo_id in (str(doc.get("_id") or "").strip() for doc in skipped_by_precedence)
+        if mongo_id
+    ]
+    try:
+        stored_scalars = await query_apollo_scalars(drift_ids, nice=nice, settings=settings)
+    except Exception:
+        logger.exception(
+            "Scalar-drift check failed; leaving %s skipped doc(s) as-is", len(drift_ids)
+        )
+        return []
+    out: list[_Prepared] = []
+    for doc in skipped_by_precedence:
+        row = stored_scalars.get(str(doc.get("_id") or "").strip())
+        if not row:
+            continue
+        current = (
+            doc.get("email") is not None,
+            doc.get("phone") is not None,
+            doc.get("linkedin") is not None,
+            str(doc.get("company_id") or ""),
+        )
+        stored = (
+            bool(row.get("has_email")),
+            bool(row.get("has_phone")),
+            bool(row.get("has_linkedin")),
+            str(row.get("company_id") or ""),
+        )
+        if current == stored:
+            continue
+        item = _prepare_lead_row(doc, source_precedence)
+        if item is not None:
+            out.append(item)
+    return out
 
 
 async def index_lead_docs(
@@ -333,7 +535,16 @@ async def index_lead_docs(
     ``NICE_SEARCH_EMBED``; backfills pass ``NICE_BACKFILL``). Only the short Milvus
     upsert serializes on the gate — the slower OpenAI embed runs lock-free.
 
-    Soft-fails; returns ``[(mongo_id, stored_precedence), ...]`` for docs indexed.
+    Each doc contributes one row per embed kind (apollo / name / title) with the
+    scalar fields taken from the doc's derived top-level fields. The precedence
+    never-downgrade skip and the Mongo ``embedding`` flip key off the doc as
+    before (the kinds ride along in the same upsert). Known acceptable staleness: a
+    doc skipped by the precedence guard, or one that once had a title and later
+    doesn't, may leave a stale/leftover Milvus row — harmless because query-time
+    filters are re-checked authoritatively against Mongo (see the router).
+
+    Soft-fails; returns ``[(mongo_id, stored_precedence), ...]`` (one per doc)
+    for docs indexed.
     """
     cfg = settings or get_settings()
     if not docs:
@@ -342,7 +553,8 @@ async def index_lead_docs(
         logger.warning("Skipping lead embedding: OPENAI_API_KEY not configured")
         return []
 
-    prepared: list[tuple[str, str, str, int]] = []
+    prepared: list[_Prepared] = []
+    skipped_by_precedence: list[dict[str, Any]] = []
     for doc in docs:
         entity_type = doc.get("entity_type") or "person"
         if entity_type not in ("person", "organization"):
@@ -356,25 +568,58 @@ async def index_lead_docs(
         # (unless force — a re-embed must rewrite every doc regardless of precedence,
         # e.g. after an embedding-model or embedding-text change).
         if not force and existing_precedence and source_precedence < existing_precedence:
+            # Defer for a scalar-drift check: the derived scalar fields (has_email,
+            # …, company_id) may have advanced since this doc was embedded (e.g. a
+            # MATCH-embedded doc later BY_ID-enriched), leaving Milvus stale.
+            skipped_by_precedence.append(doc)
             continue
-        text = lead_embedding_text(doc)
-        if not text.strip():
-            continue
-        # The vector reflects the best data available for this doc.
-        stored_precedence = max(lead_embedding_precedence(doc), source_precedence)
-        prepared.append((mongo_id, apollo_id, text, stored_precedence))
+        item = _prepare_lead_row(doc, source_precedence)
+        if item is not None:
+            prepared.append(item)
+
+    # Re-index precedence-skipped docs whose current derived scalars have drifted
+    # from their stored Milvus row (helper preserves never-downgrade precedence).
+    prepared.extend(
+        await _reindex_scalar_drift(
+            skipped_by_precedence,
+            source_precedence=source_precedence,
+            nice=nice,
+            settings=cfg,
+        )
+    )
 
     if not prepared:
         return []
 
+    # Flatten to one embed input per (doc, kind), preserving alignment.
+    flat: list[tuple[int, str]] = []
+    all_texts: list[str] = []
+    for doc_index, item in enumerate(prepared):
+        for kind, text in item.texts.items():
+            flat.append((doc_index, kind))
+            all_texts.append(text)
+
     try:
-        vectors = await embed_texts([text for _, _, text, _ in prepared], settings=cfg)
-        rows = [
-            (mongo_id, apollo_id, vector)
-            for (mongo_id, apollo_id, _, _), vector in zip(prepared, vectors, strict=True)
-        ]
+        vectors = await embed_texts(all_texts, settings=cfg)
+        rows: list[LeadVectorRow] = []
+        for (doc_index, kind), vector in zip(flat, vectors, strict=True):
+            item = prepared[doc_index]
+            rows.append(
+                LeadVectorRow(
+                    pk=f"{item.mongo_id}:{kind}",
+                    mongo_id=item.mongo_id,
+                    apollo_id=item.apollo_id,
+                    entity_type=item.entity_type,
+                    embed_kind=kind,
+                    company_id=item.company_id,
+                    has_email=item.has_email,
+                    has_phone=item.has_phone,
+                    has_linkedin=item.has_linkedin,
+                    embedding=vector,
+                )
+            )
         await upsert_lead_vectors(rows, nice=nice, settings=cfg)
-        return [(mongo_id, precedence) for (mongo_id, _, _, precedence) in prepared]
+        return [(item.mongo_id, item.stored_precedence) for item in prepared]
     except Exception:
         logger.exception("Failed to index %s lead(s) in Milvus", len(prepared))
         return []

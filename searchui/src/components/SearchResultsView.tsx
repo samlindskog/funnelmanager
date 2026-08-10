@@ -49,7 +49,7 @@ import {
 import { isEditableTarget, type ListFocus } from '../keyboard'
 import { useProgress, type ProgressRun } from '../progress'
 import { toggleOrRangeSelect } from '../rangeSelect'
-import type { ApolloEnrichedFlags, ApolloRecord, PersonRecord, SearchHistoryDetail } from '../types'
+import type { ApolloRecord, PersonRecord, SearchHistoryDetail } from '../types'
 import { RecordDetail } from './RecordDetail'
 
 /** Session-scoped: skip enrich confirmation after the user opts out. */
@@ -73,18 +73,6 @@ const APOLLO_TOKEN_COST: Record<keyof EnrichChannels, number> = {
   linkedin: 1,
   email: 7,
   phone: 15,
-}
-
-function enrichedFlags(record: ApolloRecord): ApolloEnrichedFlags {
-  const raw = record.apollo_enriched
-  if (raw && typeof raw === 'object') {
-    return {
-      linkedin: Boolean(raw.linkedin),
-      email: Boolean(raw.email),
-      phone: Boolean(raw.phone),
-    }
-  }
-  return { linkedin: false, email: false, phone: false }
 }
 
 function recordKey(record: ApolloRecord) {
@@ -116,14 +104,29 @@ function secondaryText(record: ApolloRecord): string {
   return [record.industry, record.domain].filter(Boolean).join(' · ')
 }
 
+/** Apollo emits this local-part when a person's email is locked / not revealed.
+ * It is a placeholder, never a real address. The backend strips it from
+ * normalized records, but `resolvedRecordEmail`'s raw apollo_responses fallback
+ * is NOT placeholder-aware — filtering it here keeps the placeholder out of both
+ * the contact chips and the CSV export (mirrors search-side `_is_placeholder_email`). */
+function isPlaceholderEmail(value: string): boolean {
+  return value.trim().toLowerCase().startsWith('email_not_unlocked@')
+}
+
 function emailFromValue(value: unknown): string | null {
-  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (typeof value === 'string' && value.trim() && !isPlaceholderEmail(value)) {
+    return value.trim()
+  }
   if (Array.isArray(value)) {
     for (const item of value) {
-      if (typeof item === 'string' && item.trim()) return item.trim()
+      if (typeof item === 'string' && item.trim() && !isPlaceholderEmail(item)) {
+        return item.trim()
+      }
       if (item && typeof item === 'object') {
         const email = (item as Record<string, unknown>).email
-        if (typeof email === 'string' && email.trim()) return email.trim()
+        if (typeof email === 'string' && email.trim() && !isPlaceholderEmail(email)) {
+          return email.trim()
+        }
       }
     }
   }
@@ -192,6 +195,33 @@ function recordTitle(record: ApolloRecord): string | null {
   return (record.title || record.headline || '').trim() || null
 }
 
+/** Row-icon flags. For people the email/phone chips key off the authoritative,
+ * placeholder-aware backend booleans (`has_email`/`has_phone` — a locked
+ * `email_not_unlocked@…` never sets `has_email`), NOT the raw apollo_responses
+ * fallbacks in resolvedRecord* (which are not placeholder-aware). LinkedIn keys
+ * off the normalized `linkedin_url`. Companies have no email chip; their phone
+ * comes from the normalized `phone` scalar. The narrower `apollo_enriched`
+ * "enrichment revealed this" signal stays visible in the record detail pane. */
+function contactPresence(record: ApolloRecord): {
+  linkedin: boolean
+  email: boolean
+  phone: boolean
+} {
+  const linkedin = Boolean((record.linkedin_url || '').trim())
+  if (record.entity_type === 'person') {
+    return {
+      linkedin,
+      email: Boolean(record.has_email),
+      phone: Boolean(record.has_phone),
+    }
+  }
+  return {
+    linkedin,
+    email: false,
+    phone: Boolean((record.phone || '').trim()),
+  }
+}
+
 function csvEscape(value: string): string {
   // Neutralize spreadsheet formula injection (mirrors the backend's _csv_cell):
   // Excel/Sheets evaluate cells starting with = + - @ (or tab/CR) even when quoted.
@@ -247,7 +277,7 @@ const ResultRow = memo(function ResultRow({
 }) {
   const key = recordKey(record)
   const secondary = secondaryText(record)
-  const flags = enrichedFlags(record)
+  const flags = contactPresence(record)
   const selectable = isSelectablePerson(record)
 
   return (
@@ -307,13 +337,13 @@ const ResultRow = memo(function ResultRow({
                   }}
                 >
                   {flags.linkedin && (
-                    <LinkedInIcon sx={{ fontSize: 14 }} titleAccess="LinkedIn enrich run" />
+                    <LinkedInIcon sx={{ fontSize: 14 }} titleAccess="Has LinkedIn URL" />
                   )}
                   {flags.email && (
-                    <EmailOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Email enrich run" />
+                    <EmailOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Has email" />
                   )}
                   {flags.phone && (
-                    <PhoneOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Phone enrich run" />
+                    <PhoneOutlinedIcon sx={{ fontSize: 14 }} titleAccess="Has phone" />
                   )}
                 </Box>
               )}

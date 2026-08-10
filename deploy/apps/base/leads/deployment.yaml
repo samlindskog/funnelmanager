@@ -99,7 +99,7 @@ spec:
             - name: MILVUS_URI
               value: http://milvus:19530
             - name: MILVUS_COLLECTION
-              value: leads_people
+              value: leads_embeds_v2
             - name: OPENAI_EMBEDDING_MODEL
               value: text-embedding-3-small
             - name: APOLLO_API_KEY

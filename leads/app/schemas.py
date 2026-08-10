@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ApolloParamsBody(BaseModel):
@@ -38,6 +38,19 @@ class LeadOut(BaseModel):
     apollo_enriched: ApolloEnrichedFlags = Field(default_factory=ApolloEnrichedFlags)
     """Endpoint-keyed Apollo payloads; keys appear only after that endpoint is used."""
     apollo_responses: dict[str, ApolloEndpointResponseOut] = Field(default_factory=dict)
+    # Derived top-level index fields (semantic-search v2). People carry all six;
+    # organizations only phone/linkedin. Absent => null.
+    name: str | None = None
+    title: str | None = None
+    company_id: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    linkedin: str | None = None
+    # v2 marker: when the derived top-level fields above were last (re)computed.
+    # Present => those fields are authoritative (a name-less doc's has_email/
+    # has_phone can be trusted rather than inferred from name-presence). Null on
+    # legacy docs not yet touched by a v2 write or the migration backfill.
+    derived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -99,12 +112,66 @@ class StreamControlResponse(BaseModel):
 
 
 class SimilaritySearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=8000)
+    """Similarity search request (v2, additive over v1).
+
+    ``embeds`` selects which per-kind embeddings to rank by (the mean similarity
+    across the selected kinds a doc actually has):
+    - omitted / ``None`` => ``["apollo"]`` — exact legacy behavior.
+    - ``[]``             => pure filter search (no vector ranking; requires a filter).
+
+    Filters: ``company_id`` (a company record's Mongo ``_id`` or its Apollo
+    organization id), the ``entity_type`` restriction (``person`` /
+    ``organization``), plus the tri-state ``email_exists`` / ``phone_exists`` /
+    ``linkedin_exists`` (True=has, False=missing, None=no filter).
+    """
+
+    query: str | None = Field(default=None, max_length=8000)
     limit: int = Field(default=25, ge=1, le=10000)
+    embeds: list[Literal["apollo", "name", "title"]] | None = None
+    company_id: str | None = None
+    entity_type: Literal["person", "organization"] | None = None
+    email_exists: bool | None = None
+    phone_exists: bool | None = None
+    linkedin_exists: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "SimilaritySearchRequest":
+        if self.embeds is not None and len(set(self.embeds)) != len(self.embeds):
+            raise ValueError("embeds must not contain duplicate kinds")
+        # Whitespace-only company_id is not a filter — strip it and coerce blank to
+        # None BEFORE the at-least-one-filter count so `company_id: "  "` cannot
+        # satisfy the requirement.
+        if self.company_id is not None:
+            cleaned = self.company_id.strip()
+            self.company_id = cleaned or None
+        # Omitted embeds default to ["apollo"] (legacy); [] is an explicit pure-filter.
+        effective = self.embeds if self.embeds is not None else ["apollo"]
+        if effective:
+            if not (self.query or "").strip():
+                raise ValueError("query is required when embeds is non-empty")
+        else:
+            # A pure-filter run never uses the query text; coerce it to None so a
+            # stray query does not mislabel the downstream history row.
+            self.query = None
+            has_filter = any(
+                value is not None
+                for value in (
+                    self.company_id,
+                    self.entity_type,
+                    self.email_exists,
+                    self.phone_exists,
+                    self.linkedin_exists,
+                )
+            )
+            if not has_filter:
+                raise ValueError(
+                    "a pure filter search (embeds == []) requires at least one filter"
+                )
+        return self
 
 
 class SimilarityHitOut(BaseModel):
-    score: float
+    score: float | None = None
     lead: LeadOut
 
 
