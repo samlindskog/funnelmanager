@@ -404,19 +404,27 @@ Second round (full-branch re-review):
 9. **Migration fail-fast**: `reembed.py` hard-fails (non-zero SystemExit) when `OPENAI_API_KEY`
    is unset, before pass 1 — previously it exited 0 after backfilling fields while silently
    skipping the entire Milvus rebuild.
-10. **Lost-update race closed**: the three write paths' update branches `$set` the single
-    `apollo_responses.<endpoint>` entry via a dotted path instead of rewriting the whole map,
-    so concurrent writers (e.g. an enrich racing its own phone-reveal webhook) union rather
-    than clobber. (Verified no endpoint key contains a `.`.)
+10. **Lost-update race closed — two layers**: (a) the three write paths' update branches `$set`
+    the single `apollo_responses.<endpoint>` entry via a dotted path instead of rewriting the
+    whole map (verified no endpoint key contains a `.`); (b) because derived scalars are still
+    computed from each writer's pre-write snapshot, the update is additionally **optimistically
+    guarded** on the `(updated_at, derived_at)` values it read — a guard miss re-reads (seeing
+    the racer's entry) and re-derives from the fuller map, converging on the correct
+    per-field-precedence values; after 4 contended attempts a fallback writes only the safe
+    additive parts (endpoint entry, no derived fields) and the next write self-heals. Known
+    residual: a same-millisecond write pair can slip the ms-precision guard (vanishingly
+    narrow, self-healing).
 11. **`derived_at` authority marker**: every application of derived fields stamps `derived_at`
     (all write paths + backfill; exposed on LeadOut). `lead_to_record` gates the authoritative
     `has_email`/`has_phone` on this marker — not the name-presence proxy — so a name-less
     webhook-created person gets correct contact flags; legacy docs without the marker keep the
     contact-signals fallback.
 12. **Similarity work caps** (agent-reachable amplification): the per-kind ANN budget is split
-    across selected kinds (`min(limit*4, max(limit, 16384 // len(embeds)))`) and the
-    fill-to-limit hydration scan examines at most `max(limit*10, 2000)` candidates, logging
-    when truncated (no silent caps).
+    across selected kinds (`min(limit*4, max(limit, 16384 // len(embeds)))`) — total candidate
+    work is bounded by `max(16384, limit × len(embeds))` (the per-kind floor of `limit` is
+    deliberate so each kind can contribute a full result set; at the 10000-limit ceiling with
+    3 kinds that is 30000, vs 49152 uncapped) — and the fill-to-limit hydration scan examines
+    at most `max(limit*10, 2000)` candidates, logging when truncated (no silent caps).
 13. **Quality**: single `_milvus_str_literal` (router imports from `milvus_client`);
     `_Prepared`/`_prepare_lead_row` and the scalar-drift re-check extracted to module level so
     `index_lead_docs` reads as orchestration; shared `build_similarity_body` in
