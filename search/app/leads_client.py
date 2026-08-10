@@ -331,20 +331,55 @@ def contact_signals_from_person_search(lead: dict[str, Any]) -> dict[str, bool |
     }
 
 
+def _top_field(lead: dict[str, Any], key: str) -> str | None:
+    """Read a derived top-level index field (semantic-search v2), None if absent/blank."""
+    value = lead.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
     entity_type = lead.get("entity_type")
     raw = display_payload_from_lead(lead)
     if not isinstance(raw, dict):
         return None
+    # Derived top-level index fields (semantic-search v2). When present they are the
+    # authoritative, precedence-resolved values (placeholder-aware email) — prefer
+    # them over re-deriving from raw payloads. Absent (old docs) => fall back.
+    top_name = _top_field(lead, "name")
+    top_title = _top_field(lead, "title")
+    top_email = _top_field(lead, "email")
+    top_phone = _top_field(lead, "phone")
+    top_linkedin = _top_field(lead, "linkedin")
     record: dict[str, Any] | None = None
     if entity_type == "person":
         record = normalize_person(raw)
-        # Contact availability chips always reflect People API Search signals.
-        signals = contact_signals_from_person_search(lead)
-        record["has_email"] = signals["has_email"]
-        record["has_phone"] = signals["has_phone"]
+        if top_name:
+            record["name"] = top_name
+        if top_title is not None:
+            record["title"] = top_title
+        if top_email is not None:
+            record["email"] = top_email
+        if top_linkedin is not None:
+            record["linkedin_url"] = top_linkedin
+        # Contact availability chips: a v2 doc (recognizable by a derived top-level
+        # `name`) keys them off actual top-level value presence; old docs lacking
+        # the derived fields fall back to People API Search signals.
+        if top_name is not None:
+            record["has_email"] = top_email is not None
+            record["has_phone"] = top_phone is not None
+        else:
+            signals = contact_signals_from_person_search(lead)
+            record["has_email"] = signals["has_email"]
+            record["has_phone"] = signals["has_phone"]
     elif entity_type == "organization":
         record = normalize_company(raw)
+        if top_linkedin is not None:
+            record["linkedin_url"] = top_linkedin
+        if top_phone is not None:
+            record["phone"] = top_phone
     if record is None:
         return None
     record["mongo_id"] = str(lead.get("id") or "").strip() or None
@@ -841,15 +876,37 @@ class LeadsClient:
 
     async def similarity_search(
         self,
-        query: str,
+        query: str | None = None,
         *,
         limit: int = 25,
+        embeds: list[str] | None = None,
+        company_id: str | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """Search Milvus via leads; return scored hits with raw LeadOut payloads."""
+        """Search Milvus via leads; return scored hits with raw LeadOut payloads.
+
+        v2 (additive): forward the optional embed-subset + filter params, omitting
+        any that are ``None`` so leads applies its own defaults (omitted ``embeds``
+        => ``["apollo"]``, exact legacy behavior)."""
+        json_body: dict[str, Any] = {"limit": limit}
+        if query is not None:
+            json_body["query"] = query
+        if embeds is not None:
+            json_body["embeds"] = embeds
+        if company_id is not None:
+            json_body["company_id"] = company_id
+        if email_exists is not None:
+            json_body["email_exists"] = email_exists
+        if phone_exists is not None:
+            json_body["phone_exists"] = phone_exists
+        if linkedin_exists is not None:
+            json_body["linkedin_exists"] = linkedin_exists
         data = await self._request(
             "POST",
             "/api/leads/similarity-search",
-            json_body={"query": query, "limit": limit},
+            json_body=json_body,
         )
         if not isinstance(data, dict):
             raise HTTPException(

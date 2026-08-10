@@ -154,8 +154,27 @@ class McpSearchStartResponse(BaseModel):
 
 
 class McpSemanticSearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=8000)
+    """Semantic search request (v2, additive over v1).
+
+    Mirrors the leads ``SimilaritySearchRequest`` contract: ``embeds`` selects
+    which per-kind embeddings to rank by (mean similarity across the selected
+    kinds a doc has) — omitted/``None`` => ``["apollo"]`` (legacy), ``[]`` =>
+    pure filter search. ``company_id`` (Mongo ``_id`` of a stored organization
+    doc) plus the tri-state ``email_exists`` / ``phone_exists`` /
+    ``linkedin_exists`` filter the result set.
+    """
+
+    query: str | None = Field(default=None, max_length=8000)
     limit: int = Field(default=25, ge=1, le=10000)
+    embeds: list[Literal["apollo", "name", "title"]] | None = None
+    company_id: str | None = None
+    email_exists: bool | None = None
+    phone_exists: bool | None = None
+    linkedin_exists: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "McpSemanticSearchRequest":
+        return _validate_similarity_request(self)
 
 
 class McpEnrichRequest(BaseModel):
@@ -208,13 +227,64 @@ class McpExportResponse(BaseModel):
     results: list[McpExportRow] = Field(default_factory=list)
 
 
+def _validate_similarity_request(model: Any) -> Any:
+    """Shared conditional validation for similarity/semantic requests.
+
+    Mirrors leads ``SimilaritySearchRequest``: ``embeds`` non-empty (or omitted,
+    which defaults to ``["apollo"]``) requires a ``query``; ``embeds == []``
+    (pure filter search) requires at least one filter; duplicate kinds rejected.
+    """
+    if model.embeds is not None and len(set(model.embeds)) != len(model.embeds):
+        raise ValueError("embeds must not contain duplicate kinds")
+    effective = model.embeds if model.embeds is not None else ["apollo"]
+    if effective:
+        if not (model.query or "").strip():
+            raise ValueError("query is required when embeds is non-empty")
+    else:
+        has_filter = any(
+            value is not None
+            for value in (
+                model.company_id,
+                model.email_exists,
+                model.phone_exists,
+                model.linkedin_exists,
+            )
+        )
+        if not has_filter:
+            raise ValueError(
+                "a pure filter search (embeds == []) requires at least one filter"
+            )
+    return model
+
+
 class SimilaritySearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=8000)
+    """Similarity search request (v2, additive over v1).
+
+    ``embeds`` selects which per-kind embeddings to rank by (the mean similarity
+    across the selected kinds a doc actually has):
+    - omitted / ``None`` => ``["apollo"]`` — exact legacy behavior.
+    - ``[]``             => pure filter search (no vector ranking; requires a filter).
+
+    Filters: ``company_id`` (Mongo ``_id`` of a stored organization doc), plus the
+    tri-state ``email_exists`` / ``phone_exists`` / ``linkedin_exists``
+    (True=has, False=missing, None=no filter).
+    """
+
+    query: str | None = Field(default=None, max_length=8000)
     limit: int = Field(default=25, ge=1, le=10000)
+    embeds: list[Literal["apollo", "name", "title"]] | None = None
+    company_id: str | None = None
+    email_exists: bool | None = None
+    phone_exists: bool | None = None
+    linkedin_exists: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "SimilaritySearchRequest":
+        return _validate_similarity_request(self)
 
 
 class SimilarityHitOut(BaseModel):
-    score: float
+    score: float | None = None
     record: dict[str, Any]
 
 

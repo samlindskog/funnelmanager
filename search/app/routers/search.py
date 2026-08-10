@@ -1362,28 +1362,71 @@ async def apollo_credits(
     return await client.get_apollo_credits()
 
 
+def _similarity_filter_label(
+    *,
+    company_id: str | None,
+    email_exists: bool | None,
+    phone_exists: bool | None,
+    linkedin_exists: bool | None,
+) -> str:
+    """Human-readable history label for a pure-filter (no-query) similarity search."""
+    parts: list[str] = []
+    if (company_id or "").strip():
+        parts.append(f"company={company_id.strip()}")
+    for name, flag in (
+        ("email", email_exists),
+        ("phone", phone_exists),
+        ("linkedin", linkedin_exists),
+    ):
+        if flag is True:
+            parts.append(f"has {name}")
+        elif flag is False:
+            parts.append(f"no {name}")
+    return f"filter: {', '.join(parts)}" if parts else "filter"
+
+
 async def _run_similarity_search(
     db: AsyncSession,
     client: LeadsClient,
     *,
-    query: str,
+    query: str | None,
     limit: int,
     username: str,
     origin: str,
     actor: str,
+    embeds: list[str] | None = None,
+    company_id: str | None = None,
+    email_exists: bool | None = None,
+    phone_exists: bool | None = None,
+    linkedin_exists: bool | None = None,
 ) -> tuple[SimilaritySearchResponse, SearchHistory]:
     """Milvus similarity search + persist a (cross-user-visible) history row.
 
     Shared by the UI ``/similarity-search`` endpoint and the MCP semantic-search
     endpoint. Attributes the row to ``username``/``origin``/``actor`` and emits a
     terminal ``semantic_search`` job event so the run is visible in the jobs
-    service (semantic search is synchronous — there is no leads stream to pause)."""
-    query = query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="query must not be empty")
+    service (semantic search is synchronous — there is no leads stream to pause).
+
+    v2 (additive): forwards the optional embed-subset + filter params to leads and
+    records them in ``search_params_json``. When ``query`` is empty (a pure-filter
+    search, ``embeds == []``) the history label is derived from the filters."""
+    query = (query or "").strip()
+    effective_embeds = embeds if embeds is not None else ["apollo"]
+    if effective_embeds and not query:
+        raise HTTPException(
+            status_code=400, detail="query is required when embeds is non-empty"
+        )
 
     try:
-        hits = await client.similarity_search(query, limit=limit)
+        hits = await client.similarity_search(
+            query or None,
+            limit=limit,
+            embeds=embeds,
+            company_id=company_id,
+            email_exists=email_exists,
+            phone_exists=phone_exists,
+            linkedin_exists=linkedin_exists,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1401,18 +1444,34 @@ async def _run_similarity_search(
         record = lead_to_record(lead)
         if not record:
             continue
-        score = float(hit.get("score") or 0.0)
+        raw_score = hit.get("score")
+        score = float(raw_score) if isinstance(raw_score, (int, float)) else None
         scored.append(SimilarityHitOut(score=score, record=record))
         records.append(record)
 
     per_page = _UI_PER_PAGE
     page_results = records[:per_page]
-    history_query = _clip_history_query(query)
+    if query:
+        history_query = _clip_history_query(query)
+    else:
+        history_query = _clip_history_query(
+            _similarity_filter_label(
+                company_id=company_id,
+                email_exists=email_exists,
+                phone_exists=phone_exists,
+                linkedin_exists=linkedin_exists,
+            )
+        )
     search_params = {
         "source": "similarity",
         "query": query,
         "limit": limit,
         "entity_type": "people",
+        "embeds": embeds,
+        "company_id": company_id,
+        "email_exists": email_exists,
+        "phone_exists": phone_exists,
+        "linkedin_exists": linkedin_exists,
     }
     row = SearchHistory(
         username=username,
@@ -1484,6 +1543,11 @@ async def similarity_search(
         username=user.username,
         origin=origin,
         actor=actor,
+        embeds=body.embeds,
+        company_id=body.company_id,
+        email_exists=body.email_exists,
+        phone_exists=body.phone_exists,
+        linkedin_exists=body.linkedin_exists,
     )
     return response
 
