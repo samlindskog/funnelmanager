@@ -19,7 +19,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 from app.deps import Deps
-from app.tools._shared import effective_token
+from app.tools._shared import build_similarity_body, effective_token
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
 # Creates new work / mutates the store, but never deletes and is not safe to
@@ -113,21 +113,16 @@ def register(mcp: FastMCP, deps: Deps) -> None:
         entity_type, or any contact filter each counts as the required filter. A
         history row is written in every mode — that is the contrast with the leads
         similarity_search tool, which records none."""
-        body: dict[str, Any] = {"limit": max(1, min(int(limit), 10000))}
-        if query is not None:
-            body["query"] = query
-        if embeds is not None:
-            body["embeds"] = embeds
-        if company_id is not None:
-            body["company_id"] = company_id
-        if entity_type is not None:
-            body["entity_type"] = entity_type
-        if email_exists is not None:
-            body["email_exists"] = email_exists
-        if phone_exists is not None:
-            body["phone_exists"] = phone_exists
-        if linkedin_exists is not None:
-            body["linkedin_exists"] = linkedin_exists
+        body = build_similarity_body(
+            query=query,
+            limit=limit,
+            embeds=embeds,
+            company_id=company_id,
+            email_exists=email_exists,
+            phone_exists=phone_exists,
+            linkedin_exists=linkedin_exists,
+            entity_type=entity_type,
+        )
         return await search.request(
             "POST",
             "/api/search/mcp/v1/searches/semantic",
