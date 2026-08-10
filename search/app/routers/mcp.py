@@ -165,6 +165,7 @@ async def mcp_start_semantic_search(
         actor=actor,
         embeds=body.embeds,
         company_id=body.company_id,
+        entity_type=body.entity_type,
         email_exists=body.email_exists,
         phone_exists=body.phone_exists,
         linkedin_exists=body.linkedin_exists,

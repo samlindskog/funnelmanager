@@ -1365,6 +1365,7 @@ async def apollo_credits(
 def _similarity_filter_label(
     *,
     company_id: str | None,
+    entity_type: str | None,
     email_exists: bool | None,
     phone_exists: bool | None,
     linkedin_exists: bool | None,
@@ -1373,6 +1374,8 @@ def _similarity_filter_label(
     parts: list[str] = []
     if (company_id or "").strip():
         parts.append(f"company={company_id.strip()}")
+    if entity_type:
+        parts.append(f"type={entity_type}")
     for name, flag in (
         ("email", email_exists),
         ("phone", phone_exists),
@@ -1396,6 +1399,7 @@ async def _run_similarity_search(
     actor: str,
     embeds: list[str] | None = None,
     company_id: str | None = None,
+    entity_type: str | None = None,
     email_exists: bool | None = None,
     phone_exists: bool | None = None,
     linkedin_exists: bool | None = None,
@@ -1409,13 +1413,40 @@ async def _run_similarity_search(
 
     v2 (additive): forwards the optional embed-subset + filter params to leads and
     records them in ``search_params_json``. When ``query`` is empty (a pure-filter
-    search, ``embeds == []``) the history label is derived from the filters."""
+    search, ``embeds == []``) the history label is derived from the filters.
+
+    This helper is the **authoritative** gate: the schema validators are the
+    user-facing 422 layer, but a non-schema caller (a future internal call) still
+    cannot run an unbounded pure-filter list — both rules (query required when
+    embeds is non-empty; at least one filter when ``embeds == []``) are enforced
+    here too, as a 400."""
     query = (query or "").strip()
+    company_id = (company_id or "").strip() or None
     effective_embeds = embeds if embeds is not None else ["apollo"]
-    if effective_embeds and not query:
-        raise HTTPException(
-            status_code=400, detail="query is required when embeds is non-empty"
+    if effective_embeds:
+        if not query:
+            raise HTTPException(
+                status_code=400, detail="query is required when embeds is non-empty"
+            )
+    else:
+        # Pure-filter run: the query text is never used, and at least one filter is
+        # mandatory so this can never degrade into an unbounded list.
+        query = ""
+        has_filter = any(
+            value is not None
+            for value in (
+                company_id,
+                entity_type,
+                email_exists,
+                phone_exists,
+                linkedin_exists,
+            )
         )
+        if not has_filter:
+            raise HTTPException(
+                status_code=400,
+                detail="a pure filter search (embeds == []) requires at least one filter",
+            )
 
     try:
         hits = await client.similarity_search(
@@ -1423,6 +1454,7 @@ async def _run_similarity_search(
             limit=limit,
             embeds=embeds,
             company_id=company_id,
+            entity_type=entity_type,
             email_exists=email_exists,
             phone_exists=phone_exists,
             linkedin_exists=linkedin_exists,
@@ -1457,6 +1489,7 @@ async def _run_similarity_search(
         history_query = _clip_history_query(
             _similarity_filter_label(
                 company_id=company_id,
+                entity_type=entity_type,
                 email_exists=email_exists,
                 phone_exists=phone_exists,
                 linkedin_exists=linkedin_exists,
@@ -1466,9 +1499,12 @@ async def _run_similarity_search(
         "source": "similarity",
         "query": query,
         "limit": limit,
+        # History-row entity_type is always "people" (the search-history taxonomy);
+        # the semantic *filter* entity_type is recorded separately below.
         "entity_type": "people",
         "embeds": embeds,
         "company_id": company_id,
+        "entity_type_filter": entity_type,
         "email_exists": email_exists,
         "phone_exists": phone_exists,
         "linkedin_exists": linkedin_exists,
@@ -1545,6 +1581,7 @@ async def similarity_search(
         actor=actor,
         embeds=body.embeds,
         company_id=body.company_id,
+        entity_type=body.entity_type,
         email_exists=body.email_exists,
         phone_exists=body.phone_exists,
         linkedin_exists=body.linkedin_exists,

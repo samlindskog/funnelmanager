@@ -159,15 +159,16 @@ class McpSemanticSearchRequest(BaseModel):
     Mirrors the leads ``SimilaritySearchRequest`` contract: ``embeds`` selects
     which per-kind embeddings to rank by (mean similarity across the selected
     kinds a doc has) — omitted/``None`` => ``["apollo"]`` (legacy), ``[]`` =>
-    pure filter search. ``company_id`` (Mongo ``_id`` of a stored organization
-    doc) plus the tri-state ``email_exists`` / ``phone_exists`` /
-    ``linkedin_exists`` filter the result set.
+    pure filter search. Filters: ``company_id`` (a company record's Mongo ``_id``
+    or its Apollo organization id), ``entity_type`` (``person`` / ``organization``),
+    plus the tri-state ``email_exists`` / ``phone_exists`` / ``linkedin_exists``.
     """
 
     query: str | None = Field(default=None, max_length=8000)
     limit: int = Field(default=25, ge=1, le=10000)
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
+    entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
     linkedin_exists: bool | None = None
@@ -233,18 +234,29 @@ def _validate_similarity_request(model: Any) -> Any:
     Mirrors leads ``SimilaritySearchRequest``: ``embeds`` non-empty (or omitted,
     which defaults to ``["apollo"]``) requires a ``query``; ``embeds == []``
     (pure filter search) requires at least one filter; duplicate kinds rejected.
+    A whitespace-only ``company_id`` is coerced to ``None`` (so it can't satisfy
+    the at-least-one-filter rule), and a pure-filter run coerces ``query`` to
+    ``None`` (a stray query would otherwise mislabel the history row).
     """
     if model.embeds is not None and len(set(model.embeds)) != len(model.embeds):
         raise ValueError("embeds must not contain duplicate kinds")
+    # Whitespace-only company_id is not a filter — strip and coerce blank to None
+    # BEFORE the at-least-one-filter count.
+    if model.company_id is not None:
+        cleaned = model.company_id.strip()
+        model.company_id = cleaned or None
     effective = model.embeds if model.embeds is not None else ["apollo"]
     if effective:
         if not (model.query or "").strip():
             raise ValueError("query is required when embeds is non-empty")
     else:
+        # A pure-filter run never uses the query text; coerce it to None.
+        model.query = None
         has_filter = any(
             value is not None
             for value in (
                 model.company_id,
+                model.entity_type,
                 model.email_exists,
                 model.phone_exists,
                 model.linkedin_exists,
@@ -265,7 +277,8 @@ class SimilaritySearchRequest(BaseModel):
     - omitted / ``None`` => ``["apollo"]`` — exact legacy behavior.
     - ``[]``             => pure filter search (no vector ranking; requires a filter).
 
-    Filters: ``company_id`` (Mongo ``_id`` of a stored organization doc), plus the
+    Filters: ``company_id`` (a company record's Mongo ``_id`` or its Apollo
+    organization id), ``entity_type`` (``person`` / ``organization``), plus the
     tri-state ``email_exists`` / ``phone_exists`` / ``linkedin_exists``
     (True=has, False=missing, None=no filter).
     """
@@ -274,6 +287,7 @@ class SimilaritySearchRequest(BaseModel):
     limit: int = Field(default=25, ge=1, le=10000)
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
+    entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
     linkedin_exists: bool | None = None
