@@ -37,7 +37,7 @@ on a user exchange yields `fm_origin=user`.
   needs no local JAR — the committed ConfigMap embeds it.
 
 The Keycloak image is **pinned** (tag + `@sha256` digest) in
-`docker-compose.dev.yml`, `docker-compose.prod.yml`, and
+`docker-compose.dev.yml` and
 `deploy/infrastructure/identity/deployment.yaml`. The script-mapper mechanism was
 proven on 26.2 — stay on **26.2.x**. Bump the tag and digest together (verify the
 digest via the quay.io tags API before pinning).

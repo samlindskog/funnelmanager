@@ -395,9 +395,11 @@ produced fixes that amend the spec above; all are implemented:
 7. **`_run_similarity_search` is the authoritative gate** for both validation rules (schema
    validators remain the user-facing 422 layer); embed name/title texts read the top-level
    derived fields so embeds agree with what the API reports; dead `lead_embedding_text` removed.
-8. **Rollout note (§7)**: a live `.env`/`.env.prod` copied before this change may still pin
+8. **Rollout note (§7)**: a live `.env` copied before this change may still pin
    `MILVUS_COLLECTION=leads_people`, which silently overrides the new default — verifying no
    stale override is an explicit migration step (prod k3s pins are authoritative and updated).
+   *(Post-review: `docker-compose.prod.yml` + `.env.prod.example` were deleted outright —
+   prod is k3s-only — so the seven pins referenced throughout this doc are now five.)*
 
 Second round (full-branch re-review):
 
