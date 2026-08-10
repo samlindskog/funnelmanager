@@ -162,7 +162,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
-      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-leads_people}
+      MILVUS_COLLECTION: ${MILVUS_COLLECTION:-leads_embeds_v2}
     depends_on:
       mongo:
         condition: service_healthy
