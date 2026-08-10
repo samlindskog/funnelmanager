@@ -23,7 +23,13 @@ precedence), so a high ``source_precedence`` is passed purely to keep
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from datetime import datetime, timezone
+
+# Runnable as `python scripts/reembed.py` from the service root (the documented
+# operator invocation) — put the service root on sys.path for the app imports.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymilvus import utility

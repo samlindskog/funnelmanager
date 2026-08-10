@@ -355,6 +355,26 @@ Drive dev compose end-to-end:
 - Add unit tests where pure logic makes it cheap (`derive_top_fields` precedence/placeholder
   handling, score-merge averaging) as the start of the P11 pyramid.
 
+**Verified live 2026-08-10 (dev compose, 95,729-doc legacy corpus):** all seven request-validation
+cases; company + people Apollo ingest (fresh docs get name/title + `derived_at`); enrichment
+upsert-in-place (name refined, `company_id`/`linkedin` populated, null email stays absent — zero
+placeholder leaks corpus-wide); the combined migration (pass 1 backfilled all 95,729 docs, pass 2
+rebuilt `leads_embeds_v2` with 7,045 rows ≈ 3 kinds/person); the similarity matrix (embed subsets
+rank from distinct spaces, filters compose with vectors, pure-filter returns null scores,
+company dual-resolution works from both id spaces with the descriptive 404, `entity_type`/
+`linkedin_exists` filters); searchui serves via nginx. Operator invocation: `docker exec
+funnelmanager-leads-1 python scripts/reembed.py` (k3s: `kubectl exec` into the leads pod).
+**Not** exercised live: the Apollo phone-reveal webhook (needs a public callback), MCP tools at
+protocol level (schema-verified only), browser-level UI interaction, and the write-race under a
+real concurrent load (mock-verified).
+
+**Payload-shape finding (expectation-setting):** Apollo `mixed_people/api_search` hits are
+teaser-shaped — `first_name` + obfuscated last name, `title`, `has_*` flags, and an
+organization object with **no id**. So search-ingested people get top-level `name`/`title` only;
+`company_id`/`email`/`phone`/`linkedin` populate **via enrichment/match/webhook** (the §1.3
+upsert guarantee is the load-bearing path). Mail-campaign audience filters like
+`email_exists:true` therefore select from the enriched subset of the corpus.
+
 ## 9. Judgment calls baked into this plan (flag on review if wrong)
 
 1. **Server default for omitted `embeds` is `["apollo"]`** (exact legacy behavior for existing
