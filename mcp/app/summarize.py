@@ -12,6 +12,18 @@ from __future__ import annotations
 
 from typing import Any
 
+# Apollo emits this local-part when a person's email is locked / not revealed. It
+# is a placeholder, not a real address, and must be treated as absent — same
+# constant/semantics leads applies in ``leads/app/derived.py`` (re-declared here,
+# not imported, since MCP never imports from another service's app package).
+_EMAIL_PLACEHOLDER_PREFIX = "email_not_unlocked@"
+
+
+def _is_placeholder_email(value: str) -> bool:
+    """True if ``value`` is Apollo's locked-email placeholder (case-insensitive)."""
+    return value.strip().lower().startswith(_EMAIL_PLACEHOLDER_PREFIX)
+
+
 PERSON_DISPLAY_ENDPOINTS = (
     "/api/v1/people/match",
     "/api/v1/people/{id}",
@@ -65,17 +77,27 @@ def _display_payload(lead: dict[str, Any]) -> dict[str, Any]:
 
 
 def _first_email(raw: dict[str, Any]) -> str | None:
+    """First real email off a raw payload, placeholder-aware.
+
+    A locked Apollo ``email_not_unlocked@…`` value is a placeholder, not an
+    address — it is skipped here so it can never land in a summary (mirrors the
+    placeholder-aware top-level derived ``email`` field this falls back from).
+    """
     email = raw.get("email")
-    if isinstance(email, str) and email.strip():
+    if isinstance(email, str) and email.strip() and not _is_placeholder_email(email):
         return email.strip()
     emails = raw.get("emails")
     if isinstance(emails, list):
         for item in emails:
-            if isinstance(item, str) and item.strip():
+            if isinstance(item, str) and item.strip() and not _is_placeholder_email(item):
                 return item.strip()
             if isinstance(item, dict):
                 nested = item.get("email")
-                if isinstance(nested, str) and nested.strip():
+                if (
+                    isinstance(nested, str)
+                    and nested.strip()
+                    and not _is_placeholder_email(nested)
+                ):
                     return nested.strip()
     return None
 
@@ -91,9 +113,12 @@ def _first_phone(raw: dict[str, Any]) -> str | None:
                         return value.strip()
             elif isinstance(item, str) and item.strip():
                 return item.strip()
-    phone = raw.get("phone")
-    if isinstance(phone, str) and phone.strip():
-        return phone.strip()
+    # Org phone source is `phone`/`sanitized_phone` (people carry theirs on
+    # `phone_numbers[]` above); include both scalars in the fallback chain.
+    for key in ("phone", "sanitized_phone"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 

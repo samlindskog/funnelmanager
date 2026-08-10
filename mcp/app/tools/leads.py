@@ -94,6 +94,7 @@ def register(mcp: FastMCP, deps: Deps) -> None:
         limit: int = 25,
         embeds: list[Literal["apollo", "name", "title"]] | None = None,
         company_id: str | None = None,
+        entity_type: Literal["person", "organization"] | None = None,
         email_exists: bool | None = None,
         phone_exists: bool | None = None,
         linkedin_exists: bool | None = None,
@@ -111,20 +112,27 @@ def register(mcp: FastMCP, deps: Deps) -> None:
           similarity across the selected kinds a doc actually has. Omitted =>
           ["apollo"] (legacy). [] => pure-filter mode: no vector ranking (ranked
           by recency), query is ignored, and at least one filter is required.
-        - company_id: Mongo _id of a stored ORGANIZATION lead doc; keeps only
-          people whose company is that org.
+        - company_id: accepts EITHER a company record's Mongo _id (the same value
+          returned as `mongo_id` on that company's summary) OR the Apollo
+          organization id (the `company_id` field on a person summary) — the two
+          live in different id spaces and leads resolves whichever you pass. Keeps
+          only people whose company is that org.
+        - entity_type: restrict to "person" or "organization".
         - email_exists / phone_exists / linkedin_exists: tri-state contact-field
           filters (True=must have, False=must be missing, None=no filter).
 
         query is required whenever embeds is non-empty (the default); it may be
-        omitted only in pure-filter mode (embeds=[])."""
-        body: dict[str, Any] = {"limit": max(1, min(limit, 10000))}
+        omitted only in pure-filter mode (embeds=[]), where company_id,
+        entity_type, or any contact filter each counts as the required filter."""
+        body: dict[str, Any] = {"limit": max(1, min(int(limit), 10000))}
         if query is not None:
             body["query"] = query
         if embeds is not None:
             body["embeds"] = embeds
         if company_id is not None:
             body["company_id"] = company_id
+        if entity_type is not None:
+            body["entity_type"] = entity_type
         if email_exists is not None:
             body["email_exists"] = email_exists
         if phone_exists is not None:
