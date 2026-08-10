@@ -340,6 +340,16 @@ def _top_field(lead: dict[str, Any], key: str) -> str | None:
     return stripped or None
 
 
+def _has_derived_marker(lead: dict[str, Any]) -> bool:
+    """True if leads stamped a ``derived_at`` marker on this doc — the authoritative
+    signal that the derived top-level fields (name/title/email/phone/linkedin) were
+    (re)computed and can be trusted verbatim. Absent/null on legacy docs not yet
+    touched by a v2 write or the migration backfill. Do NOT use name-presence as a
+    v2 proxy: a phone-reveal-webhook person has authoritative email/phone but no
+    name, so it would be mis-classified as legacy and read stale contact signals."""
+    return bool(lead.get("derived_at"))
+
+
 # Apollo emits this local-part when a person's email is locked / not revealed.
 # It is a placeholder, not a real address, and must be treated as absent — same
 # constant/semantics leads applies in ``leads/app/derived.py`` (re-declared here,
@@ -395,6 +405,9 @@ def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
     # Derived top-level index fields (semantic-search v2). When present they are the
     # authoritative, precedence-resolved values (placeholder-aware email) — prefer
     # them over re-deriving from raw payloads. Absent (old docs) => fall back.
+    # A doc is "v2/authoritative" iff leads stamped a ``derived_at`` marker, NOT iff
+    # a derived name happens to be present (a name-less reveal-webhook doc is still v2).
+    is_derived = _has_derived_marker(lead)
     top_name = _top_field(lead, "name")
     top_title = _top_field(lead, "title")
     top_email = _top_field(lead, "email")
@@ -429,10 +442,13 @@ def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
             numbers = list(existing) if isinstance(existing, list) else []
             numbers.append({"sanitized_number": top_phone})
             record["phone_numbers"] = numbers
-        # Contact availability chips: a v2 doc (recognizable by a derived top-level
-        # `name`) keys them off actual top-level value presence; old docs lacking
-        # the derived fields fall back to People API Search signals.
-        if top_name is not None:
+        # Contact availability chips: a v2 doc (recognizable by leads' `derived_at`
+        # marker) keys them off actual top-level value presence; old docs lacking the
+        # marker fall back to People API Search signals. Gating on the marker rather
+        # than name-presence is what lets a name-less reveal-webhook person (real,
+        # resolvable email/phone but no name) report has_email/has_phone truthfully
+        # instead of reading stale signals from a payload it may not even have.
+        if is_derived:
             record["has_email"] = top_email is not None
             record["has_phone"] = top_phone is not None
         else:
