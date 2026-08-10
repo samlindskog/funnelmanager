@@ -77,19 +77,53 @@ def register(mcp: FastMCP, deps: Deps) -> None:
 
     @mcp.tool(annotations=_WRITE)
     async def start_semantic_search(
-        query: str,
+        query: str | None = None,
         limit: int = 25,
+        embeds: list[Literal["apollo", "name", "title"]] | None = None,
+        company_id: str | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
         session_token: str | None = None,
         ctx: Context = None,
     ) -> dict[str, Any]:
         """Semantic (Milvus) search via the search backend; persists a
         cross-user-visible history row (hence a write). Synchronous — returns the
         scored results directly. To search leads WITHOUT recording history, use the
-        leads similarity_search tool instead."""
+        leads similarity_search tool instead.
+
+        Additive v2 params (omit any to keep exact legacy behavior):
+        - embeds: which per-kind embeddings to rank by — any of "apollo" (the
+          Apollo profile passage), "name", "title". The score is the mean
+          similarity across the selected kinds a doc actually has. Omitted =>
+          ["apollo"] (legacy). [] => pure-filter mode: no vector ranking (ranked
+          by recency), query is ignored, and at least one filter is required.
+        - company_id: Mongo _id of a stored ORGANIZATION lead doc; keeps only
+          people whose company is that org.
+        - email_exists / phone_exists / linkedin_exists: tri-state contact-field
+          filters (True=must have, False=must be missing, None=no filter).
+
+        query is required whenever embeds is non-empty (the default); it may be
+        omitted only in pure-filter mode (embeds=[]). A history row is written in
+        every mode — that is the contrast with the leads similarity_search tool,
+        which records none."""
+        body: dict[str, Any] = {"limit": max(1, min(int(limit), 10000))}
+        if query is not None:
+            body["query"] = query
+        if embeds is not None:
+            body["embeds"] = embeds
+        if company_id is not None:
+            body["company_id"] = company_id
+        if email_exists is not None:
+            body["email_exists"] = email_exists
+        if phone_exists is not None:
+            body["phone_exists"] = phone_exists
+        if linkedin_exists is not None:
+            body["linkedin_exists"] = linkedin_exists
         return await search.request(
             "POST",
             "/api/search/mcp/v1/searches/semantic",
-            json_body={"query": query, "limit": max(1, min(int(limit), 10000))},
+            json_body=body,
             token=effective_token(session_token, ctx),
         )
 

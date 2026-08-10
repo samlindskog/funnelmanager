@@ -90,18 +90,51 @@ def register(mcp: FastMCP, deps: Deps) -> None:
 
     @mcp.tool(annotations=_READ_ONLY)
     async def similarity_search(
-        query: str,
+        query: str | None = None,
         limit: int = 25,
+        embeds: list[Literal["apollo", "name", "title"]] | None = None,
+        company_id: str | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
         session_token: str | None = None,
         ctx: Context = None,
     ) -> list[dict[str, Any]]:
         """Semantic search over already-stored leads (OpenAI embedding + Milvus).
         Searches only what's in MongoDB — never calls Apollo and writes no search
-        history. Returns scored compact summaries."""
+        history (unlike start_semantic_search, which persists a history row).
+        Returns scored compact summaries (score is null in pure-filter mode).
+
+        Additive v2 params (omit any to keep exact legacy behavior):
+        - embeds: which per-kind embeddings to rank by — any of "apollo" (the
+          Apollo profile passage), "name", "title". The score is the mean
+          similarity across the selected kinds a doc actually has. Omitted =>
+          ["apollo"] (legacy). [] => pure-filter mode: no vector ranking (ranked
+          by recency), query is ignored, and at least one filter is required.
+        - company_id: Mongo _id of a stored ORGANIZATION lead doc; keeps only
+          people whose company is that org.
+        - email_exists / phone_exists / linkedin_exists: tri-state contact-field
+          filters (True=must have, False=must be missing, None=no filter).
+
+        query is required whenever embeds is non-empty (the default); it may be
+        omitted only in pure-filter mode (embeds=[])."""
+        body: dict[str, Any] = {"limit": max(1, min(limit, 10000))}
+        if query is not None:
+            body["query"] = query
+        if embeds is not None:
+            body["embeds"] = embeds
+        if company_id is not None:
+            body["company_id"] = company_id
+        if email_exists is not None:
+            body["email_exists"] = email_exists
+        if phone_exists is not None:
+            body["phone_exists"] = phone_exists
+        if linkedin_exists is not None:
+            body["linkedin_exists"] = linkedin_exists
         data = await leads.request(
             "POST",
             "/api/leads/similarity-search",
-            json_body={"query": query, "limit": max(1, min(limit, 10000))},
+            json_body=body,
             token=effective_token(session_token, ctx),
         )
         results = data.get("results") if isinstance(data, dict) else None

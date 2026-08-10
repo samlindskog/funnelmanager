@@ -103,6 +103,19 @@ def _location(raw: dict[str, Any]) -> str | None:
     return joined or None
 
 
+def _top_field(lead: dict[str, Any], key: str) -> str | None:
+    """Read a derived top-level index field (semantic-search v2) off the lead doc.
+
+    These are recomputed from the merged Apollo payloads on every write and are
+    the authoritative, placeholder-aware values (a locked ``email_not_unlocked@…``
+    never lands here). Prefer them over re-deriving from the raw payload.
+    """
+    value = lead.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def summarize_lead(lead: dict[str, Any]) -> dict[str, Any]:
     """One compact dict per lead: identity, contact, enrichment state, timeline."""
     entity_type = str(lead.get("entity_type") or "person")
@@ -131,25 +144,32 @@ def summarize_lead(lead: dict[str, Any]) -> dict[str, Any]:
         first = str(raw.get("first_name") or "").strip()
         last = str(raw.get("last_name") or raw.get("last_name_obfuscated") or "").strip()
         org = raw.get("organization") if isinstance(raw.get("organization"), dict) else {}
+        # Prefer the derived top-level index fields (semantic-search v2) when
+        # present; fall back to re-deriving from the raw payload for older docs.
         summary.update(
             {
-                "name": (raw.get("name") or f"{first} {last}".strip() or None),
-                "title": raw.get("title"),
-                "email": _first_email(raw),
-                "phone": _first_phone(raw),
-                "linkedin_url": raw.get("linkedin_url"),
+                "name": _top_field(lead, "name")
+                or (raw.get("name") or f"{first} {last}".strip() or None),
+                "title": _top_field(lead, "title") or raw.get("title"),
+                "company_id": _top_field(lead, "company_id"),
+                "email": _top_field(lead, "email") or _first_email(raw),
+                "phone": _top_field(lead, "phone") or _first_phone(raw),
+                "linkedin_url": _top_field(lead, "linkedin") or raw.get("linkedin_url"),
                 "organization": org.get("name"),
                 "location": _location(raw),
             }
         )
     else:
+        # Orgs carry only phone/linkedin at the top level (v2); name/etc. still
+        # come from the payload.
         summary.update(
             {
                 "name": raw.get("name"),
                 "domain": raw.get("primary_domain") or raw.get("domain") or raw.get("website_url"),
                 "industry": raw.get("industry"),
                 "employee_count": raw.get("estimated_num_employees"),
-                "linkedin_url": raw.get("linkedin_url"),
+                "phone": _top_field(lead, "phone") or _first_phone(raw),
+                "linkedin_url": _top_field(lead, "linkedin") or raw.get("linkedin_url"),
                 "location": _location(raw),
             }
         )
