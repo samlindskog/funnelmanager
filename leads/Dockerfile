@@ -12,6 +12,8 @@ RUN useradd --uid 10001 --user-group --no-create-home app
 COPY --from=build /install /usr/local
 WORKDIR /srv
 COPY leads/app ./app
+# Operator migration/maintenance scripts (run via kubectl exec — see docs/semantic-search-v2-plan.md §7)
+COPY leads/scripts ./scripts
 USER 10001
 EXPOSE 8001
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
