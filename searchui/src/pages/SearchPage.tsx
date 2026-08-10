@@ -285,7 +285,9 @@ export function SearchPage() {
     setSearching(true)
     try {
       const response = await runSimilaritySearch({
-        query: passage,
+        // Pure-filter runs (no embeds) never rank by the passage — omit it so the
+        // history row gets the backend's filter-description label, not stale text.
+        query: hasEmbeds ? passage : '',
         limit,
         embeds: selectedEmbeds,
         companyId: simCompanyValue,
@@ -980,12 +982,12 @@ export function SearchPage() {
                         disabled={!hasEmbeds}
                       />
                       <TextField
-                        label="Company (record id)"
+                        label="Company ID"
                         placeholder="e.g. 5e66b6381e05b4008c8331b8"
                         value={simCompanyId}
                         onChange={(e) => setSimCompanyId(e.target.value)}
                         fullWidth
-                        helperText="The Mongo id shown on a company record’s detail pane."
+                        helperText="Apollo organization ID or record id from a company’s detail pane."
                         data-testid="similarity-company-id"
                       />
                       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
