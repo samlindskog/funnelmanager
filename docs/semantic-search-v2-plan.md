@@ -158,9 +158,13 @@ together** (platform-agent touchpoint).
   email-present, `has_phone`, `has_linkedin`).
 - **Precedence/flag semantics unchanged**: `embedding_source` never-downgrade skip, and the
   Mongo `embedding: true` flip, key off the doc as today (the three kinds ride along in the same
-  upsert). Known acceptable staleness: a doc already embedded at MATCH precedence that later
-  gets a BY_ID enrich is skipped, so its Milvus scalar fields may lag Mongo — harmless because
-  filters are re-checked authoritatively against Mongo at query time (§4.4).
+  upsert). **Scalar-drift re-index** (review-driven): for docs the precedence guard would skip
+  (e.g. MATCH-embedded, later BY_ID-enriched), `index_lead_docs` batch-queries the existing
+  apollo-kind rows' scalars and re-indexes any doc whose derived `has_*`/`company_id` drifted —
+  otherwise a stale `has_email=false` in Milvus would silently exclude true matches from
+  `email_exists:true` recall (the Mongo re-check in §4.4 can only drop false positives, never
+  recover false negatives). The drift query failing falls back to the plain skip (never breaks
+  ingest).
 - Stale-kind rows (a doc that once had a title and later doesn't) are left in place — the
   Mongo re-check also covers this edge; note it in the module docstring rather than adding a
   delete-by-expr round-trip.
@@ -197,16 +201,23 @@ company_id: str | None = None       # Mongo _id (hex) of a stored ORGANIZATION l
 email_exists: bool | None = None    # True => must have email; False => must NOT; None => no filter
 phone_exists: bool | None = None    # same tri-state
 linkedin_exists: bool | None = None # same tri-state
+entity_type: Literal["person","organization"] | None = None
+                                    # review-driven: orgs carry phone/linkedin, so exists-filters
+                                    # would otherwise mix orgs into people-targeted audiences
 ```
 
 Validation (422): `embeds` non-empty ⇒ `query` required; `embeds == []` ⇒ at least one filter
-required (otherwise it's an unbounded "list leads"); duplicate kinds rejected; `company_id` must
-parse as an ObjectId.
+required (otherwise it's an unbounded "list leads"; `entity_type` counts as a filter); duplicate
+kinds rejected. Normalization in the validator: `embeds == []` coerces a supplied `query` to
+None (pure-filter runs ignore it — keeps history labels honest); `company_id` is stripped and
+blank coerces to None *before* the filter count.
 
-`company_id` resolution: load the doc by `_id`; require `entity_type == "organization"`; use its
-`apollo_id` as the filter value against people's top-level `company_id`. Missing/wrong-type doc
-⇒ 404 with a clear detail (it names a specific stored record, so "not found" is correct — not an
-empty result set).
+`company_id` resolution (review-driven dual resolution — kills the id-space round-trip trap):
+try the value as the Mongo `_id` of an organization doc first; on miss, fall back to
+`find_one({apollo_id: value, entity_type: "organization"})` — so both the record id a UI shows
+and the Apollo org id on a person summary are valid inputs. Use the resolved org's `apollo_id`
+as the filter value against people's top-level `company_id`. 404 only when both miss, with a
+detail naming both accepted id forms.
 
 ### 4.2 Ranking semantics (the core change)
 
@@ -359,3 +370,31 @@ Drive dev compose end-to-end:
    contact value" (a strictly more useful superset for campaign targeting) — rather than adding
    a second parallel icon set. `apollo_enriched` remains stored/visible in the record detail
    pane.
+
+---
+
+## 10. Review-driven amendments (implemented on the branch)
+
+The adversarial review pass (bug-hunter + security-reviewer + quality-reviewer per workstream)
+produced fixes that amend the spec above; all are implemented:
+
+1. **Placeholder emails are stripped at every layer**, not just at extraction: `lead_to_record`
+   blanks a placeholder `record.email`/`emails` for ALL docs (legacy included) before applying
+   the top-level override; the MCP `summarize_lead` raw-email fallback is placeholder-aware;
+   the UI keys person icons off the authoritative `has_email`/`has_phone` booleans and its CSV
+   email resolver skips placeholders. (Previously the placeholder survived whenever the
+   top-level field was absent — the exact case the suppression exists for.)
+2. **`company_id` dual resolution** (§4.1) and the UI now shows the Mongo Record ID on the
+   company detail pane; MCP docstrings name both id spaces.
+3. **`entity_type` filter param** (§4.1) added through leads → search → MCP (no UI control yet).
+4. **Fill-to-limit after the authoritative re-check**: candidates are hydrated in 500-doc chunks
+   and filtered until `limit` passing docs accumulate — no more silently-short result sets.
+5. **Scalar-drift re-index** (§2.3) closes the `email_exists:true` false-negative recall gap.
+6. **Person top-level phone is surfaced** into `phone_numbers` (not just `has_phone`) so the UI
+   can render/export it; org phone fallback includes `sanitized_phone` in MCP summaries.
+7. **`_run_similarity_search` is the authoritative gate** for both validation rules (schema
+   validators remain the user-facing 422 layer); embed name/title texts read the top-level
+   derived fields so embeds agree with what the API reports; dead `lead_embedding_text` removed.
+8. **Rollout note (§7)**: a live `.env`/`.env.prod` copied before this change may still pin
+   `MILVUS_COLLECTION=leads_people`, which silently overrides the new default — verifying no
+   stale override is an explicit migration step (prod k3s pins are authoritative and updated).
