@@ -69,10 +69,13 @@ spec:
           resources:
             requests:
               cpu: 200m
-              memory: 512Mi
+              memory: 1024Mi
             limits:
               cpu: 1500m
-              memory: 2560Mi
+              # semsearch-v2 (leads_embeds_v2) holds ~3 vectors per person (~290k rows
+              # at prod scale ≈ 1.8GB raw + index/segment overhead) — 2560Mi OOMed on
+              # collection load (2026-08-10). worker1 has ample allocatable headroom.
+              memory: 4096Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
