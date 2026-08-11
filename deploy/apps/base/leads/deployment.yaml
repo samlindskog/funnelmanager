@@ -47,10 +47,12 @@ spec:
                 - ALL
           resources:
             requests:
-              cpu: 100m
+              cpu: 300m
               memory: 256Mi
             limits:
-              cpu: 1000m
+              # Concurrent multi-company ingest+embed pipelines throttle at 1
+              # core (same 2026-08-11 burst that starved search).
+              cpu: 2000m
               memory: 1536Mi
           livenessProbe:
             httpGet:
