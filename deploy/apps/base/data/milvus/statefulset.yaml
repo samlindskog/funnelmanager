@@ -69,15 +69,17 @@ spec:
           resources:
             requests:
               cpu: 500m
-              memory: 1024Mi
+              memory: 1536Mi
             limits:
               # 1500m throttled bulk index builds (847m sustained observed);
               # give indexing bursts real room.
               cpu: 2500m
               # semsearch-v2 (leads_embeds_v2) holds ~3 vectors per person (~290k rows
               # at prod scale ≈ 1.8GB raw + index/segment overhead) — 2560Mi OOMed on
-              # collection load (2026-08-10). worker1 has ample allocatable headroom.
-              memory: 4096Mi
+              # collection load (2026-08-10). Milvus's internal write-protection
+              # watermark also keys off this limit: 4Gi denied writes ("memory quota
+              # exceeded") during the bulk re-index, so 6Gi. worker1 (16GB) has room.
+              memory: 6144Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus

@@ -13,11 +13,15 @@ metadata:
   namespace: prod
 spec:
   hard:
-    requests.cpu: "4"
+    requests.cpu: "5"
     # Raised 6→7Gi / 18→22Gi when knowledge + knowledge-db + knowledge-graph
     # (Neo4j, 2560Mi limit) joined the namespace (knowledge-engine plan §9.4;
     # operator-approved 2026-08-06, accepting burstable oversubscription on the
     # two 8GB workers until worker3 lands).
-    requests.memory: 7Gi
-    limits.memory: 22Gi
+    # Raised 7→8Gi / 22→26Gi for semsearch-v2 (2026-08-10): milvus 6Gi limit
+    # (its internal write-protection watermark keys off the container limit and
+    # denied bulk-index writes at 4Gi) + headroom for one-off migration Jobs.
+    # Both workers are 16GB now, so the burstable ceiling remains sane.
+    requests.memory: 8Gi
+    limits.memory: 26Gi
     pods: "60"

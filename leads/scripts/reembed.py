@@ -94,19 +94,27 @@ async def _rebuild_embeddings(db, cfg) -> int:
     total = await db.leads.count_documents({"embedding": True})
     print(f"pass 2: {total} lead(s) marked embedding=True", flush=True)
 
+    from pymilvus import Collection
+
     indexed = 0
+    batches = 0
     batch: list[dict] = []
     async for doc in db.leads.find({"embedding": True}):
         batch.append(doc)
         if len(batch) >= BATCH:
             indexed += await _flush(batch)
             batch = []
+            batches += 1
+            # Periodic (not per-batch) flush: bounds growing-segment memory during
+            # bulk ingest — without it Milvus's write-protection watermark denies
+            # writes once unsealed segments pile up; per-batch flushing is the
+            # opposite failure (segment storm). ~every 10k docs is the balance.
+            if batches % 20 == 0:
+                await asyncio.to_thread(lambda: Collection(name).flush())
             print(f"  indexed {indexed}/{total}", flush=True)
     indexed += await _flush(batch)
     # One deliberate flush at the very end (per-batch flushes were removed from
     # the upsert path — segment-storm anti-pattern) so DONE means durably sealed.
-    from pymilvus import Collection
-
     await asyncio.to_thread(lambda: Collection(name).flush())
     print(f"pass 2 DONE: {indexed} doc(s) re-embedded into {name}", flush=True)
     return indexed
