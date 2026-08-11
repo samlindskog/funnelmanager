@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 
 from fm_runtime import install
 
@@ -32,7 +33,14 @@ async def lifespan(_: FastAPI):
 
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# orjson renders the JSON responses — the biggest CPU win is on the batch
+# hydration (POST /api/leads) and similarity responses, which marshal large
+# nested Apollo payloads. orjson serializes datetime natively.
+app = FastAPI(
+    title=settings.app_name,
+    lifespan=lifespan,
+    default_response_class=ORJSONResponse,
+)
 
 # Milvus is deliberately not a readiness gate — the service degrades
 # gracefully without it (similarity search unavailable).

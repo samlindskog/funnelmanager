@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 import secrets
@@ -8,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import unquote
 
+import orjson
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -18,8 +18,10 @@ from pymongo.errors import DuplicateKeyError
 from app.apollo import ApolloLeadsClient
 from app.apollo_endpoints import (
     ORG_BY_ID,
+    ORG_DISPLAY_PRIORITY,
     ORG_SEARCH,
     PERSON_BY_ID,
+    PERSON_DISPLAY_PRIORITY,
     PERSON_MATCH,
     PERSON_SEARCH,
     empty_enriched_flags,
@@ -98,16 +100,65 @@ def _serialize_responses(responses: dict[str, Any]) -> dict[str, ApolloEndpointR
     return out
 
 
-def _serialize_lead(doc: dict[str, Any]) -> LeadOut:
+def _display_endpoint_key(
+    responses: dict[str, Any], priority: tuple[str, ...]
+) -> str | None:
+    """Key of the highest-precedence stored response carrying data (mirrors
+    ``entity_payload_from_responses`` selection, but returns the key)."""
+    for key in priority:
+        entry = responses.get(key)
+        if isinstance(entry, dict) and isinstance(entry.get("data"), dict) and entry.get("data"):
+            return key
+    for key, entry in responses.items():
+        if isinstance(entry, dict) and isinstance(entry.get("data"), dict) and entry.get("data"):
+            return key
+    return None
+
+
+def _select_display_responses(
+    responses: dict[str, Any], entity_type: str
+) -> dict[str, Any]:
+    """Slim ``apollo_responses`` to the display subset (see ``BatchMongoIdsRequest.fields``).
+
+    People keep the display payload plus the search and match entries (the search
+    UI's contact resolvers read those two directly); organizations keep only the
+    display payload. Empty/malformed entries are dropped downstream by
+    ``_serialize_responses``.
+    """
+    if entity_type == "organization":
+        priority = ORG_DISPLAY_PRIORITY
+        # Keep the search entry alongside the display payload (mirrors people):
+        # dropping it lost user-visible raw-response data in the org detail pane.
+        always_keep: tuple[str, ...] = (ORG_SEARCH,)
+    else:
+        priority = PERSON_DISPLAY_PRIORITY
+        always_keep = (PERSON_SEARCH, PERSON_MATCH)
+    keep: set[str] = set()
+    display_key = _display_endpoint_key(responses, priority)
+    if display_key is not None:
+        keep.add(display_key)
+    keep.update(key for key in always_keep if key in responses)
+    return {key: entry for key, entry in responses.items() if key in keep}
+
+
+def _serialize_lead(doc: dict[str, Any], fields: str = "full") -> LeadOut:
     responses = responses_from_doc(doc)
+    # Enrichment flags always reflect the full stored responses — display mode
+    # slims only the emitted apollo_responses, never the derived/flag fields.
     flags = normalize_apollo_enriched(doc, responses=responses)
+    entity_type = doc.get("entity_type") or "person"
+    out_responses = (
+        _select_display_responses(responses, entity_type)
+        if fields == "display"
+        else responses
+    )
     return LeadOut(
         id=str(doc["_id"]),
         apollo_id=str(doc["apollo_id"]),
-        entity_type=doc.get("entity_type") or "person",
+        entity_type=entity_type,
         embedding=bool(doc.get("embedding")),
         apollo_enriched=ApolloEnrichedFlags(**flags),
-        apollo_responses=_serialize_responses(responses),
+        apollo_responses=_serialize_responses(out_responses),
         name=doc.get("name"),
         title=doc.get("title"),
         company_id=doc.get("company_id"),
@@ -728,7 +779,9 @@ def _extract_stream_flag(
 
 
 def _ndjson_line(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, default=str) + "\n"
+    # orjson serializes datetime natively; ``default=str`` preserves the prior
+    # fallback for any other non-JSON-native value that slips into an event.
+    return orjson.dumps(payload, default=str).decode() + "\n"
 
 
 async def _ndjson_stream(stream_ids: list[str]) -> AsyncIterator[str]:
@@ -2258,7 +2311,9 @@ async def _pure_filter_similarity(
             query[field] = None  # matches missing or null
     cursor = db.leads.find(query).sort("updated_at", -1).limit(body.limit)
     docs = await cursor.to_list(length=body.limit)
-    results = [SimilarityHitOut(score=None, lead=_serialize_lead(doc)) for doc in docs]
+    results = [
+        SimilarityHitOut(score=None, lead=_serialize_lead(doc, body.fields)) for doc in docs
+    ]
     return SimilaritySearchResponse(results=results)
 
 
@@ -2366,7 +2421,7 @@ async def similarity_search(
             # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
             if not _doc_passes_filters(doc, company_filter_id, body):
                 continue
-            results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
+            results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc, body.fields)))
             if len(results) >= body.limit:
                 break
     if len(results) < body.limit and len(merged) > hydration_cap:
@@ -2410,4 +2465,8 @@ async def get_leads_by_mongo_ids(
 
     cursor = db.leads.find({"_id": {"$in": object_ids}})
     by_id = {str(doc["_id"]): doc async for doc in cursor}
-    return [_serialize_lead(by_id[mongo_id]) for mongo_id in ordered_ids if mongo_id in by_id]
+    return [
+        _serialize_lead(by_id[mongo_id], body.fields)
+        for mongo_id in ordered_ids
+        if mongo_id in by_id
+    ]

@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import quote
 
+import orjson
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from fm_runtime import JobStatus, current_principal
@@ -417,7 +418,9 @@ async def _append_unique_mongo_ids(
 
 
 def _ndjson_line(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, default=str) + "\n"
+    # orjson serializes datetime natively; ``default=str`` preserves the prior
+    # fallback for any other non-JSON-native value that slips into an event.
+    return orjson.dumps(payload, default=str).decode() + "\n"
 
 
 async def _apollo_params_for_stream(
@@ -826,7 +829,8 @@ async def _set_current_page(
     page_results = await _hydrate_results(client, mongo_ids)
     search.page = page
     # Cache hydrated page for quick reopen; source of truth remains leads + mongo ids.
-    search.results_json = json.dumps(page_results)
+    # TEXT column stores str, so decode orjson's bytes.
+    search.results_json = orjson.dumps(page_results).decode()
     await db.commit()
     await db.refresh(search)
     return page_results
@@ -835,7 +839,9 @@ async def _set_current_page(
 def _to_detail(row: SearchHistory, results: list[dict[str, Any]] | None = None) -> SearchHistoryDetail:
     if results is None:
         try:
-            results = json.loads(row.results_json or "[]")
+            # orjson.JSONDecodeError subclasses json.JSONDecodeError, so the
+            # existing except still catches a malformed cache blob.
+            results = orjson.loads(row.results_json or "[]")
         except json.JSONDecodeError:
             results = []
         if not isinstance(results, list):
@@ -1518,7 +1524,7 @@ async def _run_similarity_search(
         page=1,
         per_page=per_page,
         total_results=len(records),
-        results_json=json.dumps(page_results, default=str),
+        results_json=orjson.dumps(page_results, default=str).decode(),
         search_params_json=json.dumps(search_params),
     )
     db.add(row)
@@ -1598,7 +1604,9 @@ async def get_lead(
 ) -> dict[str, Any]:
     """Re-hydrate a lead from Mongo by `_id` (e.g. after async webhook enrich)."""
     client = LeadsClient(settings, token)
-    leads = await client.get_by_mongo_ids([mongo_id])
+    # RecordDetail refresh: keep the FULL apollo_responses (the raw-response
+    # viewer renders every stored Apollo endpoint), so opt out of display slimming.
+    leads = await client.get_by_mongo_ids([mongo_id], fields="full")
     if not leads:
         raise HTTPException(status_code=404, detail="Lead not found")
     record = lead_to_record(leads[0])
@@ -1972,7 +1980,9 @@ async def enrich_person(
     mongo_ids = result.get("ids") if isinstance(result, dict) else None
     if not isinstance(mongo_ids, list) or not mongo_ids:
         raise HTTPException(status_code=502, detail="Leads enrich returned no ids")
-    leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+    # Enrich/match responses are a full-fidelity contract (P2): the caller just
+    # paid to reveal data — never slim these single-doc hydrations.
+    leads = await client.get_by_mongo_ids([str(mongo_ids[0])], fields="full")
     if not leads:
         raise HTTPException(status_code=404, detail="Enriched lead not found")
     record = lead_to_record(leads[0])
@@ -2041,7 +2051,9 @@ async def match_person(
     mongo_ids = result.get("ids") if isinstance(result, dict) else None
     if not isinstance(mongo_ids, list) or not mongo_ids:
         raise HTTPException(status_code=502, detail="Leads match returned no ids")
-    leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+    # Enrich/match responses are a full-fidelity contract (P2): the caller just
+    # paid to reveal data — never slim these single-doc hydrations.
+    leads = await client.get_by_mongo_ids([str(mongo_ids[0])], fields="full")
     if not leads:
         raise HTTPException(status_code=404, detail="Matched lead not found")
     record = lead_to_record(leads[0])
@@ -2105,7 +2117,9 @@ async def enrich_organization(
     mongo_ids = result.get("ids") if isinstance(result, dict) else None
     if not isinstance(mongo_ids, list) or not mongo_ids:
         raise HTTPException(status_code=502, detail="Leads enrich returned no ids")
-    leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+    # Enrich/match responses are a full-fidelity contract (P2): the caller just
+    # paid to reveal data — never slim these single-doc hydrations.
+    leads = await client.get_by_mongo_ids([str(mongo_ids[0])], fields="full")
     if not leads:
         raise HTTPException(status_code=404, detail="Enriched lead not found")
     record = lead_to_record(leads[0])
