@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 from fm_runtime import anonymous, install
 from sqlalchemy import text
 
@@ -23,7 +24,14 @@ async def _db_ready() -> None:
 
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# orjson renders the JSON responses — the CPU win lands on the batch-hydration
+# and page responses that marshal large nested Apollo payloads (mirrors leads).
+# orjson serializes datetime natively.
+app = FastAPI(
+    title=settings.app_name,
+    lifespan=lifespan,
+    default_response_class=ORJSONResponse,
+)
 
 install(app, service="search", ready_checks={"postgres": _db_ready})
 

@@ -6,11 +6,12 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
 import jwt as pyjwt
+import orjson
 from fastapi import HTTPException, status
 
 from fm_runtime import ExchangeError, get_broker
@@ -584,7 +585,10 @@ class LeadsClient:
             )
         if response.status_code == 204:
             return None
-        return response.json()
+        # Success path only: parse the (often large, nested) leads payload with
+        # orjson straight off the raw bytes. Error paths above keep response.json()
+        # so their status/detail behavior is byte-for-byte identical.
+        return orjson.loads(response.content)
 
     @staticmethod
     def _apollo_path(relative: str) -> str:
@@ -798,13 +802,26 @@ class LeadsClient:
             finally:
                 await response.aclose()
 
-    async def get_by_mongo_ids(self, mongo_ids: list[str]) -> list[dict[str, Any]]:
+    async def get_by_mongo_ids(
+        self,
+        mongo_ids: list[str],
+        *,
+        fields: Literal["full", "display"] = "display",
+    ) -> list[dict[str, Any]]:
+        """Batch-hydrate leads by Mongo ``_id``.
+
+        ``fields`` defaults to ``"display"`` — leads slims each doc's
+        ``apollo_responses`` to the display subset ``lead_to_record`` consumes
+        (display payload + PERSON_SEARCH + PERSON_MATCH for people; display-only
+        for orgs). The single-lead RecordDetail refresh passes ``fields="full"``
+        to keep every stored Apollo endpoint for the raw-response viewer.
+        """
         if not mongo_ids:
             return []
         data = await self._request(
             "POST",
             "/api/leads",
-            json_body={"ids": mongo_ids},
+            json_body={"ids": mongo_ids, "fields": fields},
         )
         if not isinstance(data, list):
             raise HTTPException(status_code=502, detail="Leads batch lookup returned invalid payload")
@@ -971,8 +988,11 @@ class LeadsClient:
 
         v2 (additive): forward the optional embed-subset + filter params, omitting
         any that are ``None`` so leads applies its own defaults (omitted ``embeds``
-        => ``["apollo"]``, exact legacy behavior)."""
-        json_body: dict[str, Any] = {"limit": limit}
+        => ``["apollo"]``, exact legacy behavior).
+
+        Each hit's ``lead`` feeds ``lead_to_record``, so request the slim
+        ``fields="display"`` shape (leads' default is ``"full"``)."""
+        json_body: dict[str, Any] = {"limit": limit, "fields": "display"}
         if query is not None:
             json_body["query"] = query
         if embeds is not None:

@@ -267,7 +267,9 @@ class LeadVectorRow:
     has_email: bool
     has_phone: bool
     has_linkedin: bool
-    embedding: list[float]
+    # float32 np.ndarray (pymilvus 2.5.4 takes it directly for FLOAT_VECTOR);
+    # a plain list[float] is still accepted for the defensive embed fallback.
+    embedding: Any
 
 
 @dataclass
@@ -358,7 +360,7 @@ async def upsert_lead_vectors(
 
 
 def _search_similar_sync(
-    query_vector: list[float],
+    query_vector: Any,
     *,
     expr: str | None = None,
     limit: int = 10,
@@ -391,7 +393,7 @@ def _search_similar_sync(
 
 
 async def search_similar(
-    query_vector: list[float],
+    query_vector: Any,
     *,
     expr: str | None = None,
     limit: int = 10,

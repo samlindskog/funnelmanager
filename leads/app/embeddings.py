@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from typing import Any
 
+import numpy as np
 from openai import AsyncOpenAI
 
 from app.apollo_endpoints import (
@@ -279,12 +281,31 @@ def lead_embedding_texts(doc: dict[str, Any]) -> dict[str, str]:
     return texts
 
 
+def _decode_embedding(value: Any) -> Any:
+    """Turn one OpenAI base64 embedding into a float32 ndarray.
+
+    Requesting ``encoding_format="base64"`` makes the SDK leave ``.embedding`` as
+    the raw base64 string (it only auto-decodes when the format is left unset), so
+    we decode it ourselves straight into a float32 ndarray — skipping both the JSON
+    float parse and the SDK's ``np.frombuffer(...).tolist()`` round-trip. pymilvus
+    2.5.4 takes float32 ndarrays directly for both FLOAT_VECTOR upserts and search
+    query vectors, so the ndarray is kept end-to-end. Defensive: if a response ever
+    comes back already-decoded (a list of floats), it is passed through unchanged.
+    """
+    if isinstance(value, str):
+        return np.frombuffer(base64.b64decode(value), dtype=np.float32)
+    return value
+
+
 async def embed_texts(
     texts: list[str],
     *,
     settings: Settings | None = None,
-) -> list[list[float]]:
+) -> list[Any]:
     """Embed texts with AsyncOpenAI (non-blocking). Returns one vector per input.
+
+    Each vector is a float32 ``np.ndarray`` (see ``_decode_embedding``); a plain
+    list is only returned in the defensive already-decoded fallback.
 
     OpenAI is the slow, lock-free stage: the API-max chunks are embedded
     concurrently (bounded by ``Settings.embed_concurrency``) so calls overlap
@@ -308,15 +329,16 @@ async def embed_texts(
         max_retries=max(0, int(cfg.openai_max_retries)),
     ) as client:
 
-        async def _embed_chunk(chunk: list[str]) -> list[list[float]]:
+        async def _embed_chunk(chunk: list[str]) -> list[Any]:
             async with sem:
                 response = await client.embeddings.create(
                     model=cfg.openai_embedding_model,
                     input=chunk,
                     dimensions=cfg.openai_embedding_dimensions,
+                    encoding_format="base64",
                 )
             by_index = {item.index: item.embedding for item in response.data}
-            return [list(by_index[offset]) for offset in range(len(chunk))]
+            return [_decode_embedding(by_index[offset]) for offset in range(len(chunk))]
 
         # return_exceptions=True so a failing chunk never tears the client down
         # while sibling chunks are still in flight — that would run them against a
@@ -332,7 +354,7 @@ async def embed_texts(
             raise result
 
     # gather preserves input order, so vectors line up with ``texts``.
-    vectors: list[list[float]] = []
+    vectors: list[Any] = []
     for chunk_result in results:
         vectors.extend(chunk_result)
     return vectors

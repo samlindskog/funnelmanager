@@ -206,7 +206,8 @@ async def mcp_enrich_leads(
             if not isinstance(mongo_ids, list) or not mongo_ids:
                 errors.append({"id": apollo_id, "detail": "leads returned no ids"})
                 continue
-            leads = await client.get_by_mongo_ids([str(mongo_ids[0])])
+            # MCP enrich tool responses are a stable full-fidelity contract (P2).
+            leads = await client.get_by_mongo_ids([str(mongo_ids[0])], fields="full")
             record = lead_to_record(leads[0]) if leads else None
             if record:
                 records.append(record)

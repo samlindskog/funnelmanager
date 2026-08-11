@@ -237,7 +237,7 @@ async def test_embed_fan_out_failure_is_clean() -> None:
         def __init__(self, client: "_FakeClient") -> None:
             self._client = client
 
-        async def create(self, *, model, input, dimensions):  # noqa: A002
+        async def create(self, *, model, input, dimensions, encoding_format=None):  # noqa: A002
             # First chunk fails fast; the rest are slow so they are still in
             # flight when the failure would otherwise tear the client down.
             if input and input[0] == "boom":
@@ -246,6 +246,9 @@ async def test_embed_fan_out_failure_is_clean() -> None:
             await asyncio.sleep(0.05)
             assert not self._client.closed, "sibling ran against a CLOSED client"
             events.append("chunk-ok")
+            # Return list embeddings; embed_texts' _decode_embedding passes an
+            # already-decoded list through unchanged (the base64 path is exercised
+            # by the embeddings unit test, not this gate-fairness check).
             return _FakeResp([_FakeItem(i, [float(len(t))]) for i, t in enumerate(input)])
 
     class _FakeClient:

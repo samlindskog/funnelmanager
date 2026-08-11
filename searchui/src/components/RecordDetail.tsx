@@ -549,6 +549,7 @@ function PersonDetail({
 function CompanyDetail({
   record,
   onUseForPeopleSearch,
+  onRecordUpdated,
 }: {
   record: CompanyRecord
   onUseForPeopleSearch?: (
@@ -556,11 +557,32 @@ function CompanyDetail({
     companyName: string,
     companyDomain?: string | null,
   ) => void
+  onRecordUpdated?: (record: ApolloRecord) => void
 }) {
   const organizationId = record.organization_id || record.id
   const canUse = Boolean(organizationId)
   const location = locationLine(record)
   const website = record.website_url || (record.domain ? `https://${record.domain}` : null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+
+  // List hydration ships the slim (display) payload set; this re-fetches the
+  // stored lead in full — the company counterpart of PersonDetail's refresh.
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    setRefreshError(null)
+    try {
+      const mongoId = record.mongo_id || String(record.id || '')
+      if (!mongoId) throw new Error('Missing mongo lead id')
+      const updated = await getPersonLead(mongoId)
+      onRecordUpdated?.(updated)
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : 'Failed to refresh company')
+    } finally {
+      setRefreshing(false)
+    }
+  }, [onRecordUpdated, record.id, record.mongo_id, refreshing])
 
   return (
     <Stack spacing={2.5}>
@@ -568,7 +590,29 @@ function CompanyDetail({
         icon={<BusinessIcon />}
         title={record.name}
         subtitle={record.industry}
+        action={
+          <Tooltip title="Refresh from stored lead">
+            <span>
+              <IconButton
+                data-testid="record-refresh-company"
+                aria-label="Refresh company"
+                size="small"
+                onClick={() => void handleRefresh()}
+                disabled={refreshing || !(record.mongo_id || record.id)}
+                sx={{ mt: 0.25 }}
+              >
+                {refreshing ? <CircularProgress size={18} /> : <RefreshIcon fontSize="small" />}
+              </IconButton>
+            </span>
+          </Tooltip>
+        }
       />
+
+      {refreshError && (
+        <Typography variant="body2" color="error">
+          {refreshError}
+        </Typography>
+      )}
 
       <Section title="Overview">
         <FactGrid>
@@ -695,7 +739,7 @@ export const RecordDetail = memo(function RecordDetail({
 
   return (
     <Box key={key}>
-      <CompanyDetail record={record} onUseForPeopleSearch={onUseForPeopleSearch} />
+      <CompanyDetail record={record} onUseForPeopleSearch={onUseForPeopleSearch} onRecordUpdated={onRecordUpdated} />
     </Box>
   )
 })

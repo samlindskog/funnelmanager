@@ -60,9 +60,19 @@ class LeadOut(BaseModel):
 
 
 class BatchMongoIdsRequest(BaseModel):
-    """Batch hydrate by MongoDB `_id` strings (order preserved; missing omitted)."""
+    """Batch hydrate by MongoDB `_id` strings (order preserved; missing omitted).
+
+    ``fields`` selects the response shape (additive; default ``"full"`` so
+    MCP/agent callers see zero change):
+    - ``"full"`` — every stored ``apollo_responses`` entry (the source of truth).
+    - ``"display"`` — a slimmed ``apollo_responses`` carrying only what the search
+      UI renders: for people the display payload (highest-precedence present
+      endpoint) plus the search and match entries when present; for organizations
+      the display payload only. All other ``LeadOut`` fields are unchanged.
+    """
 
     ids: list[str] = Field(default_factory=list, max_length=500)
+    fields: Literal["full", "display"] = "full"
 
 
 class SearchIdsOut(BaseModel):
@@ -137,6 +147,9 @@ class SimilaritySearchRequest(BaseModel):
     email_exists: bool | None = None
     phone_exists: bool | None = None
     linkedin_exists: bool | None = None
+    # Hydration shape of the returned leads (additive; default "full" — see
+    # BatchMongoIdsRequest.fields). "display" slims each hit's apollo_responses.
+    fields: Literal["full", "display"] = "full"
 
     @model_validator(mode="after")
     def _validate(self) -> "SimilaritySearchRequest":
