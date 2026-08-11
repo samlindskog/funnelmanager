@@ -74,12 +74,12 @@ spec:
               # 1500m throttled bulk index builds (847m sustained observed);
               # give indexing bursts real room.
               cpu: 2500m
-              # semsearch-v2 (leads_embeds_v2) holds ~3 vectors per person (~290k rows
-              # at prod scale ≈ 1.8GB raw + index/segment overhead) — 2560Mi OOMed on
-              # collection load (2026-08-10). Milvus's internal write-protection
-              # watermark also keys off this limit: 4Gi denied writes ("memory quota
-              # exceeded") during the bulk re-index, so 6Gi. worker1 (16GB) has room.
-              memory: 6144Mi
+              # semsearch-v2 (leads_embeds_v2) holds ~3 vectors per person and the
+              # corpus GROWS with every search (2026-08-11: a 30-company sweep pushed
+              # the boot-time load past 6Gi -> OOM crashloop; 2560Mi and 4Gi OOMed
+              # earlier at smaller sizes). 8Gi; the durable fix when this outgrows
+              # again is queryNode mmap (load via page cache, not RAM).
+              memory: 8192Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
