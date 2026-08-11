@@ -62,11 +62,14 @@ spec:
             timeoutSeconds: 10
           resources:
             requests:
-              cpu: 50m
-              memory: 128Mi
+              cpu: 100m
+              memory: 256Mi
             limits:
-              cpu: 300m
-              memory: 512Mi
+              # minio is milvus's segment store — it ran at 96% of a 512Mi limit /
+              # 300m cap during the semsearch-v2 bulk index (2026-08-10), throttling
+              # every segment flush/load.
+              cpu: 1000m
+              memory: 1536Mi
           volumeMounts:
             - name: data
               mountPath: /minio_data
