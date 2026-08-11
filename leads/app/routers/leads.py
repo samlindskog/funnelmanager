@@ -315,10 +315,27 @@ async def _upsert_search_records(
     records: list[dict[str, Any]],
     id_getter,
     endpoint: str,
+    fallback_company_id: str | None = None,
 ) -> list[str]:
-    """Merge each search hit into apollo_responses[endpoint]; return mongo `_id`s in hit order."""
+    """Merge each search hit into apollo_responses[endpoint]; return mongo `_id`s in hit order.
+
+    ``fallback_company_id``: when a people search was scoped to exactly one
+    organization, the request context supplies the Apollo org id even though
+    ``mixed_people`` search hits are teaser-shaped (no ``organization_id``).
+    It fills ``company_id`` ONLY when neither the payload-derived fields nor
+    the stored doc already carry one — enrichment-derived values always win.
+    """
     now = datetime.now(timezone.utc)
     mongo_ids: list[str] = []
+
+    def _apply_company_fallback(derived: dict[str, Any], existing_doc: dict[str, Any] | None) -> None:
+        if (
+            fallback_company_id
+            and entity_type == "person"
+            and "company_id" not in derived
+            and not (existing_doc or {}).get("company_id")
+        ):
+            derived["company_id"] = fallback_company_id
 
     for record in records:
         if not isinstance(record, dict):
@@ -341,6 +358,7 @@ async def _upsert_search_records(
                 # Derived top-level index fields recomputed from the merged
                 # responses (per-field precedence => only upgrades, never regresses).
                 derived = derive_top_fields(entity_type, responses)
+                _apply_company_fallback(derived, existing)
                 # Optimistic guard: write only if the doc still matches the snapshot
                 # we derived from (updated_at + derived_at; equality-with-missing
                 # covers legacy docs where derived_at is absent). A racing writer
@@ -375,6 +393,8 @@ async def _upsert_search_records(
                 mongo_ids.append(str(existing["_id"]))
                 break
 
+            insert_derived = derive_top_fields(entity_type, {endpoint: entry})
+            _apply_company_fallback(insert_derived, None)
             doc = {
                 "apollo_id": apollo_id,
                 "entity_type": entity_type,
@@ -384,7 +404,7 @@ async def _upsert_search_records(
                 "created_at": now,
                 "updated_at": now,
                 "derived_at": now,
-                **derive_top_fields(entity_type, {endpoint: entry}),
+                **insert_derived,
             }
             try:
                 result = await db.leads.insert_one(doc)
@@ -704,12 +724,22 @@ async def _fetch_people_search_page(
         for item in _combined_result_arrays(apollo_raw, "people", "contacts")
         if isinstance(item, dict)
     ]
+    # Org-scoped searches know the company even though mixed_people hits are
+    # teaser-shaped: exactly one organization_ids filter => context fallback for
+    # the ingested people's derived company_id (enrichment-derived values win).
+    org_ids = page_params.get("organization_ids")
+    fallback_company_id = (
+        str(org_ids[0]).strip()
+        if isinstance(org_ids, list) and len(org_ids) == 1 and str(org_ids[0]).strip()
+        else None
+    )
     mongo_ids = await _upsert_search_records(
         database,
         entity_type="person",
         records=people,
         id_getter=_person_id_from_record,
         endpoint=PERSON_SEARCH,
+        fallback_company_id=fallback_company_id,
     )
     return mongo_ids, apollo_raw, len(people)
 
