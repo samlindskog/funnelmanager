@@ -12,12 +12,15 @@ non-empty value. So a phone that only appears in the async MATCH webhook payload
 still lands even when the best payload for ``name`` is the BY_ID enrich.
 
 Fields (per the plan table):
-- ``name``       — person only: ``name`` else ``first_name + last_name``
-- ``title``      — person only: ``title``
-- ``company_id`` — person only: ``organization_id`` else ``organization.id`` (Apollo org id)
-- ``email``      — person only, placeholder-aware (``email_not_unlocked@…`` => absent)
-- ``phone``      — person: first ``phone_numbers[].sanitized_number``; org: ``phone``/``sanitized_phone``
-- ``linkedin``   — person + org: ``linkedin_url``
+- ``name``              — person only: ``name`` else ``first_name + last_name``
+- ``title``             — person only: ``title``
+- ``company_apollo_id`` — person only: ``organization_id`` else ``organization.id`` (the raw
+  Apollo org id — the RESOLUTION KEY, not the canonical link). The canonical
+  ``company_id`` (the org document's Mongo ``_id``) is resolved by the write
+  paths via ``resolve_company_ids`` — derivation stays pure/sync.
+- ``email``             — person only, placeholder-aware (``email_not_unlocked@…`` => absent)
+- ``phone``             — person: first ``phone_numbers[].sanitized_number``; org: ``phone``/``sanitized_phone``
+- ``linkedin``          — person + org: ``linkedin_url``
 
 ``derive_top_fields`` returns ONLY the non-null keys, so a caller can merge it into
 a Mongo ``$set`` without ever regressing an existing value to null.
@@ -175,9 +178,9 @@ def derive_top_fields(entity_type: str, responses: dict[str, Any] | None) -> dic
     title = _first(payloads, _person_title)
     if title is not None:
         out["title"] = title
-    company_id = _first(payloads, _person_company_id)
-    if company_id is not None:
-        out["company_id"] = company_id
+    company_apollo_id = _first(payloads, _person_company_id)
+    if company_apollo_id is not None:
+        out["company_apollo_id"] = company_apollo_id
     email = _first(payloads, _person_email)
     if email is not None:
         out["email"] = email

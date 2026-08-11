@@ -42,7 +42,11 @@ class LeadOut(BaseModel):
     # organizations only phone/linkedin. Absent => null.
     name: str | None = None
     title: str | None = None
+    # company_id = the ORGANIZATION DOCUMENT's Mongo _id (the id space the
+    # similarity company filter takes natively); company_apollo_id = the raw
+    # Apollo org id it was resolved from (the resolution key).
     company_id: str | None = None
+    company_apollo_id: str | None = None
     email: str | None = None
     phone: str | None = None
     linkedin: str | None = None

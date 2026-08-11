@@ -111,6 +111,7 @@ def _serialize_lead(doc: dict[str, Any]) -> LeadOut:
         name=doc.get("name"),
         title=doc.get("title"),
         company_id=doc.get("company_id"),
+        company_apollo_id=doc.get("company_apollo_id"),
         email=doc.get("email"),
         phone=doc.get("phone"),
         linkedin=doc.get("linkedin"),
@@ -308,6 +309,38 @@ def _embedding_flag_after_update(existing: dict[str, Any], endpoint: str) -> boo
     return int(existing.get("embedding_source") or 0) > endpoint_source_precedence(endpoint)
 
 
+async def _resolve_company_link(
+    db: AsyncIOMotorDatabase,
+    derived: dict[str, Any],
+    existing: dict[str, Any] | None,
+    cache: dict[str, str | None] | None = None,
+) -> None:
+    """Resolve ``company_apollo_id`` -> canonical ``company_id`` (org doc Mongo _id).
+
+    The user-facing ``company_id`` is the ORGANIZATION DOCUMENT's Mongo ``_id``
+    (the id space the similarity company filter takes natively);
+    ``company_apollo_id`` is kept on the doc as the resolution key so a pending
+    link resolves on a later write once the org document exists. Re-resolves
+    when the key changes (e.g. enrichment reveals a different employer);
+    otherwise an established link is left untouched.
+    """
+    old = existing or {}
+    key = derived.get("company_apollo_id") or old.get("company_apollo_id")
+    if not key or (key == old.get("company_apollo_id") and old.get("company_id")):
+        return
+    if cache is not None and key in cache:
+        resolved = cache[key]
+    else:
+        org = await db.leads.find_one(
+            {"apollo_id": key, "entity_type": "organization"}, {"_id": 1}
+        )
+        resolved = str(org["_id"]) if org else None
+        if cache is not None:
+            cache[key] = resolved
+    if resolved:
+        derived["company_id"] = resolved
+
+
 async def _upsert_search_records(
     db: AsyncIOMotorDatabase,
     *,
@@ -322,20 +355,23 @@ async def _upsert_search_records(
     ``fallback_company_id``: when a people search was scoped to exactly one
     organization, the request context supplies the Apollo org id even though
     ``mixed_people`` search hits are teaser-shaped (no ``organization_id``).
-    It fills ``company_id`` ONLY when neither the payload-derived fields nor
-    the stored doc already carry one — enrichment-derived values always win.
+    It fills ``company_apollo_id`` (the resolution key) ONLY when neither the
+    payload-derived fields nor the stored doc already carry one —
+    enrichment-derived values always win. ``_resolve_company_link`` then turns
+    the key into the canonical ``company_id`` (the org document's Mongo _id).
     """
     now = datetime.now(timezone.utc)
     mongo_ids: list[str] = []
+    org_link_cache: dict[str, str | None] = {}
 
     def _apply_company_fallback(derived: dict[str, Any], existing_doc: dict[str, Any] | None) -> None:
         if (
             fallback_company_id
             and entity_type == "person"
-            and "company_id" not in derived
-            and not (existing_doc or {}).get("company_id")
+            and "company_apollo_id" not in derived
+            and not (existing_doc or {}).get("company_apollo_id")
         ):
-            derived["company_id"] = fallback_company_id
+            derived["company_apollo_id"] = fallback_company_id
 
     for record in records:
         if not isinstance(record, dict):
@@ -359,6 +395,7 @@ async def _upsert_search_records(
                 # responses (per-field precedence => only upgrades, never regresses).
                 derived = derive_top_fields(entity_type, responses)
                 _apply_company_fallback(derived, existing)
+                await _resolve_company_link(db, derived, existing, cache=org_link_cache)
                 # Optimistic guard: write only if the doc still matches the snapshot
                 # we derived from (updated_at + derived_at; equality-with-missing
                 # covers legacy docs where derived_at is absent). A racing writer
@@ -395,6 +432,7 @@ async def _upsert_search_records(
 
             insert_derived = derive_top_fields(entity_type, {endpoint: entry})
             _apply_company_fallback(insert_derived, None)
+            await _resolve_company_link(db, insert_derived, None, cache=org_link_cache)
             doc = {
                 "apollo_id": apollo_id,
                 "entity_type": entity_type,
@@ -473,6 +511,7 @@ async def _upsert_enriched_record(
                 phone=phone,
             )
             derived = derive_top_fields(entity_type, responses)
+            await _resolve_company_link(db, derived, existing)
             # Optimistic guard on the read snapshot (see _upsert_search_records):
             # matched_count==0 means a racing writer changed the doc => re-read.
             update_result = await db.leads.update_one(
@@ -508,6 +547,8 @@ async def _upsert_enriched_record(
             email=email,
             phone=phone,
         )
+        enrich_insert_derived = derive_top_fields(entity_type, {endpoint: entry})
+        await _resolve_company_link(db, enrich_insert_derived, None)
         try:
             result = await db.leads.insert_one(
                 {
@@ -519,7 +560,7 @@ async def _upsert_enriched_record(
                     "created_at": now,
                     "updated_at": now,
                     "derived_at": now,
-                    **derive_top_fields(entity_type, {endpoint: entry}),
+                    **enrich_insert_derived,
                 }
             )
         except DuplicateKeyError:
@@ -2009,6 +2050,7 @@ async def apollo_people_match_webhook(
             # Async phone-reveal / waterfall payload upserts email/phone/linkedin
             # onto the already-stored doc (the §1.3 upsert guarantee).
             derived = derive_top_fields("person", responses)
+            await _resolve_company_link(db, derived, existing)
             if existing:
                 # Optimistic guard on the read snapshot (see _upsert_search_records):
                 # matched_count==0 means a racing writer changed the doc => re-read.
@@ -2103,11 +2145,11 @@ async def apollo_people_match_webhook(
 _HYDRATE_CHUNK = 500
 
 
-def _milvus_scalar_expr(company_apollo_id: str | None, body: SimilaritySearchRequest) -> str:
+def _milvus_scalar_expr(company_filter_id: str | None, body: SimilaritySearchRequest) -> str:
     """Milvus filter expr over the derived scalar fields (recall; re-checked in Mongo)."""
     parts: list[str] = []
-    if company_apollo_id:
-        parts.append(f"company_id == {_milvus_str_literal(company_apollo_id)}")
+    if company_filter_id:
+        parts.append(f"company_id == {_milvus_str_literal(company_filter_id)}")
     if body.entity_type is not None:
         parts.append(f"entity_type == {_milvus_str_literal(body.entity_type)}")
     if body.email_exists is not None:
@@ -2121,12 +2163,12 @@ def _milvus_scalar_expr(company_apollo_id: str | None, body: SimilaritySearchReq
 
 def _doc_passes_filters(
     doc: dict[str, Any],
-    company_apollo_id: str | None,
+    company_filter_id: str | None,
     body: SimilaritySearchRequest,
 ) -> bool:
     """Authoritative re-check of every requested filter against the hydrated Mongo doc."""
-    if company_apollo_id is not None:
-        if str(doc.get("company_id") or "") != company_apollo_id:
+    if company_filter_id is not None:
+        if str(doc.get("company_id") or "") != company_filter_id:
             return False
     if body.entity_type is not None:
         if (doc.get("entity_type") or "person") != body.entity_type:
@@ -2143,17 +2185,17 @@ def _doc_passes_filters(
     return True
 
 
-async def _resolve_company_apollo_id(
+async def _resolve_company_filter_id(
     db: AsyncIOMotorDatabase,
     company_id: str | None,
 ) -> str | None:
-    """Resolve ``company_id`` to the org's Apollo id (the people filter value).
+    """Resolve the filter input to the org document's Mongo ``_id`` string.
 
-    Accepts either a company record's Mongo ``_id`` or its Apollo organization id
-    (the two live in different id spaces, so a caller cannot know which they hold).
-    Tries the Mongo ``_id`` first (when the value parses as an ObjectId); on a miss
-    (or a non-ObjectId value) falls back to the org doc's ``apollo_id``. 404 only
-    when both lookups miss. The resolved org's ``apollo_id`` is the filter value.
+    People docs canonically store ``company_id`` = the organization DOCUMENT's
+    Mongo ``_id`` (``company_apollo_id`` holds the raw Apollo org id as the
+    resolution key). The filter accepts either id space — a company record's
+    Mongo ``_id`` or its Apollo organization id — and normalizes to the Mongo
+    ``_id``. 404 only when both lookups miss.
     """
     if company_id is None:
         return None
@@ -2187,26 +2229,20 @@ async def _resolve_company_apollo_id(
                 "(accepts a company record's Mongo id or Apollo organization id)"
             ),
         )
-    apollo_id = str(org_doc.get("apollo_id") or "").strip()
-    if not apollo_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Organization lead {company_id} has no Apollo id to filter by",
-        )
-    return apollo_id
+    return str(org_doc["_id"])
 
 
 async def _pure_filter_similarity(
     db: AsyncIOMotorDatabase,
     body: SimilaritySearchRequest,
-    company_apollo_id: str | None,
+    company_filter_id: str | None,
 ) -> SimilaritySearchResponse:
     """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
     query: dict[str, Any] = {}
     if body.entity_type is not None:
         query["entity_type"] = body.entity_type
-    if company_apollo_id is not None:
-        query["company_id"] = company_apollo_id
+    if company_filter_id is not None:
+        query["company_id"] = company_filter_id
         # company_id is a people-only field; default to person unless the caller
         # already pinned an entity_type (an incompatible pin ANDs to no results,
         # consistent with the vector path).
@@ -2239,12 +2275,12 @@ async def similarity_search(
     ``phone_exists`` / ``linkedin_exists`` filter the result set. Milvus scalar
     filters provide recall; the hydrated Mongo docs are re-checked authoritatively.
     """
-    company_apollo_id = await _resolve_company_apollo_id(db, body.company_id)
+    company_filter_id = await _resolve_company_filter_id(db, body.company_id)
     embeds = body.embeds if body.embeds is not None else ["apollo"]
 
     # Pure filter search: no Milvus / OpenAI (works even when either is down).
     if not embeds:
-        return await _pure_filter_similarity(db, body, company_apollo_id)
+        return await _pure_filter_similarity(db, body, company_filter_id)
 
     if not settings.openai_configured:
         raise HTTPException(
@@ -2256,7 +2292,7 @@ async def similarity_search(
     try:
         vectors = await embed_texts([query], settings=settings)
         query_vector = vectors[0]
-        scalar_expr = _milvus_scalar_expr(company_apollo_id, body)
+        scalar_expr = _milvus_scalar_expr(company_filter_id, body)
         # Split the ANN candidate budget across the selected kinds. Total candidate
         # work is bounded by max(16384, limit * len(embeds)): the per-kind floor of
         # `limit` is deliberate (each kind must be able to contribute a full result
@@ -2328,7 +2364,7 @@ async def similarity_search(
             if not doc:
                 continue
             # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
-            if not _doc_passes_filters(doc, company_apollo_id, body):
+            if not _doc_passes_filters(doc, company_filter_id, body):
                 continue
             results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc)))
             if len(results) >= body.limit:

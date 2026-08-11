@@ -176,7 +176,11 @@ def summarize_lead(lead: dict[str, Any]) -> dict[str, Any]:
                 "name": _top_field(lead, "name")
                 or (raw.get("name") or f"{first} {last}".strip() or None),
                 "title": _top_field(lead, "title") or raw.get("title"),
+                # company_id = the org DOCUMENT's Mongo _id (round-trips directly
+                # into the similarity company filter); company_apollo_id = the raw
+                # Apollo org id it was resolved from.
                 "company_id": _top_field(lead, "company_id"),
+                "company_apollo_id": _top_field(lead, "company_apollo_id"),
                 "email": _top_field(lead, "email") or _first_email(raw),
                 "phone": _top_field(lead, "phone") or _first_phone(raw),
                 "linkedin_url": _top_field(lead, "linkedin") or raw.get("linkedin_url"),

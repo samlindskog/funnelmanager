@@ -39,7 +39,7 @@ normalization for display remains in `search/`).
 |---|---|---|---|
 | `name` | person only | `name` else `first_name + last_name` | |
 | `title` | person only | `title` | |
-| `company_id` | person only | `organization_id` else `organization.id` | Apollo org id — matches the `apollo_id` of the org's own lead doc |
+| `company_id` | person only | resolved from `company_apollo_id` | **The organization DOCUMENT's Mongo `_id`** (corrected 2026-08-11 — this is what the spec meant; the raw Apollo org id is kept as `company_apollo_id`, the resolution key, so pending links resolve once the org doc exists) |
 | `email` | person (orgs have none) | `email` | **Placeholder-aware**: Apollo's locked `email_not_unlocked@…` must be treated as absent (mirror the semantics of `contact_signals_from_person_search` in `search/app/leads_client.py`; re-implement minimally in leads — no cross-service import) |
 | `phone` | person + org | person: first of `phone_numbers[].sanitized_number` (match/webhook payloads); org: `phone`/`sanitized_phone` | |
 | `linkedin` | person + org | `linkedin_url` | |
@@ -453,6 +453,15 @@ Second round (full-branch re-review):
     `mcp/app/tools/_shared.py` (tool schemas verified byte-identical before/after).
 
 Third round (prod field report, 2026-08-11):
+
+14a. **`company_id` id-space correction (v1.15.3)**: the stored `company_id` on person docs is
+    the **organization document's Mongo `_id`** (the original spec intent), not the Apollo org
+    id — the raw Apollo id moved to `company_apollo_id` (resolution key; indexed). Write paths
+    resolve key→link at write time (per-batch cached; re-resolves when the key changes, i.e. a
+    new employer; pending links resolve on a later write once the org doc exists). The
+    similarity filter still accepts both id spaces but normalizes to the Mongo `_id`; person
+    summaries' `company_id` now round-trips directly into the filter. `reembed.py` pass 1
+    migrates legacy Apollo-id values (dev: 185 resolved, 2 pending-unset).
 
 14. **Context-fallback `company_id`** (fixes "company-filtered similarity returns nothing"):
     because `mixed_people` search hits are teaser-shaped, search-ingested people carried no
