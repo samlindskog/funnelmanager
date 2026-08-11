@@ -47,10 +47,13 @@ spec:
                 - ALL
           resources:
             requests:
-              cpu: 50m
+              cpu: 300m
               memory: 192Mi
             limits:
-              cpu: 500m
+              # 500m starved the async event loop under ~30 concurrent NDJSON
+              # streams (2026-08-11): readiness timed out, Envoy pulled the ONLY
+              # replica (503 UH no_healthy_upstream). Full cores + headroom.
+              cpu: 1500m
               memory: 512Mi
           livenessProbe:
             httpGet:
@@ -58,12 +61,20 @@ spec:
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
+            # Never let a load-induced stall restart the pod (that kills every
+            # in-flight NDJSON stream — worse than slow responses).
+            timeoutSeconds: 4
+            failureThreshold: 6
           readinessProbe:
             httpGet:
               path: /readyz
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
+            # Single replica: pulling it from LB on a transient event-loop stall
+            # converts load into a full 503 outage. Tolerate slow probes.
+            timeoutSeconds: 4
+            failureThreshold: 5
           env:
             - name: FM_SERVICE_NAME
               value: search
