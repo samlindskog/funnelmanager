@@ -238,8 +238,14 @@ def ensure_collection(settings: Settings | None = None) -> Collection:
             "params": {"nlist": 128},
         },
     )
+    # mmap the collection: sealed data loads via the page cache instead of
+    # resident RAM, so memory stops scaling linearly with corpus growth (the
+    # corpus grows on every search; 2.5Gi->4Gi->6Gi->8Gi OOM ladder, 2026-08-1x).
+    # Slight query-latency cost, acceptable for this workload. Set at creation
+    # so migration rebuilds (reembed.py drop/recreate) inherit it.
+    collection.set_properties({"mmap.enabled": "true"})
     collection.load()
-    logger.info("Created Milvus collection %s (dim=%s)", name, dim)
+    logger.info("Created Milvus collection %s (dim=%s, mmap on)", name, dim)
     return collection
 
 
