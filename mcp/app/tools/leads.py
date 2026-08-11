@@ -113,10 +113,11 @@ def register(mcp: FastMCP, deps: Deps) -> None:
           ["apollo"] (legacy). [] => pure-filter mode: no vector ranking (ranked
           by recency), query is ignored, and at least one filter is required.
         - company_id: accepts EITHER a company record's Mongo _id (the same value
-          returned as `mongo_id` on that company's summary) OR the Apollo
-          organization id (the `company_id` field on a person summary) — the two
-          live in different id spaces and leads resolves whichever you pass. Keeps
-          only people whose company is that org.
+          returned as `mongo_id` on a company summary AND as `company_id` on a
+          person summary — person.company_id IS the org document's Mongo _id, so
+          it round-trips directly) OR the raw Apollo organization id
+          (`company_apollo_id` on a person summary); leads resolves whichever you
+          pass. Keeps only people whose company is that org.
         - entity_type: restrict to "person" or "organization".
         - email_exists / phone_exists / linkedin_exists: tri-state contact-field
           filters (True=must have, False=must be missing, None=no filter).
