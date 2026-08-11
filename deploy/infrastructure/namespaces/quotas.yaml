@@ -22,6 +22,10 @@ spec:
     # (its internal write-protection watermark keys off the container limit and
     # denied bulk-index writes at 4Gi) + headroom for one-off migration Jobs.
     # Both workers are 16GB now, so the burstable ceiling remains sane.
-    requests.memory: 8Gi
+    # Raised 8→12Gi (2026-08-10) when requests were right-sized to observed
+    # steady-state usage (milvus 3Gi, minio 768Mi, mongo 512Mi, neo4j 1Gi, …) —
+    # pods running far above their request were first-in-line for eviction
+    # under node pressure, which for mongo/milvus would be an incident.
+    requests.memory: 12Gi
     limits.memory: 26Gi
     pods: "60"
