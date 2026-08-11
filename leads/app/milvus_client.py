@@ -326,7 +326,11 @@ def _upsert_lead_vectors_sync(
             [row.embedding for row in rows],
         ]
     )
-    collection.flush()
+    # No per-batch flush: forcing a flush after every upsert seals a tiny segment
+    # per batch, storming minio and queuing compactions that starve the very
+    # indexing that created them (measured 4-5x slowdown during the 2026-08-10
+    # prod migration). Milvus auto-flush handles sealing; similarity search only
+    # needs eventual (~seconds) visibility — results render from Mongo hydration.
 
 
 async def upsert_lead_vectors(

@@ -39,7 +39,7 @@ from app.config import get_settings
 from app.derived import derive_top_fields
 from app.milvus_client import connect_milvus, ensure_collection_async, index_lead_docs
 
-BATCH = 128
+BATCH = 512
 # Larger than any real endpoint precedence, so nothing is skipped on rebuild.
 SOURCE_PRECEDENCE = 10_000
 
@@ -103,6 +103,11 @@ async def _rebuild_embeddings(db, cfg) -> int:
             batch = []
             print(f"  indexed {indexed}/{total}", flush=True)
     indexed += await _flush(batch)
+    # One deliberate flush at the very end (per-batch flushes were removed from
+    # the upsert path — segment-storm anti-pattern) so DONE means durably sealed.
+    from pymilvus import Collection
+
+    await asyncio.to_thread(lambda: Collection(name).flush())
     print(f"pass 2 DONE: {indexed} doc(s) re-embedded into {name}", flush=True)
     return indexed
 
