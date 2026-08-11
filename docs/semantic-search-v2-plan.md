@@ -451,3 +451,14 @@ Second round (full-branch re-review):
     `_Prepared`/`_prepare_lead_row` and the scalar-drift re-check extracted to module level so
     `index_lead_docs` reads as orchestration; shared `build_similarity_body` in
     `mcp/app/tools/_shared.py` (tool schemas verified byte-identical before/after).
+
+Third round (prod field report, 2026-08-11):
+
+14. **Context-fallback `company_id`** (fixes "company-filtered similarity returns nothing"):
+    because `mixed_people` search hits are teaser-shaped, search-ingested people carried no
+    `company_id` — in prod only ~0.4% of docs had one, so company-scoped similarity was
+    near-guaranteed empty. When a people search is scoped to exactly one `organization_ids`
+    filter, the request context now supplies the fallback `company_id` for ingested people
+    (payload/enrichment-derived values always win; re-running an org-scoped search back-fills
+    that company's existing people). The UI filter row gained a helper line explaining that
+    exists-filters select from the enriched subset.

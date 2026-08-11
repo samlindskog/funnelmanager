@@ -1036,6 +1036,12 @@ export function SearchPage() {
                           </FormControl>
                         ))}
                       </Stack>
+                      <FormHelperText>
+                        Email, phone, and LinkedIn are revealed by enrichment, so
+                        “Has” filters select from enriched leads. Company linkage
+                        comes from enrichment or from a company-scoped people
+                        search.
+                      </FormHelperText>
                       <TextField
                         label="Result limit"
                         type="number"
