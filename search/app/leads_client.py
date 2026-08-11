@@ -434,6 +434,11 @@ def lead_to_record(lead: dict[str, Any]) -> dict[str, Any] | None:
             record["email"] = top_email
         if top_linkedin is not None:
             record["linkedin_url"] = top_linkedin
+        # The person's company link — the ORGANIZATION DOCUMENT's Mongo _id
+        # (round-trips directly into the similarity company filter) plus the raw
+        # Apollo org id it resolved from.
+        record["company_id"] = _top_field(lead, "company_id")
+        record["company_apollo_id"] = _top_field(lead, "company_apollo_id")
         # Surface a reveal-webhook phone that only exists at the derived top level:
         # without this a person can show has_phone=True yet resolve to no number
         # (the display payload's phone_numbers is empty). Append it in the shape the

@@ -31,6 +31,9 @@ export interface PersonRecord {
   id?: string
   /** MongoDB lead `_id` used for hydrate / refresh. */
   mongo_id?: string | null
+  /** The company's own record (Mongo) id — usable directly as the similarity company filter. */
+  company_id?: string | null
+  company_apollo_id?: string | null
   embedding?: boolean
   entity_type: 'person'
   name: string

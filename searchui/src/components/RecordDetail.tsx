@@ -438,6 +438,7 @@ function PersonDetail({
           <Fact label="Location">{location || null}</Fact>
           <Fact label="Apollo ID">{record.id || null}</Fact>
           <Fact label="Organization ID">{org?.id || null}</Fact>
+          <Fact label="Company record ID">{record.company_id || null}</Fact>
         </FactGrid>
       </Section>
 
