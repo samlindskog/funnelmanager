@@ -2198,11 +2198,17 @@ async def apollo_people_match_webhook(
 _HYDRATE_CHUNK = 500
 
 
-def _milvus_scalar_expr(company_filter_id: str | None, body: SimilaritySearchRequest) -> str:
+def _milvus_scalar_expr(
+    company_filter_ids: list[str] | None, body: SimilaritySearchRequest
+) -> str:
     """Milvus filter expr over the derived scalar fields (recall; re-checked in Mongo)."""
     parts: list[str] = []
-    if company_filter_id:
-        parts.append(f"company_id == {_milvus_str_literal(company_filter_id)}")
+    if company_filter_ids:
+        if len(company_filter_ids) == 1:
+            parts.append(f"company_id == {_milvus_str_literal(company_filter_ids[0])}")
+        else:
+            literals = ", ".join(_milvus_str_literal(v) for v in company_filter_ids)
+            parts.append(f"company_id in [{literals}]")
     if body.entity_type is not None:
         parts.append(f"entity_type == {_milvus_str_literal(body.entity_type)}")
     if body.email_exists is not None:
@@ -2216,12 +2222,12 @@ def _milvus_scalar_expr(company_filter_id: str | None, body: SimilaritySearchReq
 
 def _doc_passes_filters(
     doc: dict[str, Any],
-    company_filter_id: str | None,
+    company_filter_ids: list[str] | None,
     body: SimilaritySearchRequest,
 ) -> bool:
     """Authoritative re-check of every requested filter against the hydrated Mongo doc."""
-    if company_filter_id is not None:
-        if str(doc.get("company_id") or "") != company_filter_id:
+    if company_filter_ids:
+        if str(doc.get("company_id") or "") not in company_filter_ids:
             return False
     if body.entity_type is not None:
         if (doc.get("entity_type") or "person") != body.entity_type:
@@ -2236,6 +2242,27 @@ def _doc_passes_filters(
         if (doc.get("linkedin") is not None) != body.linkedin_exists:
             return False
     return True
+
+
+async def _resolve_company_filter_ids(
+    db: AsyncIOMotorDatabase,
+    body: SimilaritySearchRequest,
+) -> list[str] | None:
+    """Resolve company_id + company_ids (union, order-preserving dedupe) to org _ids."""
+    values: list[str] = []
+    if body.company_id:
+        values.append(body.company_id)
+    for value in body.company_ids or []:
+        if value not in values:
+            values.append(value)
+    if not values:
+        return None
+    resolved: list[str] = []
+    for value in values:
+        rid = await _resolve_company_filter_id(db, value)
+        if rid and rid not in resolved:
+            resolved.append(rid)
+    return resolved or None
 
 
 async def _resolve_company_filter_id(
@@ -2288,14 +2315,18 @@ async def _resolve_company_filter_id(
 async def _pure_filter_similarity(
     db: AsyncIOMotorDatabase,
     body: SimilaritySearchRequest,
-    company_filter_id: str | None,
+    company_filter_ids: list[str] | None,
 ) -> SimilaritySearchResponse:
     """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
     query: dict[str, Any] = {}
     if body.entity_type is not None:
         query["entity_type"] = body.entity_type
-    if company_filter_id is not None:
-        query["company_id"] = company_filter_id
+    if company_filter_ids:
+        query["company_id"] = (
+            company_filter_ids[0]
+            if len(company_filter_ids) == 1
+            else {"$in": company_filter_ids}
+        )
         # company_id is a people-only field; default to person unless the caller
         # already pinned an entity_type (an incompatible pin ANDs to no results,
         # consistent with the vector path).
@@ -2330,12 +2361,12 @@ async def similarity_search(
     ``phone_exists`` / ``linkedin_exists`` filter the result set. Milvus scalar
     filters provide recall; the hydrated Mongo docs are re-checked authoritatively.
     """
-    company_filter_id = await _resolve_company_filter_id(db, body.company_id)
+    company_filter_ids = await _resolve_company_filter_ids(db, body)
     embeds = body.embeds if body.embeds is not None else ["apollo"]
 
     # Pure filter search: no Milvus / OpenAI (works even when either is down).
     if not embeds:
-        return await _pure_filter_similarity(db, body, company_filter_id)
+        return await _pure_filter_similarity(db, body, company_filter_ids)
 
     if not settings.openai_configured:
         raise HTTPException(
@@ -2347,7 +2378,7 @@ async def similarity_search(
     try:
         vectors = await embed_texts([query], settings=settings)
         query_vector = vectors[0]
-        scalar_expr = _milvus_scalar_expr(company_filter_id, body)
+        scalar_expr = _milvus_scalar_expr(company_filter_ids, body)
         # Split the ANN candidate budget across the selected kinds. Total candidate
         # work is bounded by max(16384, limit * len(embeds)): the per-kind floor of
         # `limit` is deliberate (each kind must be able to contribute a full result
@@ -2419,7 +2450,7 @@ async def similarity_search(
             if not doc:
                 continue
             # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
-            if not _doc_passes_filters(doc, company_filter_id, body):
+            if not _doc_passes_filters(doc, company_filter_ids, body):
                 continue
             results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc, body.fields)))
             if len(results) >= body.limit:

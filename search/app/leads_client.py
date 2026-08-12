@@ -984,6 +984,7 @@ class LeadsClient:
         limit: int = 25,
         embeds: list[str] | None = None,
         company_id: str | None = None,
+        company_ids: list[str] | None = None,
         entity_type: str | None = None,
         email_exists: bool | None = None,
         phone_exists: bool | None = None,
@@ -1004,6 +1005,8 @@ class LeadsClient:
             json_body["embeds"] = embeds
         if company_id is not None:
             json_body["company_id"] = company_id
+        if company_ids is not None:
+            json_body["company_ids"] = company_ids
         if entity_type is not None:
             json_body["entity_type"] = entity_type
         if email_exists is not None:

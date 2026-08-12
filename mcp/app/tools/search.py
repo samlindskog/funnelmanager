@@ -81,6 +81,7 @@ def register(mcp: FastMCP, deps: Deps) -> None:
         limit: int = 25,
         embeds: list[Literal["apollo", "name", "title"]] | None = None,
         company_id: str | None = None,
+        company_ids: list[str] | None = None,
         entity_type: Literal["person", "organization"] | None = None,
         email_exists: bool | None = None,
         phone_exists: bool | None = None,
@@ -105,6 +106,8 @@ def register(mcp: FastMCP, deps: Deps) -> None:
           it round-trips directly) OR the raw Apollo organization id
           (`company_apollo_id` on a person summary); leads resolves whichever you
           pass. Keeps only people whose company is that org.
+        - company_ids: multi-company OR variant (same dual id space per entry;
+          merged with company_id when both are given).
         - entity_type: restrict to "person" or "organization".
         - email_exists / phone_exists / linkedin_exists: tri-state contact-field
           filters (True=must have, False=must be missing, None=no filter).
@@ -119,6 +122,7 @@ def register(mcp: FastMCP, deps: Deps) -> None:
             limit=limit,
             embeds=embeds,
             company_id=company_id,
+            company_ids=company_ids,
             email_exists=email_exists,
             phone_exists=phone_exists,
             linkedin_exists=linkedin_exists,

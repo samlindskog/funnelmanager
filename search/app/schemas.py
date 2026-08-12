@@ -168,6 +168,8 @@ class McpSemanticSearchRequest(BaseModel):
     limit: int = Field(default=25, ge=1, le=10000)
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
+    # Multi-company OR filter (additive): people at ANY of these companies.
+    company_ids: list[str] | None = Field(default=None, max_length=100)
     entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
@@ -245,6 +247,13 @@ def _validate_similarity_request(model: Any) -> Any:
     if model.company_id is not None:
         cleaned = model.company_id.strip()
         model.company_id = cleaned or None
+    if model.company_ids is not None:
+        deduped: list[str] = []
+        for value in model.company_ids:
+            entry = (value or "").strip()
+            if entry and entry not in deduped:
+                deduped.append(entry)
+        model.company_ids = deduped or None
     effective = model.embeds if model.embeds is not None else ["apollo"]
     if effective:
         if not (model.query or "").strip():
@@ -256,6 +265,7 @@ def _validate_similarity_request(model: Any) -> Any:
             value is not None
             for value in (
                 model.company_id,
+                model.company_ids,
                 model.entity_type,
                 model.email_exists,
                 model.phone_exists,
@@ -287,6 +297,8 @@ class SimilaritySearchRequest(BaseModel):
     limit: int = Field(default=25, ge=1, le=10000)
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
+    # Multi-company OR filter (additive): people at ANY of these companies.
+    company_ids: list[str] | None = Field(default=None, max_length=100)
     entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
