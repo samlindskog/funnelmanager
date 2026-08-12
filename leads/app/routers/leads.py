@@ -20,7 +20,6 @@ from app.apollo_endpoints import (
     ORG_BY_ID,
     ORG_DISPLAY_PRIORITY,
     ORG_SEARCH,
-    ORG_SEARCH_LEGACY,
     PERSON_BY_ID,
     PERSON_DISPLAY_PRIORITY,
     PERSON_MATCH,
@@ -131,7 +130,7 @@ def _select_display_responses(
         priority = ORG_DISPLAY_PRIORITY
         # Keep the search entry alongside the display payload (mirrors people):
         # dropping it lost user-visible raw-response data in the org detail pane.
-        always_keep: tuple[str, ...] = (ORG_SEARCH, ORG_SEARCH_LEGACY)
+        always_keep: tuple[str, ...] = (ORG_SEARCH,)
     else:
         priority = PERSON_DISPLAY_PRIORITY
         always_keep = (PERSON_SEARCH, PERSON_MATCH)

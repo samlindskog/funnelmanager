@@ -14,7 +14,6 @@ from app.apollo_endpoints import (
     ORG_BY_ID,
     ORG_ENRICH,
     ORG_SEARCH,
-    ORG_SEARCH_LEGACY,
     PERSON_BY_ID,
     PERSON_MATCH,
     PERSON_SEARCH,
@@ -40,13 +39,12 @@ _SOURCE_PRECEDENCE: dict[str, int] = {
     ORG_BY_ID: EMBED_SOURCE_COMPLETE_INFO,
     ORG_ENRICH: EMBED_SOURCE_COMPLETE_INFO,
     ORG_SEARCH: EMBED_SOURCE_SEARCH,
-    ORG_SEARCH_LEGACY: EMBED_SOURCE_SEARCH,
 }
 
 # Which stored response supplies the embedding text: highest precedence first, so
 # match beats complete-info beats search.
 _PERSON_EMBED_PRIORITY = (PERSON_MATCH, PERSON_BY_ID, PERSON_SEARCH)
-_ORG_EMBED_PRIORITY = (ORG_BY_ID, ORG_ENRICH, ORG_SEARCH, ORG_SEARCH_LEGACY)
+_ORG_EMBED_PRIORITY = (ORG_BY_ID, ORG_ENRICH, ORG_SEARCH)
 
 
 def endpoint_source_precedence(endpoint: str) -> int:

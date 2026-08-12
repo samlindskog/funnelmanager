@@ -134,10 +134,8 @@ class ApolloLeadsClient:
         return await self._request("POST", "mixed_people/api_search", params=params)
 
     async def search_organizations(self, params: dict[str, Any]) -> dict[str, Any]:
-        """POST mixed_companies/api_search — the free teaser variant (the paid
-        /search variant consumes credits per returned record; people search
-        already uses api_search for the same reason)."""
-        return await self._request("POST", "mixed_companies/api_search", params=params)
+        """POST mixed_companies/search — Organization Search."""
+        return await self._request("POST", "mixed_companies/search", params=params)
 
     async def get_complete_person(
         self,
