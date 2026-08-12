@@ -7,14 +7,11 @@ import SearchIcon from '@mui/icons-material/Search'
 import {
   Alert,
   AppBar,
-  Autocomplete,
   Box,
   Button,
-  Chip,
   CircularProgress,
   Divider,
   FormControl,
-  FormHelperText,
   IconButton,
   InputLabel,
   List,
@@ -50,9 +47,18 @@ import {
   type RunSearchParams,
 } from '../api'
 import { useAuth } from '../auth'
+import { parseCsv } from '../csv'
 import { ColorModeToggle } from '../components/ColorModeToggle'
 import { SearchResultsView } from '../components/SearchResultsView'
 import { SearchSidebar } from '../components/SearchSidebar'
+import { SimilarityForm } from '../components/SimilarityForm'
+import {
+  EMBED_KINDS,
+  SIMILARITY_LIMIT_MAX,
+  triToBool,
+  type TriState,
+} from '../components/similarity'
+import { WorkflowsPage } from './WorkflowsPage'
 import { isEditableTarget, type ListFocus } from '../keyboard'
 import { listFocusPaneSx } from '../paneSurface'
 import { useProgress } from '../progress'
@@ -68,62 +74,8 @@ import type {
 const ALL_OWNERS = ''
 
 type CompanyFilterMode = 'id' | 'name'
-type MainView = 'search' | 'results'
+type MainView = 'search' | 'results' | 'workflows'
 type SearchSource = 'apollo' | 'similarity'
-/** Contact exists filter: Any = omit, Has = require present, Missing = require absent. */
-type TriState = 'any' | 'has' | 'missing'
-
-const SIMILARITY_LIMIT_MAX = 10000
-
-const EMBED_KINDS: Array<{ value: EmbedKind; label: string }> = [
-  { value: 'apollo', label: 'Apollo profile' },
-  { value: 'name', label: 'Name' },
-  { value: 'title', label: 'Title' },
-]
-
-/** Tri-state select value → the leads exists-filter boolean (Any omits). */
-function triToBool(state: TriState): boolean | undefined {
-  return state === 'has' ? true : state === 'missing' ? false : undefined
-}
-
-/** Minimal quote-aware CSV parser (handles quoted commas/newlines/escaped quotes). */
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = []
-  let row: string[] = []
-  let cell = ''
-  let quoted = false
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (quoted) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') {
-          cell += '"'
-          i++
-        } else {
-          quoted = false
-        }
-      } else {
-        cell += ch
-      }
-    } else if (ch === '"') {
-      quoted = true
-    } else if (ch === ',') {
-      row.push(cell)
-      cell = ''
-    } else if (ch === '\n' || ch === '\r') {
-      if (ch === '\r' && text[i + 1] === '\n') i++
-      row.push(cell)
-      cell = ''
-      if (row.some((value) => value !== '')) rows.push(row)
-      row = []
-    } else {
-      cell += ch
-    }
-  }
-  row.push(cell)
-  if (row.some((value) => value !== '')) rows.push(row)
-  return rows
-}
 
 export function SearchPage() {
   const theme = useTheme()
@@ -359,6 +311,13 @@ export function SearchPage() {
     setMainView('search')
     setListFocus('history')
     setPageError(null)
+  }
+
+  function goToWorkflows() {
+    setMainView('workflows')
+    setListFocus('history')
+    setPageError(null)
+    setError(null)
   }
 
   async function executeSimilaritySearch() {
@@ -822,6 +781,31 @@ export function SearchPage() {
             sx={{ my: 1.25, borderColor: 'divider' }}
           />
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center', minWidth: 0 }}>
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={mainView === 'workflows' ? 'workflows' : 'search'}
+              onChange={(_, next: 'search' | 'workflows' | null) => {
+                if (next === 'workflows') goToWorkflows()
+                else if (next === 'search') backToSearch()
+              }}
+              aria-label="View"
+            >
+              <ToggleButton
+                data-testid="search-nav"
+                value="search"
+                sx={{ textTransform: 'none' }}
+              >
+                Search
+              </ToggleButton>
+              <ToggleButton
+                data-testid="workflows-nav"
+                value="workflows"
+                sx={{ textTransform: 'none' }}
+              >
+                Workflows
+              </ToggleButton>
+            </ToggleButtonGroup>
             {showingResults && (
               <Button
                 data-testid="search-back"
@@ -1006,6 +990,20 @@ export function SearchPage() {
               </Box>
             )}
           </Box>
+        ) : mainView === 'workflows' ? (
+          <Box
+            component="main"
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              minHeight: 0,
+              overflow: 'auto',
+              p: { xs: 2, md: 4 },
+              bgcolor: 'background.default',
+            }}
+          >
+            <WorkflowsPage onShowResults={showResults} onHistoryRefresh={refreshHistory} />
+          </Box>
         ) : (
           <Box
             component="main"
@@ -1065,186 +1063,26 @@ export function SearchPage() {
                   </FormControl>
 
                   {isSimilaritySource ? (
-                    <>
-                      <FormControl>
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 0.75 }}>
-                          Rank by embeddings
-                        </Typography>
-                        <ToggleButtonGroup
-                          size="small"
-                          value={selectedEmbeds}
-                          onChange={(_, next: EmbedKind[]) =>
-                            setSimEmbeds({
-                              apollo: next.includes('apollo'),
-                              name: next.includes('name'),
-                              title: next.includes('title'),
-                            })
-                          }
-                          aria-label="Embedding set"
-                        >
-                          {EMBED_KINDS.map((kind) => (
-                            <ToggleButton
-                              key={kind.value}
-                              value={kind.value}
-                              data-testid={`similarity-embed-${kind.value}`}
-                              sx={{ textTransform: 'none' }}
-                            >
-                              {kind.label}
-                            </ToggleButton>
-                          ))}
-                        </ToggleButtonGroup>
-                        <FormHelperText>
-                          {hasEmbeds
-                            ? 'Ranked by mean similarity across the selected embeddings.'
-                            : 'No embeddings selected — pure filter search (query ignored).'}
-                        </FormHelperText>
-                      </FormControl>
-                      <TextField
-                        label={
-                          hasEmbeds
-                            ? 'Describe who you’re looking for'
-                            : 'Describe who you’re looking for (optional)'
-                        }
-                        placeholder="e.g. series A fintech CRO in NYC"
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        fullWidth
-                        autoFocus
-                        multiline
-                        minRows={2}
-                        disabled={!hasEmbeds}
-                      />
-                      <Autocomplete
-                        multiple
-                        freeSolo
-                        options={companyOptions}
-                        value={simCompanies}
-                        filterSelectedOptions
-                        getOptionLabel={(option) =>
-                          typeof option === 'string' ? option : option.name || option.mongo_id || ''
-                        }
-                        isOptionEqualToValue={(option, value) =>
-                          typeof option === 'string' || typeof value === 'string'
-                            ? option === value
-                            : option.mongo_id === value.mongo_id &&
-                              option.apollo_id === value.apollo_id
-                        }
-                        onChange={(_, next) => {
-                          // Strings arrive from freeSolo Enter presses — resolve them to
-                          // named options; objects come from the dropdown.
-                          const objects = next.filter(
-                            (item): item is CompanyOption => typeof item !== 'string',
-                          )
-                          setSimCompanies(objects)
-                          for (const item of next) {
-                            if (typeof item === 'string') void addCompanyValue(item)
-                          }
-                        }}
-                        renderValue={(tagValue, getItemProps) =>
-                          tagValue.map((option, index) => {
-                            const { key, ...tagProps } = getItemProps({ index })
-                            const label =
-                              typeof option === 'string'
-                                ? option
-                                : option.name || option.mongo_id || option.apollo_id
-                            return (
-                              <Chip
-                                key={key}
-                                {...tagProps}
-                                label={label}
-                                size="small"
-                                data-testid="similarity-company-chip"
-                                sx={{
-                                  '& .MuiChip-deleteIcon': { opacity: 0, transition: 'opacity 120ms' },
-                                  '&:hover .MuiChip-deleteIcon': { opacity: 1 },
-                                }}
-                              />
-                            )
-                          })
-                        }
-                        renderInput={(params) => (
-                          <TextField
-                            {...params}
-                            label="Companies"
-                            placeholder={resolvingCompany ? 'Resolving…' : 'Pick a recent company or paste an ID and press Enter'}
-                            helperText={
-                              companyResolveError ??
-                              'One or more companies (OR) — pick from recent companies, or paste a record id / Apollo organization ID.'
-                            }
-                            error={Boolean(companyResolveError)}
-                            data-testid="similarity-company-id"
-                          />
-                        )}
-                        fullWidth
-                      />
-                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                        {(
-                          [
-                            {
-                              id: 'email',
-                              label: 'Email',
-                              value: simEmailFilter,
-                              set: setSimEmailFilter,
-                            },
-                            {
-                              id: 'phone',
-                              label: 'Phone',
-                              value: simPhoneFilter,
-                              set: setSimPhoneFilter,
-                            },
-                            {
-                              id: 'linkedin',
-                              label: 'LinkedIn',
-                              value: simLinkedinFilter,
-                              set: setSimLinkedinFilter,
-                            },
-                          ] as Array<{
-                            id: string
-                            label: string
-                            value: TriState
-                            set: (next: TriState) => void
-                          }>
-                        ).map((filter) => (
-                          <FormControl key={filter.id} sx={{ minWidth: 140 }} fullWidth>
-                            <InputLabel id={`similarity-${filter.id}-filter-label`}>
-                              {filter.label}
-                            </InputLabel>
-                            <Select
-                              labelId={`similarity-${filter.id}-filter-label`}
-                              label={filter.label}
-                              value={filter.value}
-                              onChange={(e) => filter.set(e.target.value as TriState)}
-                              data-testid={`similarity-${filter.id}-filter`}
-                            >
-                              <MenuItem value="any">Any</MenuItem>
-                              <MenuItem value="has">Has</MenuItem>
-                              <MenuItem value="missing">Missing</MenuItem>
-                            </Select>
-                          </FormControl>
-                        ))}
-                      </Stack>
-                      <FormHelperText>
-                        Email, phone, and LinkedIn are revealed by enrichment, so
-                        “Has” filters select from enriched leads. Company linkage
-                        comes from enrichment or from a company-scoped people
-                        search.
-                      </FormHelperText>
-                      <TextField
-                        label="Result limit"
-                        type="number"
-                        value={similarityLimit}
-                        onChange={(e) => {
-                          const next = Number(e.target.value)
-                          if (!Number.isFinite(next)) return
-                          setSimilarityLimit(
-                            Math.min(SIMILARITY_LIMIT_MAX, Math.max(1, Math.round(next))),
-                          )
-                        }}
-                        helperText="Results beyond 100 are paginated"
-                        slotProps={{ htmlInput: { min: 1, max: SIMILARITY_LIMIT_MAX } }}
-                        sx={{ maxWidth: 220 }}
-                      />
-                    </>
+                    <SimilarityForm
+                      query={query}
+                      onQueryChange={setQuery}
+                      embeds={simEmbeds}
+                      onEmbedsChange={setSimEmbeds}
+                      companyOptions={companyOptions}
+                      companies={simCompanies}
+                      onCompaniesChange={setSimCompanies}
+                      onAddCompany={(raw) => void addCompanyValue(raw)}
+                      resolvingCompany={resolvingCompany}
+                      companyResolveError={companyResolveError}
+                      emailFilter={simEmailFilter}
+                      onEmailFilterChange={setSimEmailFilter}
+                      phoneFilter={simPhoneFilter}
+                      onPhoneFilterChange={setSimPhoneFilter}
+                      linkedinFilter={simLinkedinFilter}
+                      onLinkedinFilterChange={setSimLinkedinFilter}
+                      limit={similarityLimit}
+                      onLimitChange={setSimilarityLimit}
+                    />
                   ) : entityType === 'people' ? (
                     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
                       <FormControl sx={{ minWidth: 180 }}>
