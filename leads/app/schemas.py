@@ -143,6 +143,9 @@ class SimilaritySearchRequest(BaseModel):
     limit: int = Field(default=25, ge=1, le=10000)
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
+    # Multi-company OR filter (additive): people at ANY of these companies.
+    # Same dual id-space per entry as company_id; merged with it when both given.
+    company_ids: list[str] | None = Field(default=None, max_length=100)
     entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
@@ -161,6 +164,13 @@ class SimilaritySearchRequest(BaseModel):
         if self.company_id is not None:
             cleaned = self.company_id.strip()
             self.company_id = cleaned or None
+        if self.company_ids is not None:
+            deduped: list[str] = []
+            for value in self.company_ids:
+                entry = (value or "").strip()
+                if entry and entry not in deduped:
+                    deduped.append(entry)
+            self.company_ids = deduped or None
         # Omitted embeds default to ["apollo"] (legacy); [] is an explicit pure-filter.
         effective = self.embeds if self.embeds is not None else ["apollo"]
         if effective:
@@ -174,6 +184,7 @@ class SimilaritySearchRequest(BaseModel):
                 value is not None
                 for value in (
                     self.company_id,
+                    self.company_ids,
                     self.entity_type,
                     self.email_exists,
                     self.phone_exists,

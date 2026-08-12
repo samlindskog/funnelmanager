@@ -7,6 +7,7 @@ import SearchIcon from '@mui/icons-material/Search'
 import {
   Alert,
   AppBar,
+  Autocomplete,
   Box,
   Button,
   CircularProgress,
@@ -99,7 +100,7 @@ export function SearchPage() {
     name: true,
     title: true,
   })
-  const [simCompanyId, setSimCompanyId] = useState('')
+  const [simCompanyIds, setSimCompanyIds] = useState<string[]>([])
   const [simEmailFilter, setSimEmailFilter] = useState<TriState>('any')
   const [simPhoneFilter, setSimPhoneFilter] = useState<TriState>('any')
   const [simLinkedinFilter, setSimLinkedinFilter] = useState<TriState>('any')
@@ -239,9 +240,9 @@ export function SearchPage() {
   const isSimilaritySource = searchSource === 'similarity'
   const selectedEmbeds = EMBED_KINDS.map((k) => k.value).filter((value) => simEmbeds[value])
   const hasEmbeds = selectedEmbeds.length > 0
-  const simCompanyValue = simCompanyId.trim()
+  const simCompanyValues = simCompanyIds.map((v) => v.trim()).filter(Boolean)
   const hasSimFilter =
-    Boolean(simCompanyValue) ||
+    simCompanyValues.length > 0 ||
     simEmailFilter !== 'any' ||
     simPhoneFilter !== 'any' ||
     simLinkedinFilter !== 'any'
@@ -290,7 +291,7 @@ export function SearchPage() {
         query: hasEmbeds ? passage : '',
         limit,
         embeds: selectedEmbeds,
-        companyId: simCompanyValue,
+        companyIds: simCompanyValues,
         emailExists: triToBool(simEmailFilter),
         phoneExists: triToBool(simPhoneFilter),
         linkedinExists: triToBool(simLinkedinFilter),
@@ -981,14 +982,22 @@ export function SearchPage() {
                         minRows={2}
                         disabled={!hasEmbeds}
                       />
-                      <TextField
-                        label="Company ID"
-                        placeholder="e.g. 5e66b6381e05b4008c8331b8"
-                        value={simCompanyId}
-                        onChange={(e) => setSimCompanyId(e.target.value)}
+                      <Autocomplete
+                        multiple
+                        freeSolo
+                        options={[]}
+                        value={simCompanyIds}
+                        onChange={(_, next) => setSimCompanyIds(next as string[])}
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label="Companies"
+                            placeholder="Paste a company/record ID and press Enter"
+                            helperText="One or more companies (OR) — Apollo organization IDs or record ids from a company’s detail pane. Press Enter after each."
+                            data-testid="similarity-company-id"
+                          />
+                        )}
                         fullWidth
-                        helperText="Apollo organization ID or record id from a company’s detail pane."
-                        data-testid="similarity-company-id"
                       />
                       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
                         {(

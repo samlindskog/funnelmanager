@@ -1371,6 +1371,7 @@ async def apollo_credits(
 def _similarity_filter_label(
     *,
     company_id: str | None,
+    company_ids: list[str] | None = None,
     entity_type: str | None,
     email_exists: bool | None,
     phone_exists: bool | None,
@@ -1380,6 +1381,8 @@ def _similarity_filter_label(
     parts: list[str] = []
     if (company_id or "").strip():
         parts.append(f"company={company_id.strip()}")
+    if company_ids:
+        parts.append(f"companies={len(company_ids)}")
     if entity_type:
         parts.append(f"type={entity_type}")
     for name, flag in (
@@ -1405,6 +1408,7 @@ async def _run_similarity_search(
     actor: str,
     embeds: list[str] | None = None,
     company_id: str | None = None,
+    company_ids: list[str] | None = None,
     entity_type: str | None = None,
     email_exists: bool | None = None,
     phone_exists: bool | None = None,
@@ -1428,6 +1432,7 @@ async def _run_similarity_search(
     here too, as a 400."""
     query = (query or "").strip()
     company_id = (company_id or "").strip() or None
+    company_ids = [v.strip() for v in (company_ids or []) if (v or "").strip()] or None
     effective_embeds = embeds if embeds is not None else ["apollo"]
     if effective_embeds:
         if not query:
@@ -1442,6 +1447,7 @@ async def _run_similarity_search(
             value is not None
             for value in (
                 company_id,
+                company_ids,
                 entity_type,
                 email_exists,
                 phone_exists,
@@ -1460,6 +1466,7 @@ async def _run_similarity_search(
             limit=limit,
             embeds=embeds,
             company_id=company_id,
+            company_ids=company_ids,
             entity_type=entity_type,
             email_exists=email_exists,
             phone_exists=phone_exists,
@@ -1495,6 +1502,7 @@ async def _run_similarity_search(
         history_query = _clip_history_query(
             _similarity_filter_label(
                 company_id=company_id,
+                company_ids=company_ids,
                 entity_type=entity_type,
                 email_exists=email_exists,
                 phone_exists=phone_exists,
@@ -1510,6 +1518,7 @@ async def _run_similarity_search(
         "entity_type": "people",
         "embeds": embeds,
         "company_id": company_id,
+        "company_ids": company_ids,
         "entity_type_filter": entity_type,
         "email_exists": email_exists,
         "phone_exists": phone_exists,
@@ -1587,6 +1596,7 @@ async def similarity_search(
         actor=actor,
         embeds=body.embeds,
         company_id=body.company_id,
+        company_ids=body.company_ids,
         entity_type=body.entity_type,
         email_exists=body.email_exists,
         phone_exists=body.phone_exists,

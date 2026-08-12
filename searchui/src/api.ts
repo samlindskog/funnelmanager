@@ -668,6 +668,8 @@ export type SimilaritySearchParams = {
   embeds: EmbedKind[]
   /** Mongo `_id` of a stored organization doc; filters people by company. */
   companyId?: string
+  /** Multi-company OR filter — each entry an Apollo org id or company record id. */
+  companyIds?: string[]
   /** Tri-state exists filters (true=has, false=missing, undefined=no filter). */
   emailExists?: boolean
   phoneExists?: boolean
@@ -692,6 +694,9 @@ export async function runSimilaritySearch(
   // Map camelCase params to the snake_case leads contract, omitting undefined.
   if (params.companyId != null && params.companyId !== '') {
     body.company_id = params.companyId
+  }
+  if (params.companyIds && params.companyIds.length > 0) {
+    body.company_ids = params.companyIds
   }
   if (params.emailExists !== undefined) body.email_exists = params.emailExists
   if (params.phoneExists !== undefined) body.phone_exists = params.phoneExists
