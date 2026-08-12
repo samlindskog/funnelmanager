@@ -30,29 +30,29 @@ resources:
 # never :latest.
 images:
   - name: ghcr.io/samlindskog/funnelmanager/search
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/leads
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/mail
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/mcp
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/jobs
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/agents
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/frontend
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/mailui
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/agentsui
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/searchui
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/backup
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   - name: ghcr.io/samlindskog/funnelmanager/knowledge
-    newTag: sha-da852193ab5e0c2f568eec3ce718309a32e081f8
+    newTag: sha-f9fcbb41985962a8102187cfa675f7079974dbe6
   # Header-routed frontend canary (Phase 4). Its base uses the canary-logical
   # name `.../frontend-canary`; this entry remaps it to the real `frontend`
   # repo with an INDEPENDENT `canary-<sha>` tag. Kept separate from the stable
