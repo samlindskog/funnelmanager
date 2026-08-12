@@ -33,6 +33,10 @@ _MONGO_ID_MAX = 64
 _APOLLO_ID_MAX = 128
 _SHORT_MAX = 16
 
+# Live-ingest flush pacing (see _upsert_lead_vectors_sync).
+_FLUSH_EVERY_ROWS = 10_000
+_rows_since_flush = 0
+
 # UNIX-nice priority tiers for the Milvus gate: lower runs first. The pymilvus
 # SDK is not reliably concurrent-safe, so every op still serializes through one
 # gate — but waiters wake lowest-nice-first (FIFO within a nice), so an
@@ -334,11 +338,18 @@ def _upsert_lead_vectors_sync(
             [row.embedding for row in rows],
         ]
     )
-    # No per-batch flush: forcing a flush after every upsert seals a tiny segment
-    # per batch, storming minio and queuing compactions that starve the very
-    # indexing that created them (measured 4-5x slowdown during the 2026-08-10
-    # prod migration). Milvus auto-flush handles sealing; similarity search only
-    # needs eventual (~seconds) visibility — results render from Mongo hydration.
+    # Periodic (never per-batch) flush, mirroring scripts/reembed.py's pacing:
+    # per-batch flushing seals a tiny segment per upsert (segment storm, 4-5x
+    # slowdown, 2026-08-10); NEVER flushing lets unsealed growing segments pile
+    # up during sustained bulk ingest until Milvus OOMs — and then OOMs again
+    # replaying their WAL at startup (2026-08-12 Prospect-run outage; mmap only
+    # covers sealed data). ~10k rows is the proven balance. Safe here because
+    # every call is serialized by the MilvusGate.
+    global _rows_since_flush
+    _rows_since_flush += len(rows)
+    if _rows_since_flush >= _FLUSH_EVERY_ROWS:
+        collection.flush()
+        _rows_since_flush = 0
 
 
 async def upsert_lead_vectors(
