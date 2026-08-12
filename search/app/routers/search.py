@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 import orjson
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status, Query
 from fastapi.responses import StreamingResponse
 from fm_runtime import JobStatus, current_principal
 from pydantic import BaseModel, Field
@@ -1603,6 +1603,49 @@ async def similarity_search(
         linkedin_exists=body.linkedin_exists,
     )
     return response
+
+
+@router.get("/companies/recent")
+async def recent_companies(
+    limit: int = Query(default=25, ge=1, le=100),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """Recently ingested/updated companies (slim) — feeds the company-filter picker."""
+    client = LeadsClient(settings, token)
+    leads = await client.recent_leads(entity_type="organization", limit=limit)
+    out: list[dict[str, Any]] = []
+    for lead in leads:
+        record = lead_to_record(lead)
+        if not record:
+            continue
+        out.append(
+            {
+                "mongo_id": record.get("mongo_id"),
+                "apollo_id": lead.get("apollo_id"),
+                "name": record.get("name"),
+            }
+        )
+    return out
+
+
+@router.get("/companies/resolve")
+async def resolve_company(
+    value: str = Query(min_length=1),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    _: UserOut = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Resolve a company record id or Apollo org id to {mongo_id, apollo_id, name}."""
+    client = LeadsClient(settings, token)
+    lead = await client.resolve_organization_value(value)
+    record = lead_to_record(lead) or {}
+    return {
+        "mongo_id": record.get("mongo_id"),
+        "apollo_id": lead.get("apollo_id"),
+        "name": record.get("name"),
+    }
 
 
 @router.get("/leads/{mongo_id}")

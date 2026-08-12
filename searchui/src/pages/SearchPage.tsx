@@ -10,6 +10,7 @@ import {
   Autocomplete,
   Box,
   Button,
+  Chip,
   CircularProgress,
   Divider,
   FormControl,
@@ -38,9 +39,12 @@ import {
   getApolloCredits,
   getSearch,
   listHistoryOwners,
+  listRecentCompanies,
   listSearches,
+  resolveCompany,
   runSearch,
   runSimilaritySearch,
+  type CompanyOption,
   type EmbedKind,
   type RunSearchParams,
 } from '../api'
@@ -100,7 +104,10 @@ export function SearchPage() {
     name: true,
     title: true,
   })
-  const [simCompanyIds, setSimCompanyIds] = useState<string[]>([])
+  const [simCompanies, setSimCompanies] = useState<CompanyOption[]>([])
+  const [companyOptions, setCompanyOptions] = useState<CompanyOption[]>([])
+  const [companyResolveError, setCompanyResolveError] = useState<string | null>(null)
+  const [resolvingCompany, setResolvingCompany] = useState(false)
   const [simEmailFilter, setSimEmailFilter] = useState<TriState>('any')
   const [simPhoneFilter, setSimPhoneFilter] = useState<TriState>('any')
   const [simLinkedinFilter, setSimLinkedinFilter] = useState<TriState>('any')
@@ -151,6 +158,51 @@ export function SearchPage() {
   // the stream callbacks (onFirstPage/onComplete) that captured it at
   // search-start still fetch the *currently* selected owner. The seq guard
   // drops out-of-order responses from rapid owner switches.
+  // Recent-companies dropdown for the similarity company filter: loaded when
+  // similarity mode opens; verbatim ids typed by the user resolve via the
+  // backend so every chip can show the company NAME.
+  const isSimilarityMode = searchSource === 'similarity'
+  useEffect(() => {
+    if (!isSimilarityMode) return
+    let cancelled = false
+    void listRecentCompanies(25)
+      .then((options) => {
+        if (!cancelled) setCompanyOptions(options.filter((o) => o.mongo_id && o.name))
+      })
+      .catch(() => {
+        // The dropdown is a convenience; verbatim ids still work without it.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isSimilarityMode])
+
+  const addCompanyValue = useCallback(
+    async (raw: string) => {
+      const value = raw.trim()
+      if (!value) return
+      setCompanyResolveError(null)
+      const already = (c: CompanyOption) => c.mongo_id === value || c.apollo_id === value
+      setResolvingCompany(true)
+      try {
+        const known = companyOptions.find(already)
+        const resolved = known ?? (await resolveCompany(value))
+        setSimCompanies((current) =>
+          current.some(
+            (c) => c.mongo_id === resolved.mongo_id && c.apollo_id === resolved.apollo_id,
+          )
+            ? current
+            : [...current, resolved],
+        )
+      } catch {
+        setCompanyResolveError(`No company found for “${value}”`)
+      } finally {
+        setResolvingCompany(false)
+      }
+    },
+    [companyOptions],
+  )
+
   const refreshHistory = useCallback(async () => {
     const seq = ++historyRequestSeqRef.current
     const items = await listSearches(selectedOwnerRef.current || undefined)
@@ -240,7 +292,9 @@ export function SearchPage() {
   const isSimilaritySource = searchSource === 'similarity'
   const selectedEmbeds = EMBED_KINDS.map((k) => k.value).filter((value) => simEmbeds[value])
   const hasEmbeds = selectedEmbeds.length > 0
-  const simCompanyValues = simCompanyIds.map((v) => v.trim()).filter(Boolean)
+  const simCompanyValues = simCompanies
+    .map((c) => (c.mongo_id || c.apollo_id || '').trim())
+    .filter(Boolean)
   const hasSimFilter =
     simCompanyValues.length > 0 ||
     simEmailFilter !== 'any' ||
@@ -985,15 +1039,61 @@ export function SearchPage() {
                       <Autocomplete
                         multiple
                         freeSolo
-                        options={[]}
-                        value={simCompanyIds}
-                        onChange={(_, next) => setSimCompanyIds(next as string[])}
+                        options={companyOptions}
+                        value={simCompanies}
+                        filterSelectedOptions
+                        getOptionLabel={(option) =>
+                          typeof option === 'string' ? option : option.name || option.mongo_id || ''
+                        }
+                        isOptionEqualToValue={(option, value) =>
+                          typeof option === 'string' || typeof value === 'string'
+                            ? option === value
+                            : option.mongo_id === value.mongo_id &&
+                              option.apollo_id === value.apollo_id
+                        }
+                        onChange={(_, next) => {
+                          // Strings arrive from freeSolo Enter presses — resolve them to
+                          // named options; objects come from the dropdown.
+                          const objects = next.filter(
+                            (item): item is CompanyOption => typeof item !== 'string',
+                          )
+                          setSimCompanies(objects)
+                          for (const item of next) {
+                            if (typeof item === 'string') void addCompanyValue(item)
+                          }
+                        }}
+                        renderValue={(tagValue, getItemProps) =>
+                          tagValue.map((option, index) => {
+                            const { key, ...tagProps } = getItemProps({ index })
+                            const label =
+                              typeof option === 'string'
+                                ? option
+                                : option.name || option.mongo_id || option.apollo_id
+                            return (
+                              <Chip
+                                key={key}
+                                {...tagProps}
+                                label={label}
+                                size="small"
+                                data-testid="similarity-company-chip"
+                                sx={{
+                                  '& .MuiChip-deleteIcon': { opacity: 0, transition: 'opacity 120ms' },
+                                  '&:hover .MuiChip-deleteIcon': { opacity: 1 },
+                                }}
+                              />
+                            )
+                          })
+                        }
                         renderInput={(params) => (
                           <TextField
                             {...params}
                             label="Companies"
-                            placeholder="Paste a company/record ID and press Enter"
-                            helperText="One or more companies (OR) — Apollo organization IDs or record ids from a company’s detail pane. Press Enter after each."
+                            placeholder={resolvingCompany ? 'Resolving…' : 'Pick a recent company or paste an ID and press Enter'}
+                            helperText={
+                              companyResolveError ??
+                              'One or more companies (OR) — pick from recent companies, or paste a record id / Apollo organization ID.'
+                            }
+                            error={Boolean(companyResolveError)}
                             data-testid="similarity-company-id"
                           />
                         )}

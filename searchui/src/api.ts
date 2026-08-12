@@ -683,6 +683,22 @@ export type SimilaritySearchResponse = {
   history: SearchHistoryDetail
 }
 
+export interface CompanyOption {
+  mongo_id: string | null
+  apollo_id: string | null
+  name: string | null
+}
+
+/** Recently ingested/updated companies — feeds the company-filter picker. */
+export async function listRecentCompanies(limit = 25): Promise<CompanyOption[]> {
+  return request<CompanyOption[]>(`/api/search/companies/recent?limit=${limit}`)
+}
+
+/** Resolve a company record id or Apollo org id to a named option (404 if unknown). */
+export async function resolveCompany(value: string): Promise<CompanyOption> {
+  return request<CompanyOption>(`/api/search/companies/resolve?value=${encodeURIComponent(value)}`)
+}
+
 export async function runSimilaritySearch(
   params: SimilaritySearchParams,
 ): Promise<SimilaritySearchResponse> {
