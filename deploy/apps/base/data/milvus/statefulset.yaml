@@ -79,7 +79,9 @@ spec:
               # the boot-time load past 6Gi -> OOM crashloop; 2560Mi and 4Gi OOMed
               # earlier at smaller sizes). 8Gi; the durable fix when this outgrows
               # again is queryNode mmap (load via page cache, not RAM).
-              memory: 8192Mi
+              # 8Gi OOMed on startup WAL-replay of unsealed growing segments after a
+              # bulk Prospect ingest (2026-08-12) — mmap covers sealed data only.
+              memory: 10240Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
