@@ -807,6 +807,16 @@ class LeadsClient:
             finally:
                 await response.aclose()
 
+    async def exists_by_mongo_ids(self, mongo_ids: list[str]) -> set[str]:
+        """Which of these Mongo `_id`s exist in leads (no hydration)."""
+        present: set[str] = set()
+        for start in range(0, len(mongo_ids), 50000):
+            chunk = mongo_ids[start : start + 50000]
+            data = await self._request("POST", "/api/leads/exists", json_body={"ids": chunk})
+            for value in data.get("present", []) if isinstance(data, dict) else []:
+                present.add(str(value))
+        return present
+
     async def recent_leads(
         self,
         *,

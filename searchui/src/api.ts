@@ -683,6 +683,37 @@ export type SimilaritySearchResponse = {
   history: SearchHistoryDetail
 }
 
+/** Download the FULL stored result list of a search as CSV (server-streamed). */
+export async function downloadSearchCsv(searchId: number): Promise<void> {
+  const headers = new Headers()
+  headers.set('Authorization', `Bearer ${await bearerToken()}`)
+  const response = await fetch(`/api/search/searches/${searchId}/export.csv`, { headers })
+  if (!response.ok) throw new Error(`Export failed (${response.status})`)
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  try {
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `search-${searchId}-all.csv`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+/** Create a search from lead Mongo _ids (CSV re-import flow). */
+export async function importSearchFromIds(
+  ids: string[],
+  label?: string,
+): Promise<SimilaritySearchResponse> {
+  return request<SimilaritySearchResponse>('/api/search/searches/import', {
+    method: 'POST',
+    body: JSON.stringify({ ids, label }),
+  })
+}
+
 export interface CompanyOption {
   mongo_id: string | null
   apollo_id: string | null

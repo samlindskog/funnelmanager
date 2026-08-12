@@ -39,6 +39,7 @@ import {
   getApolloCredits,
   getSearch,
   listHistoryOwners,
+  importSearchFromIds,
   listRecentCompanies,
   listSearches,
   resolveCompany,
@@ -83,6 +84,45 @@ const EMBED_KINDS: Array<{ value: EmbedKind; label: string }> = [
 /** Tri-state select value → the leads exists-filter boolean (Any omits). */
 function triToBool(state: TriState): boolean | undefined {
   return state === 'has' ? true : state === 'missing' ? false : undefined
+}
+
+/** Minimal quote-aware CSV parser (handles quoted commas/newlines/escaped quotes). */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          cell += '"'
+          i++
+        } else {
+          quoted = false
+        }
+      } else {
+        cell += ch
+      }
+    } else if (ch === '"') {
+      quoted = true
+    } else if (ch === ',') {
+      row.push(cell)
+      cell = ''
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++
+      row.push(cell)
+      cell = ''
+      if (row.some((value) => value !== '')) rows.push(row)
+      row = []
+    } else {
+      cell += ch
+    }
+  }
+  row.push(cell)
+  if (row.some((value) => value !== '')) rows.push(row)
+  return rows
 }
 
 export function SearchPage() {
@@ -661,6 +701,44 @@ export function SearchPage() {
   )
 
   const ingestPercent = progress.ingest.visible ? progress.ingest.percent : null
+  // CSV re-import: parse a quote-aware CSV, take the mongo_id column, and
+  // create a search from those ids (export -> external triage -> re-import).
+  const [importing, setImporting] = useState(false)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+
+  const handleImportFile = useCallback(
+    async (file: File) => {
+      setImporting(true)
+      setError(null)
+      try {
+        const text = await file.text()
+        const rows = parseCsv(text)
+        if (!rows.length) throw new Error('Empty CSV')
+        const header = rows[0].map((cell) => cell.trim().toLowerCase())
+        const idColumn = header.indexOf('mongo_id')
+        if (idColumn === -1) throw new Error('CSV needs a mongo_id column')
+        const ids = rows
+          .slice(1)
+          .map((row) => (row[idColumn] || '').trim())
+          .filter((value) => value && value !== 'null')
+        if (!ids.length) throw new Error('No mongo_id values found in the CSV')
+        const response = await importSearchFromIds(ids, file.name.replace(/\.csv$/i, ''))
+        showResults(response.history)
+        await refreshHistory()
+        const dropped = ids.length - (response.history.total_results ?? 0)
+        if (dropped > 0) {
+          setError(`${dropped} id(s) did not match stored leads and were dropped.`)
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'CSV import failed')
+      } finally {
+        setImporting(false)
+        if (importInputRef.current) importInputRef.current.value = ''
+      }
+    },
+    [refreshHistory, showResults],
+  )
+
   const searchingLabel =
     searching && ingestPercent != null
       ? `Fetching ${ingestPercent}%`
@@ -1249,6 +1327,26 @@ export function SearchPage() {
                       sx={{ px: 3 }}
                     >
                       {searchingLabel}
+                    </Button>
+                    <Button
+                      data-testid="search-import-csv"
+                      variant="outlined"
+                      size="large"
+                      component="label"
+                      disabled={importing}
+                      startIcon={importing ? <CircularProgress size={18} /> : undefined}
+                    >
+                      Import CSV
+                      <input
+                        ref={importInputRef}
+                        hidden
+                        type="file"
+                        accept=".csv,text/csv"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0]
+                          if (file) void handleImportFile(file)
+                        }}
+                      />
                     </Button>
                   </Stack>
                 </Stack>

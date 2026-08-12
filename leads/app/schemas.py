@@ -75,6 +75,12 @@ class BatchMongoIdsRequest(BaseModel):
     fields: Literal["full", "display"] = "full"
 
 
+class BatchExistsRequest(BaseModel):
+    """Existence check for Mongo `_id`s (cheap projection; no hydration)."""
+
+    ids: list[str] = Field(default_factory=list, min_length=1, max_length=200000)
+
+
 class SearchIdsOut(BaseModel):
     """People/org search result: page ids and/or stream job handles.
 

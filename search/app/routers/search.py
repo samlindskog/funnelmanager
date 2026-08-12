@@ -34,6 +34,7 @@ from app.leads_client import (
 )
 from app.models import SearchHistory, SearchResult
 from app.schemas import (
+    ImportSearchRequest,
     CompanyPeopleSearchRequest,
     HistoryOwnerOut,
     SearchHistoryDetail,
@@ -224,7 +225,7 @@ def _resolved_record_email(record: dict[str, Any]) -> str | None:
     return _email_from_value(data.get("email")) or _email_from_value(data.get("emails"))
 
 
-_CSV_HEADER = ["name", "email", "phone", "company", "title"]
+_CSV_HEADER = ["mongo_id", "name", "email", "linkedin", "phone", "company", "title"]
 
 
 def _clean_str(value: Any) -> str | None:
@@ -328,10 +329,14 @@ async def _iter_search_csv(client: LeadsClient, mongo_ids: list[str]) -> AsyncIt
                 phone = _resolved_record_phone(record) or "null"
                 company = _record_company(record) or "null"
                 title = _record_title(record) or "null"
+                mongo_id = str(record.get("mongo_id") or "").strip() or "null"
+                linkedin = str(record.get("linkedin_url") or "").strip() or "null"
                 writer.writerow(
                     [
+                        _csv_cell(mongo_id),
                         _csv_cell(name),
                         _csv_cell(email),
+                        _csv_cell(linkedin),
                         _csv_cell(phone),
                         _csv_cell(company),
                         _csv_cell(title),
@@ -1322,6 +1327,81 @@ async def cancel_stream_job(
         raise HTTPException(status_code=400, detail="stream_id is required")
     client = LeadsClient(settings, token=token)
     return await client.cancel_stream(cleaned)
+
+
+@router.post("/searches/import", response_model=SimilaritySearchResponse)
+async def import_search_from_ids(
+    body: ImportSearchRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    token: str = Depends(oauth2_scheme),
+    user: UserOut = Depends(get_current_user),
+) -> SimilaritySearchResponse:
+    """Create a search from a caller-supplied list of lead Mongo `_id`s.
+
+    Backs CSV re-import (export -> external triage -> re-import to enrich).
+    Ids are validated against leads (unknown ones dropped and counted); order
+    is preserved; page 1 is cached like any other search.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in body.ids:
+        raw = (value or "").strip()
+        if raw and raw not in seen:
+            seen.add(raw)
+            ordered.append(raw)
+    client = LeadsClient(settings, token)
+    present = await client.exists_by_mongo_ids(ordered)
+    valid = [mongo_id for mongo_id in ordered if mongo_id in present]
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="None of the supplied ids match stored leads",
+        )
+    page_records = await _hydrate_results(client, valid[:_UI_PER_PAGE])
+    origin, actor = _principal_attribution()
+    label = (body.label or "").strip() or f"import: {len(valid)} leads"
+    row = SearchHistory(
+        username=user.username,
+        origin=origin,
+        actor=actor,
+        query=_clip_history_query(label),
+        entity_type="people",
+        page=1,
+        per_page=_UI_PER_PAGE,
+        total_results=len(valid),
+        results_json=orjson.dumps(page_records, default=str).decode(),
+        search_params_json=orjson.dumps(
+            {
+                "source": "csv_import",
+                "requested": len(ordered),
+                "valid": len(valid),
+                "dropped": len(ordered) - len(valid),
+            }
+        ).decode(),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    await _append_unique_mongo_ids(
+        db, search=row, mongo_ids=valid, seen=set(), next_position=0
+    )
+    await db.commit()
+    await db.refresh(row)
+    await publish_job(
+        job_id=f"imp-{row.id}",
+        job_type="import_search",
+        ctx=JobContext(user=user.username, origin=origin, actor=actor, search_id=row.id),
+        status=JobStatus.COMPLETED,
+        progress=1.0,
+        exit_status="ok",
+        meta={"kind": "csv_import", "total": len(valid)},
+    )
+    return SimilaritySearchResponse(
+        query=label,
+        results=[],
+        history=_to_detail(row, page_records),
+    )
 
 
 @router.get("/searches/{search_id}/export.csv")

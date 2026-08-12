@@ -40,6 +40,7 @@ import {
   type ReactNode,
 } from 'react'
 import {
+  downloadSearchCsv,
   enrichPeopleStream,
   getPersonLead,
   matchPeopleStream,
@@ -231,7 +232,7 @@ function csvEscape(value: string): string {
 }
 
 function downloadSelectedRecordsCsv(records: ApolloRecord[], filename: string): void {
-  const lines = ['name,email,linkedin,phone,company,title']
+  const lines = ['mongo_id,name,email,linkedin,phone,company,title']
   for (const record of records) {
     const name = (record.name || '').trim() || 'null'
     const email = resolvedRecordEmail(record) || 'null'
@@ -239,8 +240,9 @@ function downloadSelectedRecordsCsv(records: ApolloRecord[], filename: string): 
     const phone = resolvedRecordPhone(record) || 'null'
     const company = recordCompany(record) || 'null'
     const title = recordTitle(record) || 'null'
+    const mongoId = (record.mongo_id || '').trim() || 'null'
     lines.push(
-      [name, email, linkedin, phone, company, title].map(csvEscape).join(','),
+      [mongoId, name, email, linkedin, phone, company, title].map(csvEscape).join(','),
     )
   }
   const blob = new Blob([`${lines.join('\n')}\n`], { type: 'text/csv;charset=utf-8' })
@@ -502,21 +504,21 @@ const ResultsListPane = memo(function ResultsListPane({
     return getSelectedRecords().filter(isSelectablePerson)
   }, [getSelectedRecords])
 
-  const handleExportCsv = useCallback(() => {
+  const handleExportCsv = useCallback(async () => {
     if (exporting) return
     const selected = getSelectedRecords()
-    if (!selected.length) {
-      setActionMessage({
-        severity: 'info',
-        text: 'Select one or more results to export.',
-      })
-      return
-    }
     setExporting(true)
     setActionMessage(null)
     try {
-      const filename = searchId != null ? `search-${searchId}-selected.csv` : 'search-selected.csv'
-      downloadSelectedRecordsCsv(selected, filename)
+      if (selected.length) {
+        const filename = searchId != null ? `search-${searchId}-selected.csv` : 'search-selected.csv'
+        downloadSelectedRecordsCsv(selected, filename)
+      } else if (searchId != null) {
+        // No selection: server-streamed export of the ENTIRE stored list.
+        await downloadSearchCsv(searchId)
+      } else {
+        setActionMessage({ severity: 'info', text: 'Nothing to export.' })
+      }
     } catch (err) {
       setActionMessage({
         severity: 'error',
