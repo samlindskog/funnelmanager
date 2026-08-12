@@ -16,10 +16,14 @@ The only missing piece is an orchestrator that sequences them with progress — 
 client-side state machine. Server-side orchestration (jobs/agents) is deliberately
 NOT needed for v1; noted as the upgrade path.
 
-## The page: "Prospect" view in searchui
+## The page: "Workflows" view in searchui (Prospect = the first workflow)
 
-searchui is routerless (view-state based). Add a third top-level view alongside
-search/results — `mainView: 'prospect'` — reachable from a nav button. Layout is a
+searchui is routerless (view-state based). Add a top-level **Workflows** view
+alongside search/results (`mainView: 'workflows'`), reachable from an app-bar nav
+button. It renders a small landing grid of available workflows — one card today:
+**Prospect** ("domains → people ingest → semantic search"), with room for future
+workflows (campaign build, refresh runs) as more cards. Selecting Prospect opens
+its runner; a back affordance returns to the landing grid. The runner is a
 3-stage vertical stepper, each stage reusing existing pieces:
 
 ### Stage 1 — Domains in
@@ -88,9 +92,10 @@ orchestrator hook (`useProspectRun`):
 1. Extract `SimilarityForm` from SearchPage (shared, props-driven). ~1 move.
 2. `useProspectRun` hook: state machine (idle→resolving→confirm→ingesting→done),
    bounded-concurrency queue, localStorage checkpoint, per-row status.
-3. `ProspectPage` view: paste box + CSV input, status table, confirm panel,
+3. `WorkflowsPage` view: landing card grid (Prospect card) + the Prospect runner:
+   paste box + CSV input, status table, confirm panel,
    `SimilarityForm` + chips, wired to `showResults`/history refresh.
-4. Nav affordance in the app bar (Search | Prospect) + testids for drive-canary.
+4. Nav affordance in the app bar (Search | Workflows) + testids for drive-canary.
 5. Verify (dev): 5-domain run incl. one bogus domain, one already-ingested
    company (skip path), tab-refresh mid-run (resume), then stage-3 search +
    enrich round-trip. `npm run build`/`lint`.
