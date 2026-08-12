@@ -279,6 +279,13 @@ def _validate_similarity_request(model: Any) -> Any:
     return model
 
 
+class ImportSearchRequest(BaseModel):
+    """Create a search from lead Mongo `_id`s (CSV re-import flow)."""
+
+    ids: list[str] = Field(min_length=1, max_length=200000)
+    label: str | None = Field(default=None, max_length=200)
+
+
 class SimilaritySearchRequest(BaseModel):
     """Similarity search request (v2, additive over v1).
 

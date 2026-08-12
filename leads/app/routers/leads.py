@@ -48,6 +48,7 @@ from app.milvus_client import (
     search_similar,
 )
 from app.schemas import (
+    BatchExistsRequest,
     ApolloEndpointResponseOut,
     ApolloEnrichedFlags,
     ApolloParamsBody,
@@ -1632,6 +1633,34 @@ async def _handle_people_match(
         embedding_stream_id=None,
         ids=[lead.id],
     )
+
+
+@router.post("/exists")
+async def leads_exist(
+    body: BatchExistsRequest,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Return which of the given Mongo `_id`s exist (projection-only, no payloads).
+
+    Backs CSV re-import: validating 100k ids must not hydrate 100k docs.
+    """
+    present: list[str] = []
+    seen: set[str] = set()
+    valid: list[ObjectId] = []
+    for value in body.ids:
+        raw = (value or "").strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        try:
+            valid.append(ObjectId(raw))
+        except Exception:
+            continue
+    for start in range(0, len(valid), 10000):
+        chunk = valid[start : start + 10000]
+        async for doc in db.leads.find({"_id": {"$in": chunk}}, {"_id": 1}):
+            present.append(str(doc["_id"]))
+    return {"present": present}
 
 
 @router.get("/organizations/resolve", response_model=LeadOut)
