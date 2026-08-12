@@ -27,5 +27,6 @@ spec:
     # pods running far above their request were first-in-line for eviction
     # under node pressure, which for mongo/milvus would be an incident.
     requests.memory: 12Gi
-    limits.memory: 26Gi
+    # 26->28Gi with milvus at 10Gi (2026-08-12).
+    limits.memory: 28Gi
     pods: "60"
