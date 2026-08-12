@@ -34,6 +34,7 @@ from app.apollo_endpoints import (
     ORG_BY_ID,
     ORG_ENRICH,
     ORG_SEARCH,
+    ORG_SEARCH_LEGACY,
     PERSON_BY_ID,
     PERSON_MATCH,
     PERSON_SEARCH,
@@ -43,7 +44,7 @@ from app.apollo_endpoints import (
 
 # Same precedence chains as app/embeddings.py (highest first).
 _PERSON_PRIORITY = (PERSON_MATCH, PERSON_BY_ID, PERSON_SEARCH)
-_ORG_PRIORITY = (ORG_BY_ID, ORG_ENRICH, ORG_SEARCH)
+_ORG_PRIORITY = (ORG_BY_ID, ORG_ENRICH, ORG_SEARCH, ORG_SEARCH_LEGACY)
 
 # Apollo returns this local-part when a contact's email is locked / not revealed.
 # Treat it as absent (mirrors search's contact-signal handling, re-implemented here

@@ -10,12 +10,17 @@ PERSON_SEARCH = "/api/v1/mixed_people/api_search"
 PERSON_BY_ID = "/api/v1/people/{id}"
 PERSON_MATCH = "/api/v1/people/match"
 
-ORG_SEARCH = "/api/v1/mixed_companies/search"
+# api_search = Apollo's free teaser variant (same switch people search already
+# uses); the plain /search variant consumes credits per returned record — a bulk
+# Prospect run burned ~100k company-records' credits on it (2026-08-12).
+ORG_SEARCH = "/api/v1/mixed_companies/api_search"
+# Legacy key: docs written before the api_search switch store this endpoint key.
+ORG_SEARCH_LEGACY = "/api/v1/mixed_companies/search"
 ORG_BY_ID = "/api/v1/organizations/{id}"
 ORG_ENRICH = "/api/v1/organizations/enrich"
 
 PERSON_DISPLAY_PRIORITY = (PERSON_MATCH, PERSON_BY_ID, PERSON_SEARCH)
-ORG_DISPLAY_PRIORITY = (ORG_BY_ID, ORG_ENRICH, ORG_SEARCH)
+ORG_DISPLAY_PRIORITY = (ORG_BY_ID, ORG_ENRICH, ORG_SEARCH, ORG_SEARCH_LEGACY)
 
 EMPTY_ENRICHED_FLAGS: dict[str, bool] = {
     "linkedin": False,
@@ -28,13 +33,15 @@ _LEGACY_ENDPOINT_KEYS: dict[str, str] = {
     "mixed_people/api_search": PERSON_SEARCH,
     "people/{id}": PERSON_BY_ID,
     "people/match": PERSON_MATCH,
-    "mixed_companies/search": ORG_SEARCH,
+    "mixed_companies/search": ORG_SEARCH_LEGACY,
+    "mixed_companies/api_search": ORG_SEARCH,
     "organizations/{id}": ORG_BY_ID,
     "organizations/enrich": ORG_ENRICH,
     "api/v1/mixed_people/api_search": PERSON_SEARCH,
     "api/v1/people/{id}": PERSON_BY_ID,
     "api/v1/people/match": PERSON_MATCH,
-    "api/v1/mixed_companies/search": ORG_SEARCH,
+    "api/v1/mixed_companies/search": ORG_SEARCH_LEGACY,
+    "api/v1/mixed_companies/api_search": ORG_SEARCH,
     "api/v1/organizations/{id}": ORG_BY_ID,
     "api/v1/organizations/enrich": ORG_ENRICH,
 }
