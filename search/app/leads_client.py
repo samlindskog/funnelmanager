@@ -807,6 +807,25 @@ class LeadsClient:
             finally:
                 await response.aclose()
 
+    async def recent_leads(
+        self,
+        *,
+        entity_type: str | None = None,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        """Most recently updated leads (GET /api/leads/recent passthrough)."""
+        params: dict[str, Any] = {"limit": limit}
+        if entity_type:
+            params["entity_type"] = entity_type
+        data = await self._request("GET", "/api/leads/recent", params=params)
+        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+    async def resolve_organization_value(self, value: str) -> dict[str, Any]:
+        """Resolve a company record Mongo _id OR Apollo org id to the stored org lead."""
+        return await self._request(
+            "GET", "/api/leads/organizations/resolve", params={"value": value}
+        )
+
     async def get_by_mongo_ids(
         self,
         mongo_ids: list[str],

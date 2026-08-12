@@ -1634,6 +1634,40 @@ async def _handle_people_match(
     )
 
 
+@router.get("/organizations/resolve", response_model=LeadOut)
+async def resolve_organization_lead(
+    value: str = Query(min_length=1, description="Company record Mongo _id or Apollo org id"),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> LeadOut:
+    """Resolve either company id space to the stored organization lead (display shape).
+
+    Backs the search UI's company-filter chips: typing a verbatim id resolves to
+    the org doc so the chip can show the company NAME. Mongo-only (never Apollo).
+    """
+    org_doc: dict[str, Any] | None = None
+    try:
+        oid = ObjectId(value.strip())
+    except Exception:
+        oid = None
+    if oid is not None:
+        candidate = await db.leads.find_one({"_id": oid})
+        if candidate and (candidate.get("entity_type") or "person") == "organization":
+            org_doc = candidate
+    if org_doc is None:
+        org_doc = await db.leads.find_one(
+            {"apollo_id": value.strip(), "entity_type": "organization"}
+        )
+    if org_doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No organization lead found for {value} "
+                "(accepts a company record's Mongo id or Apollo organization id)"
+            ),
+        )
+    return _serialize_lead(org_doc, "display")
+
+
 @router.get("/apollo/{apollo_path:path}")
 async def apollo_proxy_get(
     apollo_path: str,
