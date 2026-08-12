@@ -847,6 +847,19 @@ async def _fetch_organizations_search_page(
     database = db if db is not None else get_db()
     client = ApolloLeadsClient(settings)
     apollo_raw = await client.search_organizations(page_params)
+    # Every mixed_companies/search CALL costs 1 Apollo export credit, and an
+    # exact-domain resolve fuzzy-matches ~10 pages of irrelevant orgs (a
+    # 100-domain Prospect run burned ~1000 credits, 2026-08-12). A
+    # domain-filtered query's match is on page 1 — stop the stream walk there.
+    if page_params.get("q_organization_domains_list[]") or page_params.get(
+        "q_organization_domains_list"
+    ):
+        for key in ("total_pages", "pagination"):
+            apollo_raw.pop(key, None)
+        apollo_raw["total_pages"] = 1
+        pagination = apollo_raw.get("pagination")
+        if isinstance(pagination, dict):
+            pagination["total_pages"] = 1
     organizations = [
         item
         for item in _combined_result_arrays(apollo_raw, "organizations", "accounts")
