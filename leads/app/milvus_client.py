@@ -240,6 +240,11 @@ def ensure_collection(settings: Settings | None = None) -> Collection:
             "index_type": "IVF_FLAT",
             "metric_type": "COSINE",
             "params": {"nlist": 128},
+            # Index-level mmap: IVF_FLAT keeps full vectors in the index, so
+            # collection-level mmap alone leaves ~GBs anonymous-RAM-resident.
+            # Applied live 2026-08-13 (working set 7.8Gi -> 1.0Gi); set here so
+            # rebuilds inherit it.
+            "mmap.enabled": "true",
         },
     )
     # mmap the collection: sealed data loads via the page cache instead of
