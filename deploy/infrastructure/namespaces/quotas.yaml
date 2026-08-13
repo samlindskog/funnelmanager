@@ -28,5 +28,10 @@ spec:
     # under node pressure, which for mongo/milvus would be an incident.
     requests.memory: 12Gi
     # 26->28Gi with milvus at 10Gi (2026-08-12).
-    limits.memory: 28Gi
+    # 28->30Gi with milvus at 12Gi (2026-08-13): 10Gi could not fully load the
+    # ~1.15M-vector leads_embeds_v2 (querycoord watermark keys off the container
+    # limit; stuck at 85%). +2Gi mirrors the milvus 10->12Gi delta and preserves
+    # the prior headroom. requests.memory (the real reservation) is unchanged and
+    # stays within worker-allocatable; this is the burstable ceiling only.
+    limits.memory: 30Gi
     pods: "60"
