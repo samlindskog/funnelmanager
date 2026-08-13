@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/part-of: funnelmanager
 spec:
   serviceName: milvus
-  replicas: 1
+  replicas: 0  # TEMP parked 2026-08-13 (operator-approved) — see leads MILVUS_URI note
   selector:
     matchLabels:
       app.kubernetes.io/name: milvus

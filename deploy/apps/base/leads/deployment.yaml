@@ -109,7 +109,11 @@ spec:
             - name: MONGODB_DB
               value: funnelmanager_leads
             - name: MILVUS_URI
-              value: http://milvus:19530
+              # TEMP (2026-08-13, operator-approved): milvus parked (replicas 0)
+              # — worker1 cannot hold the grown corpus; startup fails fast to
+              # degraded mode (ingest works, similarity 503s) until the worker2
+              # migration.
+              value: http://milvus-parked.invalid:19530
             - name: MILVUS_COLLECTION
               value: leads_embeds_v2
             - name: OPENAI_EMBEDDING_MODEL
