@@ -428,6 +428,21 @@ def _ndjson_line(payload: dict[str, Any]) -> str:
     return orjson.dumps(payload, default=str).decode() + "\n"
 
 
+def _embedding_counts(event: dict[str, Any]) -> dict[str, int]:
+    """Leads' additive per-chunk index tallies (``indexed``/``failed``), when present.
+
+    Emitted on embedding ``progress``/``complete``/``item_error`` by semantic-search
+    v2 leads. Absent on legacy leads — omit rather than fabricate a misleading zero.
+    Under v2, embedding ``complete.total`` is the *attempted* total, so ``done`` can
+    legitimately end below ``total`` when ``failed > 0`` (never fixed up here)."""
+    out: dict[str, int] = {}
+    for key in ("indexed", "failed"):
+        value = event.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = int(value)
+    return out
+
+
 async def _apollo_params_for_stream(
     client: LeadsClient,
     *,
@@ -581,13 +596,14 @@ async def _ingest_leads_via_stream(
             if event_type == "progress":
                 done = int(event.get("done") or 0)
                 total = int(event.get("total") or 0)
+                counts = _embedding_counts(event)
                 await publish_job(
                     job_id=embedding_stream_id or "",
                     job_type=JOB_TYPE_EMBEDDING,
                     ctx=job_ctx,
                     status=JobStatus.RUNNING,
                     progress=job_progress_fraction(done, total),
-                    meta={"kind": "embedding", "done": done, "total": total},
+                    meta={"kind": "embedding", "done": done, "total": total, **counts},
                 )
                 yield {
                     "type": "embedding_progress",
@@ -595,10 +611,16 @@ async def _ingest_leads_via_stream(
                     "done": done,
                     "total": total,
                     "embedding_stream_id": embedding_stream_id,
+                    **counts,
                 }
             elif event_type == "complete":
                 embedding_done = True
                 total = int(event.get("total") or 0)
+                # v2: total is the ATTEMPTED total and ``done`` is real indexed
+                # progress — a below-100% end is legitimate when failed>0. Relay
+                # ``done`` verbatim; do NOT fix it up to ``total``.
+                done = int(event.get("done") or 0)
+                counts = _embedding_counts(event)
                 await publish_job(
                     job_id=embedding_stream_id or "",
                     job_type=JOB_TYPE_EMBEDDING,
@@ -606,16 +628,36 @@ async def _ingest_leads_via_stream(
                     status=JobStatus.COMPLETED,
                     progress=1.0,
                     exit_status="ok",
-                    meta={"kind": "embedding", "total": total},
+                    meta={"kind": "embedding", "done": done, "total": total, **counts},
                 )
                 yield {
                     "type": "embedding_progress",
                     "kind": "embedding",
-                    "done": int(event.get("done") or event.get("total") or 0),
+                    "done": done,
                     "total": total,
                     "complete": True,
                     "embedding_stream_id": embedding_stream_id,
+                    **counts,
                 }
+            elif event_type == "item_error":
+                # Non-terminal per-chunk embedding failure — a ``complete`` still
+                # follows, so do NOT set embedding_done. Mirror the enrich-path
+                # item_error convention (P8 event vocabulary).
+                item: dict[str, Any] = {
+                    "type": "item_error",
+                    "kind": "embedding",
+                    "detail": str(event.get("detail") or "Embedding failed"),
+                    "done": int(event.get("done") or 0),
+                    "total": int(event.get("total") or 0),
+                    "embedding_stream_id": embedding_stream_id,
+                    **_embedding_counts(event),
+                }
+                failed_in_chunk = event.get("failed_in_chunk")
+                if isinstance(failed_in_chunk, (int, float)) and not isinstance(
+                    failed_in_chunk, bool
+                ):
+                    item["failed_in_chunk"] = int(failed_in_chunk)
+                yield item
             elif event_type == "error":
                 embedding_done = True
                 detail = str(event.get("detail") or "Embedding failed")
@@ -634,6 +676,7 @@ async def _ingest_leads_via_stream(
                     "total": int(event.get("total") or 0),
                     "error": detail,
                     "embedding_stream_id": embedding_stream_id,
+                    **_embedding_counts(event),
                 }
         else:
             if event_type == "ids":
@@ -685,11 +728,35 @@ async def _ingest_leads_via_stream(
                     meta={"kind": "ingest", "stored": position},
                 )
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
+            elif event_type == "throttled":
+                # Leads is blocking the Apollo walk because embedding lags — a
+                # cost/backpressure signal, not an error. Relay verbatim (no
+                # search-side gating; enforcement is leads-side) with stream
+                # context. Does not change job progress, so no publish_job.
+                yield {
+                    "type": "throttled",
+                    "kind": "ingest",
+                    "reason": event.get("reason"),
+                    "queue_pages": int(event.get("queue_pages") or 0),
+                    "waited_s": float(event.get("waited_s") or 0.0),
+                    "stored": position,
+                    "ingest_stream_id": ingest_stream_id,
+                    "embedding_stream_id": embedding_stream_id,
+                }
             elif event_type == "complete":
                 ingest_done = True
                 search.total_results = position
                 await db.commit()
                 await db.refresh(search)
+                # v2: a capped walk carries {partial:true, reason:...}. Thread it
+                # onto the job meta and the browser event so the UI can flag a
+                # truncated result set.
+                partial = bool(event.get("partial"))
+                partial_reason = event.get("reason") if partial else None
+                complete_meta: dict[str, Any] = {"kind": "ingest", "stored": position}
+                if partial:
+                    complete_meta["partial"] = True
+                    complete_meta["reason"] = partial_reason
                 await publish_job(
                     job_id=ingest_stream_id,
                     job_type=JOB_TYPE_APOLLO_SEARCH,
@@ -697,15 +764,19 @@ async def _ingest_leads_via_stream(
                     status=JobStatus.COMPLETED,
                     progress=1.0,
                     exit_status="ok",
-                    meta={"kind": "ingest", "stored": position},
+                    meta=complete_meta,
                 )
-                yield {
+                ingest_complete_event: dict[str, Any] = {
                     "type": "ingest_complete",
                     "kind": "ingest",
                     "stored": position,
                     "ingest_stream_id": ingest_stream_id,
                     "embedding_stream_id": embedding_stream_id,
                 }
+                if partial:
+                    ingest_complete_event["partial"] = True
+                    ingest_complete_event["reason"] = partial_reason
+                yield ingest_complete_event
 
         if ingest_done and embedding_done:
             return
@@ -764,7 +835,9 @@ async def _search_ndjson_events(
         yield _ndjson_line({"type": "first_page", **response.model_dump(mode="json")})
         first_page_sent = True
 
-    async def _emit_search_complete() -> AsyncIterator[str]:
+    async def _emit_search_complete(
+        *, partial: bool = False, reason: str | None = None
+    ) -> AsyncIterator[str]:
         nonlocal search_complete_sent, page_results
         if search_complete_sent:
             return
@@ -782,7 +855,13 @@ async def _search_ndjson_events(
             history=_to_detail(search, page_results),
             pagination=_pagination_for(search),
         )
-        yield _ndjson_line({"type": "complete", **response.model_dump(mode="json")})
+        # The browser sees ``complete`` (not the leads-level ``ingest_complete``)
+        # for the main search flow — carry the capped-walk {partial, reason} here.
+        complete_line: dict[str, Any] = {"type": "complete", **response.model_dump(mode="json")}
+        if partial:
+            complete_line["partial"] = True
+            complete_line["reason"] = reason
+        yield _ndjson_line(complete_line)
         search_complete_sent = True
 
     async for event in _ingest_leads_via_stream(
@@ -799,7 +878,10 @@ async def _search_ndjson_events(
             continue
 
         if event_type == "ingest_complete":
-            async for line in _emit_search_complete():
+            async for line in _emit_search_complete(
+                partial=bool(event.get("partial")),
+                reason=event.get("reason"),
+            ):
                 yield line
             continue
 
@@ -1878,6 +1960,9 @@ async def _enrich_ndjson_events(
                                 local_done = 1 if event_done > 0 else 0
                                 done_count = min(total, embed_finished + local_done)
                                 in_flight = event_total > event_done
+                            # done/total here are BATCH-level (person counts); the
+                            # leads indexed/failed are per-chunk doc tallies relayed
+                            # additively alongside them.
                             await _emit(
                                 {
                                     "type": "embedding_progress",
@@ -1886,6 +1971,7 @@ async def _enrich_ndjson_events(
                                     "total": total,
                                     "in_flight": in_flight,
                                     "embedding_stream_id": embedding_stream_id,
+                                    **_embedding_counts(event),
                                 }
                             )
                         elif event_type == "complete":
@@ -1906,8 +1992,26 @@ async def _enrich_ndjson_events(
                                     # completions just advance the determinate %.
                                     "complete": batch_done,
                                     "embedding_stream_id": embedding_stream_id,
+                                    **_embedding_counts(event),
                                 }
                             )
+                        elif event_type == "item_error":
+                            # Non-terminal per-chunk embedding failure (a person's
+                            # embedding ``complete`` still follows) — surface it
+                            # without advancing the batch counters.
+                            embed_item: dict[str, Any] = {
+                                "type": "item_error",
+                                "kind": "embedding",
+                                "detail": str(event.get("detail") or "Embedding failed"),
+                                "embedding_stream_id": embedding_stream_id,
+                                **_embedding_counts(event),
+                            }
+                            failed_in_chunk = event.get("failed_in_chunk")
+                            if isinstance(failed_in_chunk, (int, float)) and not isinstance(
+                                failed_in_chunk, bool
+                            ):
+                                embed_item["failed_in_chunk"] = int(failed_in_chunk)
+                            await _emit(embed_item)
                         elif event_type == "error":
                             embedding_done = True
                             async with state_lock:
@@ -1923,6 +2027,7 @@ async def _enrich_ndjson_events(
                                     "total": total,
                                     "error": str(event.get("detail") or "Embedding failed"),
                                     "embedding_stream_id": embedding_stream_id,
+                                    **_embedding_counts(event),
                                 }
                             )
                     else:
@@ -1952,6 +2057,20 @@ async def _enrich_ndjson_events(
                                         event.get("phone_reveal_pending")
                                     ),
                                     "waterfall_pending": bool(event.get("waterfall_pending")),
+                                }
+                            )
+                        elif event_type == "throttled":
+                            # Leads blocked this person's fetch on embedding
+                            # backlog — relay verbatim with batch context.
+                            await _emit(
+                                {
+                                    "type": "throttled",
+                                    "kind": "ingest",
+                                    "reason": event.get("reason"),
+                                    "queue_pages": int(event.get("queue_pages") or 0),
+                                    "waited_s": float(event.get("waited_s") or 0.0),
+                                    "ingest_stream_id": ingest_stream_id,
+                                    "embedding_stream_id": embedding_stream_id,
                                 }
                             )
                         elif event_type == "item_error":
@@ -1984,18 +2103,20 @@ async def _enrich_ndjson_events(
                                 stored = ingest_finished
                                 active_ingest_ids.discard(ingest_stream_id)
                             ingest_done_event.set()
-                            await _emit(
-                                {
-                                    "type": "ingest_complete",
-                                    "kind": "ingest",
-                                    "page": stored,
-                                    "total_pages": total,
-                                    "stored": stored,
-                                    "ingest_stream_id": ingest_stream_id,
-                                    "embedding_stream_id": embedding_stream_id,
-                                    "complete": stored >= total,
-                                }
-                            )
+                            person_complete: dict[str, Any] = {
+                                "type": "ingest_complete",
+                                "kind": "ingest",
+                                "page": stored,
+                                "total_pages": total,
+                                "stored": stored,
+                                "ingest_stream_id": ingest_stream_id,
+                                "embedding_stream_id": embedding_stream_id,
+                                "complete": stored >= total,
+                            }
+                            if event.get("partial"):
+                                person_complete["partial"] = True
+                                person_complete["reason"] = event.get("reason")
+                            await _emit(person_complete)
 
                     if ingest_done and embedding_done:
                         return
