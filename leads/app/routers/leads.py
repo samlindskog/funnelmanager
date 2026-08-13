@@ -44,6 +44,7 @@ from app.milvus_client import (
     NICE_BACKFILL,
     NICE_SEARCH_EMBED,
     _milvus_str_literal,
+    classify_write_error,
     index_lead_docs,
     search_similar,
 )
@@ -2507,9 +2508,12 @@ async def similarity_search(
         raise
     except Exception as exc:
         logger.exception("Similarity search failed")
+        # Sanitized code only — this 503 detail is forwarded verbatim into the
+        # browser-facing (and MCP-tool) error body by search, so it must not carry
+        # the raw Milvus exception text (URIs / quota internals). Full exc logged above.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Similarity search unavailable: {exc}",
+            detail=f"similarity_unavailable:{classify_write_error(exc)}",
         ) from exc
 
     # Mean similarity over the selected kinds each doc actually has (no zero-penalty).
