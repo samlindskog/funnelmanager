@@ -27,6 +27,23 @@ data:
         scalarField: true
         scalarIndex: true
         growingMmapEnabled: true
+      cache:
+        # Default `willneed` madvise-pre-faults ENTIRE mmap'd files into the
+        # page cache. In a container that cache counts toward cgroup usage,
+        # which is exactly what hardware.GetUsedMemoryCount() feeds the
+        # segment loader's "OOM if load" check — so mmap'd data re-inflated
+        # memUsage to ~11.9GB and load admission deadlocked at the 0.9
+        # watermark while the real working set sat at 6.8GB (observed
+        # 2026-08-13 right after mmap went live). `random` faults pages in
+        # on access only: cache stays demand-driven and reclaimable, and
+        # resident memory stops scaling with corpus size.
+        readAheadPolicy: random
+    queryCoord:
+      # With readAheadPolicy=random, anonymous memory stays far below the
+      # limit; 95 gives load admission headroom over transient cache growth
+      # without meaningfully weakening the real-OOM guard (hard cap is the
+      # 12Gi container limit).
+      overloadedMemoryThresholdPercentage: 95
     quotaAndLimits:
       limitWriting:
         # Throttle, then deny, inserts as growing segments swell instead of
