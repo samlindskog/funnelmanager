@@ -82,6 +82,34 @@ function detailMessage(detail: unknown, fallback: string): string {
   return fallback
 }
 
+/** Stream `detail` fields (embedding item_error + terminal ingest error) are now
+ * machine codes rather than prose. Map the known ones to short friendly strings;
+ * anything else humanizes the raw code so a future code still reads sensibly. */
+const DETAIL_CODE_LABELS: Record<string, string> = {
+  milvus_write_pressure: 'Milvus under write pressure',
+  milvus_unavailable: 'Milvus unavailable',
+  embedding_failed: 'Embedding failed',
+  apollo_rate_limited: 'Apollo rate-limited',
+  apollo_error: 'Apollo error',
+  ingest_failed: 'Ingest failed',
+}
+
+/** Friendly label for a stream `detail`: known code → phrase; unknown snake_case
+ * code → spaced/capitalized; non-code (object/prose) → detailMessage(fallback). */
+function friendlyDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string' && detail) {
+    const known = DETAIL_CODE_LABELS[detail]
+    if (known) return known
+    // Humanize an unknown but code-shaped string (lower snake_case, no spaces).
+    if (/^[a-z][a-z0-9_]*$/.test(detail)) {
+      const spaced = detail.replace(/_/g, ' ')
+      return spaced.charAt(0).toUpperCase() + spaced.slice(1)
+    }
+    return detail
+  }
+  return detailMessage(detail, fallback)
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${await bearerToken()}`)
@@ -166,6 +194,9 @@ export type EmbeddingProgress = {
    * failure) rather than a progress/complete line — non-terminal; a `complete`
    * still follows. Carries a human-readable `error`/detail. */
   item_error?: boolean
+  /** Friendly, display-ready failure reason mapped from the `detail`/`error`
+   * machine code (e.g. "Milvus under write pressure"). Undefined when healthy. */
+  reason?: string
   embedding_stream_id?: string
   active_stream_ids?: string[]
   /** In-flight embedding stream jobs only; cancelling embedding must not touch ingest. */
@@ -205,6 +236,14 @@ function parseEmbedding(
   event: Record<string, unknown>,
   extra: Partial<EmbeddingProgress> = {},
 ): EmbeddingProgress {
+  // item_error carries `detail`; a terminal embedding error carries `error`.
+  // Both are now machine codes — map to a friendly reason for display.
+  const rawCode =
+    typeof event.detail === 'string'
+      ? event.detail
+      : typeof event.error === 'string'
+        ? event.error
+        : undefined
   return {
     kind: 'embedding',
     done: Number(event.done) || 0,
@@ -213,6 +252,7 @@ function parseEmbedding(
     error: typeof event.error === 'string' ? event.error : undefined,
     indexed: typeof event.indexed === 'number' ? event.indexed : undefined,
     failed: typeof event.failed === 'number' ? event.failed : undefined,
+    reason: rawCode ? friendlyDetail(rawCode, rawCode) : undefined,
     embedding_stream_id:
       typeof event.embedding_stream_id === 'string' ? event.embedding_stream_id : undefined,
     ...extra,
@@ -224,6 +264,9 @@ export type RunSearchHandlers = {
   onEmbeddingProgress?: (progress: EmbeddingProgress) => void
   /** Fired while ingest is paused waiting for embedding to catch up (backpressure). */
   onThrottled?: (event: ThrottleEvent) => void
+  /** Fired once when embedding was cancelled but ingest keeps collecting leads
+   * (embeddings can be backfilled later). Informational, not an error. */
+  onEmbeddingDetached?: () => void
   /** Fired as soon as page 1 is hydrated; further UI pages use sync fetchSearchPage. */
   onFirstPage?: (response: SearchResponse) => void
   /** Fired when Apollo ingest finishes (embedding may still be running). */
@@ -239,8 +282,14 @@ export async function runSearch(
   params: RunSearchParams,
   handlers: RunSearchHandlers | ((progress: SearchProgress) => void) = {},
 ): Promise<SearchResponse> {
-  const { onProgress, onEmbeddingProgress, onThrottled, onFirstPage, onComplete } =
-    typeof handlers === 'function' ? { onProgress: handlers } : handlers
+  const {
+    onProgress,
+    onEmbeddingProgress,
+    onThrottled,
+    onEmbeddingDetached,
+    onFirstPage,
+    onComplete,
+  } = typeof handlers === 'function' ? { onProgress: handlers } : handlers
 
   const headers = new Headers()
   headers.set('Authorization', `Bearer ${await bearerToken()}`)
@@ -322,6 +371,9 @@ export async function runSearch(
         onEmbeddingProgress?.(parseEmbedding(event))
       } else if (event.type === 'throttled') {
         onThrottled?.(parseThrottle(event))
+      } else if (event.type === 'embedding_detached') {
+        // Embedding stream cancelled; ingest keeps collecting. Informational.
+        onEmbeddingDetached?.()
       } else if (event.type === 'item_error' && event.kind === 'embedding') {
         // Per-chunk embedding failure — non-terminal; a `complete` still follows.
         onEmbeddingProgress?.(parseEmbedding(event, { complete: false, item_error: true }))
@@ -333,7 +385,7 @@ export async function runSearch(
         onComplete?.(complete)
       } else if (event.type === 'error') {
         const detail = event.detail ?? 'Search failed'
-        throw new ApiError(502, detail, detailMessage(detail, 'Search failed'))
+        throw new ApiError(502, detail, friendlyDetail(detail, 'Search failed'))
       }
     }
   }
@@ -424,6 +476,8 @@ export type EnrichStreamHandlers = {
   onEmbeddingProgress?: (progress: EmbeddingProgress) => void
   /** Fired while ingest is paused waiting for embedding to catch up (backpressure). */
   onThrottled?: (event: ThrottleEvent) => void
+  /** Fired once when embedding was cancelled but ingest keeps collecting leads. */
+  onEmbeddingDetached?: () => void
   /** Called with mongo `_id`s from each progress event (hydrate via getPersonLead). */
   onIds?: (mongoIds: string[]) => void
   onComplete?: () => void
@@ -437,7 +491,15 @@ async function consumePeopleProgressStream(
   handlers: EnrichStreamHandlers,
   errorLabel: string,
 ): Promise<void> {
-  const { onProgress, onEmbeddingProgress, onThrottled, onIds, onComplete, signal } = handlers
+  const {
+    onProgress,
+    onEmbeddingProgress,
+    onThrottled,
+    onEmbeddingDetached,
+    onIds,
+    onComplete,
+    signal,
+  } = handlers
   if (signal?.aborted) return
 
   const headers = new Headers()
@@ -575,6 +637,8 @@ async function consumePeopleProgressStream(
           )
         } else if (event.type === 'throttled') {
           onThrottled?.(parseThrottle(event))
+        } else if (event.type === 'embedding_detached') {
+          onEmbeddingDetached?.()
         } else if (event.type === 'ingest_complete') {
           // Clear/update the fetch circle when ingest finishes (embed may continue).
           const activeIds = Array.isArray(event.active_stream_ids)
@@ -607,7 +671,7 @@ async function consumePeopleProgressStream(
           onComplete?.()
         } else if (event.type === 'error') {
           const detail = event.detail ?? `${errorLabel} failed`
-          throw new ApiError(502, detail, detailMessage(detail, `${errorLabel} failed`))
+          throw new ApiError(502, detail, friendlyDetail(detail, `${errorLabel} failed`))
         }
       }
     }

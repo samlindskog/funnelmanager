@@ -568,8 +568,10 @@ const ResultsListPane = memo(function ResultsListPane({
     const hydratedMongoIds = new Set<string>()
     const hydrateTasks: Promise<void>[] = []
     let phonePending = 0
-    // Highest server-reported embedding failure count across both enrich streams.
+    // Highest server-reported embedding failure count across both enrich streams,
+    // plus the friendly reason mapped from the last failure's detail code.
     let embedFailed = 0
+    let embedReason: string | undefined
 
     const hydrateIds = (mongoIds: string[]) => {
       const unique = [
@@ -641,10 +643,17 @@ const ResultsListPane = memo(function ResultsListPane({
         // the next progress event clears it.
         run.reportIngest({ throttled: true })
       },
+      onEmbeddingDetached: () => {
+        // Embedding cancelled but fetching continues — informational, not an error.
+        run.reportIngest({ embeddingDetached: true })
+      },
       onEmbeddingProgress: (event: EmbeddingProgress) => {
         // Only embedding stream ids here so cancelling embedding never touches ingest.
         const embedStreamIds = event.active_embedding_stream_ids
-        if ((event.failed ?? 0) > 0) embedFailed = Math.max(embedFailed, event.failed ?? 0)
+        if ((event.failed ?? 0) > 0) {
+          embedFailed = Math.max(embedFailed, event.failed ?? 0)
+          if (event.reason) embedReason = event.reason
+        }
         // complete:true / error is terminal even when done < total (failed>0);
         // a non-terminal item_error just updates the failure count and continues.
         if (event.complete || event.error) {
@@ -749,7 +758,11 @@ const ResultsListPane = memo(function ResultsListPane({
     // Embedding failures are non-fatal (the lead is still stored/enriched) — surface
     // them as a warning caption alongside the enrich outcome.
     const embedNote =
-      embedFailed > 0 ? ` ${embedFailed} embedding${embedFailed === 1 ? '' : 's'} failed.` : ''
+      embedFailed > 0
+        ? ` ${embedFailed} embedding${embedFailed === 1 ? '' : 's'} failed${
+            embedReason ? ` (${embedReason})` : ''
+          }.`
+        : ''
 
     if (failures.length) {
       setActionMessage({

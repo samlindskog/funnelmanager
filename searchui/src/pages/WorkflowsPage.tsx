@@ -22,6 +22,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -456,6 +457,7 @@ function ProspectRunner({
                                   sx={{ display: 'block', lineHeight: 1.2 }}
                                 >
                                   {embedFailed.toLocaleString()} embed failed
+                                  {row.embedReason ? ` (${row.embedReason})` : ''}
                                 </Typography>
                               )}
                             </TableCell>
@@ -470,6 +472,17 @@ function ProspectRunner({
                                     variant="outlined"
                                     data-testid={`prospect-throttled-${row.domain}`}
                                   />
+                                )}
+                                {row.embeddingDetached && (
+                                  <Tooltip title="Embedding cancelled — leads still collecting; embeddings can be backfilled later">
+                                    <Chip
+                                      size="small"
+                                      label="Embed cancelled"
+                                      color="info"
+                                      variant="outlined"
+                                      data-testid={`prospect-embed-detached-${row.domain}`}
+                                    />
+                                  </Tooltip>
                                 )}
                                 {row.partial && (
                                   <Chip

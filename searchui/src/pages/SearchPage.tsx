@@ -85,6 +85,8 @@ type SearchNotice = {
   partialReason?: string | null
   embedIndexed?: number
   embedFailed?: number
+  /** Friendly reason for the embedding failures (e.g. "Milvus under write pressure"). */
+  embedReason?: string
 }
 
 function partialReasonLabel(reason?: string | null): string {
@@ -388,6 +390,7 @@ export function SearchPage() {
     let noticePartialReason: string | null | undefined
     let noticeEmbedFailed = 0
     let noticeEmbedIndexed = 0
+    let noticeEmbedReason: string | undefined
     let sawPartial = false
     function publishNotice() {
       if (historyId == null) return
@@ -398,6 +401,7 @@ export function SearchPage() {
         partialReason: sawPartial ? (noticePartialReason ?? null) : undefined,
         embedFailed: noticeEmbedFailed,
         embedIndexed: noticeEmbedIndexed,
+        embedReason: noticeEmbedReason,
       })
     }
 
@@ -435,10 +439,15 @@ export function SearchPage() {
           // Flag the ingest ring as paused; the next progress event clears it.
           run.reportIngest({ throttled: true })
         },
+        onEmbeddingDetached: () => {
+          // Embedding cancelled but ingest keeps collecting — informational.
+          run.reportIngest({ embeddingDetached: true })
+        },
         onEmbeddingProgress: (event) => {
           if ((event.failed ?? 0) > 0) {
             noticeEmbedFailed = Math.max(noticeEmbedFailed, event.failed ?? 0)
             noticeEmbedIndexed = Math.max(noticeEmbedIndexed, event.indexed ?? 0)
+            if (event.reason) noticeEmbedReason = event.reason
             publishNotice()
           }
           // complete:true (or error) is the terminal signal even when done < total
@@ -1020,7 +1029,9 @@ export function SearchPage() {
                     (searchNotice.embedFailed ?? 0) > 0
                       ? `${(searchNotice.embedIndexed ?? 0).toLocaleString()} embedded, ${(
                           searchNotice.embedFailed ?? 0
-                        ).toLocaleString()} failed`
+                        ).toLocaleString()} failed${
+                          searchNotice.embedReason ? ` (${searchNotice.embedReason})` : ''
+                        }`
                       : null,
                   ]
                     .filter(Boolean)

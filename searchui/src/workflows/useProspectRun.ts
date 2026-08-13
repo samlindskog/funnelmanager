@@ -53,6 +53,10 @@ export interface ProspectRow {
   /** Embeddings that failed to index for this company (honest completion). */
   embedFailed?: number
   embedIndexed?: number
+  /** Friendly reason for the embedding failures (e.g. "Milvus under write pressure"). */
+  embedReason?: string
+  /** Embedding was cancelled for this company but leads still collected — sticky info. */
+  embeddingDetached?: boolean
 }
 
 const CHECKPOINT_KEY = 'searchui.prospect.v1'
@@ -119,7 +123,7 @@ function downgradeTransient(row: ProspectRow): ProspectRow {
     return { ...row, status: 'pending', orgRecordId: null, orgApolloId: null, companyName: null }
   }
   if (row.status === 'probing' || row.status === 'ingesting') {
-    return { ...row, status: 'pending', throttled: false }
+    return { ...row, status: 'pending', throttled: false, embeddingDetached: false }
   }
   return row
 }
@@ -349,11 +353,17 @@ export function useProspectRun(): UseProspectRun {
               run.reportIngest({ throttled: true })
               patchRow(domain, { throttled: true })
             },
+            onEmbeddingDetached: () => {
+              // Embedding cancelled but leads keep collecting — informational.
+              run.reportIngest({ embeddingDetached: true })
+              patchRow(domain, { embeddingDetached: true })
+            },
             onEmbeddingProgress: (event: EmbeddingProgress) => {
               if ((event.failed ?? 0) > 0) {
                 patchRow(domain, {
                   embedFailed: event.failed,
                   embedIndexed: event.indexed,
+                  ...(event.reason ? { embedReason: event.reason } : {}),
                 })
               }
               // complete:true / error is terminal even when done < total (failed>0).
