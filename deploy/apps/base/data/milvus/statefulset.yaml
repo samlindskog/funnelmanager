@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/part-of: funnelmanager
 spec:
   serviceName: milvus
-  replicas: 0  # TEMP parked 2026-08-13 (operator-approved) — see leads MILVUS_URI note
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: milvus
@@ -22,6 +22,11 @@ spec:
       serviceAccountName: milvus
       nodeSelector:
         role: worker
+        # Node-pinned to worker2 (2026-08-13, operator-approved migration off
+        # worker1): the data PVC is local-path (node-local storage), so the pod
+        # must land on the node its volume provisions on. worker2 has the RAM
+        # headroom worker1 lacked for the grown leads_embeds_v2 working set.
+        kubernetes.io/hostname: worker2
       containers:
         - name: milvus
           image: milvusdb/milvus:v2.5.4
