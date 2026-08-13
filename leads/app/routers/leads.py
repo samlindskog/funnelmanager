@@ -63,6 +63,7 @@ from app.schemas import (
     StreamSubscribeRequest,
 )
 from app.stream_jobs import (
+    _safe_ingest_error_detail,
     cancel_stream,
     close_embedding_stream,
     create_embedding_stream,
@@ -1110,7 +1111,10 @@ async def _run_enrich_stream_job(
                             "page": index,
                             "total_pages": total,
                             "apollo_id": apollo_id,
-                            "detail": f"{apollo_id}: {exc}",
+                            # Sanitized code only (full exception logged above); the
+                            # apollo_id rides its own field. Raw str(exc) here reached
+                            # browsers verbatim via search — a backend-internals leak.
+                            "detail": _safe_ingest_error_detail(exc),
                         },
                     )
                     continue
@@ -1142,11 +1146,14 @@ async def _run_enrich_stream_job(
             await manager.finish(ingest_stream_id, status=StreamJobStatus.COMPLETE)
         except Exception as exc:
             logger.exception("Enrich stream job %s failed", ingest_stream_id)
+            # Sanitized code only — the full exception is logged above; this detail
+            # is relayed verbatim to browsers by search.
+            detail = _safe_ingest_error_detail(exc)
             await manager.publish(
                 ingest_stream_id,
-                {"type": "error", "kind": "ingest", "detail": str(exc)},
+                {"type": "error", "kind": "ingest", "detail": detail},
             )
-            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=str(exc))
+            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=detail)
         finally:
             await queue.put(None)
 
@@ -1470,7 +1477,10 @@ async def _run_match_stream_job(
                             "page": index,
                             "total_pages": total,
                             "apollo_id": apollo_id,
-                            "detail": f"{apollo_id}: {exc}",
+                            # Sanitized code only (full exception logged above); the
+                            # apollo_id rides its own field. Raw str(exc) here reached
+                            # browsers verbatim via search — a backend-internals leak.
+                            "detail": _safe_ingest_error_detail(exc),
                         },
                     )
                     continue
@@ -1504,11 +1514,14 @@ async def _run_match_stream_job(
             await manager.finish(ingest_stream_id, status=StreamJobStatus.COMPLETE)
         except Exception as exc:
             logger.exception("Match stream job %s failed", ingest_stream_id)
+            # Sanitized code only — the full exception is logged above; this detail
+            # is relayed verbatim to browsers by search.
+            detail = _safe_ingest_error_detail(exc)
             await manager.publish(
                 ingest_stream_id,
-                {"type": "error", "kind": "ingest", "detail": str(exc)},
+                {"type": "error", "kind": "ingest", "detail": detail},
             )
-            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=str(exc))
+            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=detail)
         finally:
             await queue.put(None)
 
