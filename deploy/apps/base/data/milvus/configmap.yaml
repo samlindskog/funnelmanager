@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: milvus-config
+  labels:
+    app.kubernetes.io/name: milvus
+    app.kubernetes.io/part-of: funnelmanager
+data:
+  # Milvus merges user.yaml over its built-in milvus.yaml at boot (the same
+  # mechanism the official Helm chart's extraConfigFiles uses). Read once at
+  # startup — changes here need a pod roll to take effect.
+  user.yaml: |
+    # Memory-capping config (2026-08-13, after the 12Gi OOMKill loop): the
+    # per-collection/index mmap.enabled properties set by leads never became
+    # effective for already-loaded segments — resident memory tracked the full
+    # corpus (~12GB for ~1.15M vectors) and the querynode refused loads with
+    # "OOM if load". Global mmap loads sealed data + indexes via the page
+    # cache, so resident memory is ~chunk cache + metadata, not O(corpus);
+    # growingMmapEnabled extends that to unsealed growing segments (the
+    # WAL-replay / bulk-ingest OOM driver — sealed-only mmap missed these).
+    # Trade-off accepted: memory capping over query latency; disk usage on
+    # worker2 grows with the corpus instead (watch the node disk).
+    queryNode:
+      mmap:
+        vectorField: true
+        vectorIndex: true
+        scalarField: true
+        scalarIndex: true
+        growingMmapEnabled: true
+    quotaAndLimits:
+      limitWriting:
+        # Throttle, then deny, inserts as growing segments swell instead of
+        # dying at the container limit; leads must treat a deny as
+        # retry-with-backoff (memProtection at 0.85/0.95 of the limit is
+        # already on by default and stays the outer wall).
+        growingSegmentsSizeProtection:
+          enabled: true
+    dataNode:
+      segment:
+        # Flush idle write buffers after 3 min (default 600s) so a crash
+        # replays a bounded WAL instead of a whole bulk run's unsealed data.
+        syncPeriod: 180

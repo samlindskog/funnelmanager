@@ -91,11 +91,22 @@ spec:
               # container limit, and 0.9*10Gi=9216Mi < the ~9.3GB predicted load, so
               # one 2.4GB sealed segment perpetually failed to load (stuck at 85%).
               # 12Gi -> watermark 11.06GB, comfortably above the prediction (worker2
-              # is a 16GB node). See CLAUDE.md milvus mmap notes for the durable fix.
+              # is a 16GB node). 2026-08-13: the durable fix landed — global mmap via
+              # the milvus-config user.yaml below (per-collection properties never
+              # took effect for loaded segments). Once the mmap steady-state is
+              # verified, this limit should come DOWN (~8Gi) to cap Milvus and
+              # return headroom to the node.
               memory: 12288Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
+            - name: config
+              mountPath: /milvus/configs/user.yaml
+              subPath: user.yaml
+      volumes:
+        - name: config
+          configMap:
+            name: milvus-config
   volumeClaimTemplates:
     - metadata:
         name: data

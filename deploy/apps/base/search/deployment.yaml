@@ -27,6 +27,18 @@ spec:
       serviceAccountName: search
       nodeSelector:
         role: worker
+      affinity:
+        # Never share a node with Milvus: its OOM/reload cycles saturate the
+        # host (2026-08-13: the milvus loop on worker2 starved this pod's 3s
+        # Postgres readiness ping -> pulled from endpoints -> Envoy 503 UH
+        # no_healthy_upstream -> browser 502). The browser-facing API must not
+        # be collateral of the data stack's memory churn.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: milvus
+              topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
