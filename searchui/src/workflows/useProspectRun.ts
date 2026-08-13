@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  resolveCompany,
   runSearch,
   runSimilaritySearch,
   type CompanyOption,
@@ -215,30 +216,48 @@ export function useProspectRun(): UseProspectRun {
     async (domain: string) => {
       patchRow(domain, { status: 'resolving', error: null })
       try {
-        const response = await runSearch({
+        // Local-first: resolve from already-stored orgs (free) before spending
+        // an Apollo export credit on a company search.
+        let localHit: { mongo_id: string; apollo_id: string; name: string | null } | null = null
+        try {
+          const local = await resolveCompany(domain)
+          if (local.mongo_id && local.apollo_id) {
+            localHit = { mongo_id: local.mongo_id, apollo_id: local.apollo_id, name: local.name }
+          }
+        } catch {
+          /* not stored locally — fall through to the Apollo search */
+        }
+        const response = localHit
+          ? null
+          : await runSearch({
           query: '',
           entity_type: 'companies',
           page: 1,
           per_page: 1,
           company_domain: domain,
         })
-        const company = response.history.results.find(
-          (record): record is CompanyRecord => record.entity_type === 'company',
-        )
-        if (!company) {
+        const company = localHit
+          ? null
+          : (response!.history.results.find(
+              (record): record is CompanyRecord => record.entity_type === 'company',
+            ) ?? null)
+        if (!localHit && !company) {
           patchRow(domain, { status: 'not-found' })
           return
         }
-        const orgRecordId = (company.mongo_id || '').trim() || null
-        const orgApolloId =
-          String(company.organization_id || company.id || '').trim() || null
+        const orgRecordId = localHit
+          ? localHit.mongo_id
+          : (company!.mongo_id || '').trim() || null
+        const orgApolloId = localHit
+          ? localHit.apollo_id
+          : String(company!.organization_id || company!.id || '').trim() || null
         patchRow(domain, {
-          companyName: company.name || domain,
+          companyName: (localHit ? localHit.name : company!.name) || domain,
           orgRecordId,
           orgApolloId,
-          orgDomain: company.domain || domain,
+          orgDomain: (company && company.domain) || domain,
           employeeCount:
-            typeof company.employee_count === 'number' ? company.employee_count : null,
+            company && typeof company.employee_count === 'number' ? company.employee_count : null,
           status: skipRef.current && orgRecordId ? 'probing' : 'pending',
         })
         if (skipRef.current && orgRecordId) {

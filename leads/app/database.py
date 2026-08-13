@@ -43,6 +43,7 @@ async def init_db() -> None:
     await db.leads.create_index("email")
     await db.leads.create_index("phone")
     await db.leads.create_index("linkedin")
+    await db.leads.create_index("domain")
 
 
 async def close_db() -> None:

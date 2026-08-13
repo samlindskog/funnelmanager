@@ -146,6 +146,11 @@ def _linkedin(payload: dict[str, Any]) -> str | None:
     return _clean_str(payload.get("linkedin_url"))
 
 
+def _org_domain(org: dict[str, Any]) -> str | None:
+    value = _clean_str(org.get("primary_domain")) or _clean_str(org.get("domain"))
+    return value.lower() if value else None
+
+
 def _org_phone(org: dict[str, Any]) -> str | None:
     return _clean_str(org.get("phone")) or _clean_str(org.get("sanitized_phone"))
 
@@ -166,6 +171,9 @@ def derive_top_fields(entity_type: str, responses: dict[str, Any] | None) -> dic
         phone = _first(payloads, _org_phone)
         if phone is not None:
             out["phone"] = phone
+        domain = _first(payloads, _org_domain)
+        if domain is not None:
+            out["domain"] = domain
         linkedin = _first(payloads, _linkedin)
         if linkedin is not None:
             out["linkedin"] = linkedin

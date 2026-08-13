@@ -1700,6 +1700,12 @@ async def resolve_organization_lead(
             {"apollo_id": value.strip(), "entity_type": "organization"}
         )
     if org_doc is None:
+        # Local-first domain resolution: fuzzy org-search walks ingested huge
+        # numbers of orgs, so a domain often resolves from Mongo for free.
+        org_doc = await db.leads.find_one(
+            {"domain": value.strip().lower(), "entity_type": "organization"}
+        )
+    if org_doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
