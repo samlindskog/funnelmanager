@@ -86,7 +86,13 @@ spec:
               # again is queryNode mmap (load via page cache, not RAM).
               # 8Gi OOMed on startup WAL-replay of unsealed growing segments after a
               # bulk Prospect ingest (2026-08-12) — mmap covers sealed data only.
-              memory: 10240Mi
+              # 10Gi could not fully load leads_embeds_v2 (~1.15M vectors) after the
+              # worker2 migration: querycoord sizes its load watermark against this
+              # container limit, and 0.9*10Gi=9216Mi < the ~9.3GB predicted load, so
+              # one 2.4GB sealed segment perpetually failed to load (stuck at 85%).
+              # 12Gi -> watermark 11.06GB, comfortably above the prediction (worker2
+              # is a 16GB node). See CLAUDE.md milvus mmap notes for the durable fix.
+              memory: 12288Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
