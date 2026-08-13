@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # ingest walk and the embedding consumer before the walk blocks on put (so
     # Apollo fetching pauses until embedding/Milvus catches up). Small on purpose.
     ingest_embed_queue_max_pages: int = 3
+    # Amortized Milvus write-pressure retry budget PER embedding stream (seconds),
+    # shared across every chunk of that stream. Bounds total backoff so a 50k
+    # stream under sustained pressure can't retry for hours (a per-chunk budget
+    # would multiply by the chunk count); once spent, pressure-failures fail fast
+    # to the honest item_error path so the stream ends promptly.
+    embed_write_pressure_budget_seconds: float = 300.0
     milvus_uri: str = "http://milvus:19530"
     milvus_collection: str = "leads_embeds_v2"
 
