@@ -77,6 +77,22 @@ type CompanyFilterMode = 'id' | 'name'
 type MainView = 'search' | 'results' | 'workflows'
 type SearchSource = 'apollo' | 'similarity'
 
+/** A post-completion honesty notice bound to a specific search id: ingest stopped
+ * short (`partialReason`) and/or some embeddings failed. Rendered only while its
+ * search is the active one so opening a different history row never shows it stale. */
+type SearchNotice = {
+  id: number
+  partialReason?: string | null
+  embedIndexed?: number
+  embedFailed?: number
+}
+
+function partialReasonLabel(reason?: string | null): string {
+  if (reason === 'apollo_page_cap') return 'Partial results — Apollo page cap reached'
+  if (reason === 'max_entries') return 'Partial results — max entries reached'
+  return 'Partial results — ingest stopped short'
+}
+
 export function SearchPage() {
   const theme = useTheme()
   const isMdUp = useMediaQuery(theme.breakpoints.up('md'))
@@ -135,6 +151,7 @@ export function SearchPage() {
   const [paging, setPaging] = useState(false)
   const [pageError, setPageError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [searchNotice, setSearchNotice] = useState<SearchNotice | null>(null)
   const [apolloCreditsRemaining, setApolloCreditsRemaining] = useState<number | null>(null)
   const [sessionTokensUsed, setSessionTokensUsed] = useState(0)
   const previousApolloCreditsRef = useRef<number | null>(null)
@@ -336,6 +353,7 @@ export function SearchPage() {
     )
     setSimilarityLimit(limit)
     setError(null)
+    setSearchNotice(null)
     setSearching(true)
     try {
       const response = await runSimilaritySearch({
@@ -361,10 +379,27 @@ export function SearchPage() {
 
   async function executeSearch(params: RunSearchParams) {
     setError(null)
+    setSearchNotice(null)
     setSearching(true)
     const run = progress.beginRun()
     let shown = false
     let historyId: number | null = null
+    // Post-completion honesty accumulators (partial ingest / failed embeddings).
+    let noticePartialReason: string | null | undefined
+    let noticeEmbedFailed = 0
+    let noticeEmbedIndexed = 0
+    let sawPartial = false
+    function publishNotice() {
+      if (historyId == null) return
+      if (!sawPartial && noticeEmbedFailed <= 0) return
+      setSearchNotice({
+        id: historyId,
+        // undefined = not partial; null = partial with unknown reason.
+        partialReason: sawPartial ? (noticePartialReason ?? null) : undefined,
+        embedFailed: noticeEmbedFailed,
+        embedIndexed: noticeEmbedIndexed,
+      })
+    }
 
     function applyStoredCount(stored: number) {
       setActiveSearch((prev) =>
@@ -395,15 +430,34 @@ export function SearchPage() {
           // Grow results header + sidebar count as more ids land.
           applyStoredCount(event.stored)
         },
+        onThrottled: () => {
+          // Backpressure: Apollo fetching paused for embedding to catch up.
+          // Flag the ingest ring as paused; the next progress event clears it.
+          run.reportIngest({ throttled: true })
+        },
         onEmbeddingProgress: (event) => {
+          if ((event.failed ?? 0) > 0) {
+            noticeEmbedFailed = Math.max(noticeEmbedFailed, event.failed ?? 0)
+            noticeEmbedIndexed = Math.max(noticeEmbedIndexed, event.indexed ?? 0)
+            publishNotice()
+          }
+          // complete:true (or error) is the terminal signal even when done < total
+          // (done counts attempts, so failed>0 legitimately ends below 100%).
           if (event.complete || event.error) {
-            run.reportEmbed({ complete: true, streamId: event.embedding_stream_id })
+            run.reportEmbed({
+              complete: true,
+              streamId: event.embedding_stream_id,
+              failed: event.failed,
+              indexed: event.indexed,
+            })
             return
           }
           run.reportEmbed({
             done: event.done,
             total: event.total,
             streamId: event.embedding_stream_id,
+            failed: event.failed,
+            indexed: event.indexed,
           })
         },
         onFirstPage: (pageReady) => {
@@ -448,6 +502,11 @@ export function SearchPage() {
           applyStoredCount(done.history.total_results)
           setSearching(false)
           run.reportIngest({ complete: true })
+          if (done.partial) {
+            sawPartial = true
+            noticePartialReason = done.reason ?? null
+            publishNotice()
+          }
           void refreshHistory()
           void refreshOwners()
         },
@@ -949,6 +1008,24 @@ export function SearchPage() {
             {error && (
               <Box sx={{ p: 2, flexShrink: 0 }}>
                 <Alert severity="error">{error}</Alert>
+              </Box>
+            )}
+            {searchNotice && activeSearch && searchNotice.id === activeSearch.id && (
+              <Box sx={{ px: 2, pt: error ? 0 : 2, pb: 0, flexShrink: 0 }}>
+                <Alert severity="warning" data-testid="search-partial-notice">
+                  {[
+                    searchNotice.partialReason !== undefined
+                      ? partialReasonLabel(searchNotice.partialReason)
+                      : null,
+                    (searchNotice.embedFailed ?? 0) > 0
+                      ? `${(searchNotice.embedIndexed ?? 0).toLocaleString()} embedded, ${(
+                          searchNotice.embedFailed ?? 0
+                        ).toLocaleString()} failed`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </Alert>
               </Box>
             )}
             {loadingResults ? (
