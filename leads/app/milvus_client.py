@@ -37,6 +37,38 @@ _SHORT_MAX = 16
 _FLUSH_EVERY_ROWS = 10_000
 _rows_since_flush = 0
 
+# Milvus write-pressure cooperation: the prod cluster runs quotaAndLimits
+# growing-segment + memory protection, so an upsert under pressure raises a
+# rate-limit / quota-deny error instead of succeeding. Treat that class as
+# retryable with bounded exponential backoff (the gate is released between
+# attempts so interactive similarity queries still run). After the total budget
+# is spent the error propagates so the caller records a real failure.
+_UPSERT_MAX_BACKOFF_TOTAL_SECONDS = 60.0
+_UPSERT_MAX_SINGLE_BACKOFF_SECONDS = 16.0
+_WRITE_PRESSURE_MARKERS = (
+    "rate limit",
+    "ratelimit",
+    "rate_limit",
+    "quota",
+    "deny to write",
+    "force deny",
+    "memory protection",
+    "disk protection",
+    "disk quota",
+    "too many",
+)
+
+
+def _is_milvus_write_pressure(exc: BaseException) -> bool:
+    """True when ``exc`` looks like Milvus throttling/denying a write under pressure.
+
+    Matches pymilvus rate-limit / quota-deny messages by substring (the SDK does
+    not give a stable dedicated exception type across these). Conservative: an
+    unrecognized error is treated as a hard failure, not retried.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _WRITE_PRESSURE_MARKERS)
+
 # UNIX-nice priority tiers for the Milvus gate: lower runs first. The pymilvus
 # SDK is not reliably concurrent-safe, so every op still serializes through one
 # gate — but waiters wake lowest-nice-first (FIFO within a nice), so an
@@ -368,11 +400,37 @@ async def upsert_lead_vectors(
     ``nice`` sets the gate priority of this write: live-search embeds pass
     ``NICE_SEARCH_EMBED`` and backfills ``NICE_BACKFILL`` so an interactive
     ``search_similar`` (``NICE_INTERACTIVE``) always wins the next gate slot.
+
+    Under Milvus write-pressure (rate-limit / quota-deny) the upsert is retried
+    with bounded exponential backoff. The gate is released between attempts so the
+    backoff does not block interactive queries; embedding naturally stalls, which —
+    via the bounded ingest queue upstream — pauses the Apollo walk. After the budget
+    is exhausted the error propagates so the caller can record the chunk as failed.
     """
     if not rows:
         return
-    async with _gate()(nice):
-        await asyncio.to_thread(_upsert_lead_vectors_sync, rows, settings=settings)
+    attempt = 0
+    waited = 0.0
+    while True:
+        try:
+            async with _gate()(nice):
+                await asyncio.to_thread(_upsert_lead_vectors_sync, rows, settings=settings)
+            return
+        except Exception as exc:
+            if not _is_milvus_write_pressure(exc) or waited >= _UPSERT_MAX_BACKOFF_TOTAL_SECONDS:
+                raise
+            backoff = min(2.0**attempt, _UPSERT_MAX_SINGLE_BACKOFF_SECONDS)
+            backoff = min(backoff, _UPSERT_MAX_BACKOFF_TOTAL_SECONDS - waited)
+            logger.warning(
+                "Milvus write-pressure on upsert (%s); backing off %.1fs (waited %.1fs total)",
+                exc,
+                backoff,
+                waited,
+            )
+            # Gate released here (outside the async with) so interactive queries run.
+            await asyncio.sleep(backoff)
+            waited += backoff
+            attempt += 1
 
 
 def _search_similar_sync(
@@ -546,6 +604,7 @@ async def index_lead_docs(
     source_precedence: int,
     force: bool = False,
     nice: int = NICE_SEARCH_EMBED,
+    raise_on_failure: bool = False,
     settings: Settings | None = None,
 ) -> list[tuple[str, int]]:
     """Embed and upsert person/organization Mongo docs, respecting embedding precedence.
@@ -571,8 +630,15 @@ async def index_lead_docs(
     doesn't, may leave a stale/leftover Milvus row — harmless because query-time
     filters are re-checked authoritatively against Mongo (see the router).
 
-    Soft-fails; returns ``[(mongo_id, stored_precedence), ...]`` (one per doc)
-    for docs indexed.
+    Returns ``[(mongo_id, stored_precedence), ...]`` (one per doc) for docs indexed
+    — fewer than ``docs`` when some are skipped by never-downgrade precedence.
+
+    ``raise_on_failure`` controls what happens on a HARD embed/Milvus failure
+    (after write-pressure retries are exhausted): the default ``False`` soft-fails
+    (logs + returns ``[]``, preserving the single-enrich/match/backfill behavior of
+    saving the Mongo doc and leaving the vector for a later backfill); the streamed
+    embed path passes ``True`` so the failure propagates and the stream can record
+    the chunk as failed (honest progress) instead of claiming 100%.
     """
     cfg = settings or get_settings()
     if not docs:
@@ -650,4 +716,6 @@ async def index_lead_docs(
         return [(item.mongo_id, item.stored_precedence) for item in prepared]
     except Exception:
         logger.exception("Failed to index %s lead(s) in Milvus", len(prepared))
+        if raise_on_failure:
+            raise
         return []

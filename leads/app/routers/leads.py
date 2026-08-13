@@ -207,12 +207,18 @@ async def _embed_mongo_ids_batch(
     source_precedence: int,
     force: bool = False,
     nice: int = NICE_SEARCH_EMBED,
+    raise_on_failure: bool = True,
 ) -> list[str]:
     """Embed leads (respecting precedence) and record source. Returns indexed mongo ids.
 
     ``force`` re-embeds even docs that already carry a vector (backfill); see
     ``index_lead_docs``. ``nice`` sets the Milvus-gate priority of the upsert
     (live search passes ``NICE_SEARCH_EMBED``; backfill passes ``NICE_BACKFILL``).
+
+    ``raise_on_failure`` defaults ``True``: this is the streamed/background embed
+    path, so a hard Milvus failure propagates to the caller (the stream records the
+    chunk as failed — honest progress — and the background embed logs it) rather
+    than being silently swallowed to ``[]``.
     """
     if not mongo_ids:
         return []
@@ -227,7 +233,11 @@ async def _embed_mongo_ids_batch(
         return []
     docs = [doc async for doc in db.leads.find({"_id": {"$in": object_ids}})]
     indexed = await index_lead_docs(
-        docs, source_precedence=source_precedence, force=force, nice=nice
+        docs,
+        source_precedence=source_precedence,
+        force=force,
+        nice=nice,
+        raise_on_failure=raise_on_failure,
     )
     if indexed:
         await _mark_embedded(indexed)

@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     embed_concurrency: int = 8
     # Max page-sized embedding batches running at once during a live search.
     embed_batch_concurrency: int = 4
+    # Backpressure: how many Apollo pages of mongo-ids may buffer between the
+    # ingest walk and the embedding consumer before the walk blocks on put (so
+    # Apollo fetching pauses until embedding/Milvus catches up). Small on purpose.
+    ingest_embed_queue_max_pages: int = 3
     milvus_uri: str = "http://milvus:19530"
     milvus_collection: str = "leads_embeds_v2"
 

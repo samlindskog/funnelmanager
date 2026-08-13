@@ -26,10 +26,29 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Apollo People/Org search max page size is 100; walk enough pages for 100k entries.
+# Apollo People/Org search max page size is 100.
 _APOLLO_MAX_PER_PAGE = 100
+# Hard ingest ceiling (secondary guard). Apollo's own paging cap below is stricter.
 _MAX_SEARCH_ENTRIES = 100_000
-_MAX_APOLLO_PAGES = _MAX_SEARCH_ENTRIES // _APOLLO_MAX_PER_PAGE  # 1000
+# Apollo search endpoints refuse to page beyond 50,000 records (page * per_page):
+# a request past that 422s with "Page N per page number is over threshold" and,
+# left unhandled, kills the stream mid-walk. Clamp the walk to that documented
+# ceiling so big searches end cleanly with a partial-complete instead of erroring.
+_APOLLO_MAX_PAGEABLE_ENTRIES = 50_000
+_APOLLO_MAX_PAGE = _APOLLO_MAX_PAGEABLE_ENTRIES // _APOLLO_MAX_PER_PAGE  # 500
+
+# Backpressure throttle-event pacing (see the enqueue helper in
+# run_paged_search_with_embedding): first announce after this long blocked on a
+# full queue, then re-announce this often while still blocked; poll this often.
+_THROTTLE_FIRST_SECONDS = 2.0
+_THROTTLE_REPEAT_SECONDS = 5.0
+_THROTTLE_POLL_SECONDS = 0.25
+
+# Per-job history is unbounded for lossless events (ids / lifecycle / terminal —
+# late subscribers reconstruct results from them) but progress-class events are
+# lossy: keep only the most recent N so a 100k search cannot pile up ~6k ticks.
+_MAX_PROGRESS_EVENTS = 500
+_LOSSY_EVENT_TYPES = frozenset({"progress", "embedding_progress", "throttled"})
 
 # Keep finished stream_ids usable briefly, then drop buffers.
 # Jobs whose runner never started (still PENDING) use the same window.
@@ -53,10 +72,25 @@ def _set_event() -> asyncio.Event:
 
 
 @dataclass
+class _Buffered:
+    """One history entry: a monotonically-increasing ``seq`` + its event payload.
+
+    Subscribers track the last ``seq`` they yielded (not a list index) so trimming
+    lossy progress events out of the middle of ``history`` never makes a reader
+    skip or re-read a lossless ``ids``/lifecycle event.
+    """
+
+    seq: int
+    event: dict[str, Any]
+
+
+@dataclass
 class StreamJob:
     stream_id: str
     status: StreamJobStatus = StreamJobStatus.PENDING
-    history: list[dict[str, Any]] = field(default_factory=list)
+    history: list[_Buffered] = field(default_factory=list)
+    _next_seq: int = 0
+    _progress_count: int = 0
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     total_ids: int = 0
@@ -100,8 +134,28 @@ class StreamJobManager:
             return
         payload = {"stream_id": stream_id, **event}
         async with job._condition:
-            job.history.append(payload)
+            job.history.append(_Buffered(seq=job._next_seq, event=payload))
+            job._next_seq += 1
+            if payload.get("type") in _LOSSY_EVENT_TYPES:
+                job._progress_count += 1
+                self._trim_progress(job)
             job._condition.notify_all()
+
+    @staticmethod
+    def _trim_progress(job: StreamJob) -> None:
+        """Drop the oldest lossy (progress-class) event once over the cap.
+
+        Only lossy events are ever removed; ``ids`` / lifecycle / terminal events
+        stay so a late subscriber can still replay the full lossless sequence.
+        One event is appended at a time, so removing one keeps the count bounded.
+        """
+        if job._progress_count <= _MAX_PROGRESS_EVENTS:
+            return
+        for i, buffered in enumerate(job.history):
+            if buffered.event.get("type") in _LOSSY_EVENT_TYPES:
+                del job.history[i]
+                job._progress_count -= 1
+                return
 
     async def finish(
         self,
@@ -201,6 +255,13 @@ class EmbeddingStreamState:
     stream_id: str
     total: int = 0
     done: int = 0
+    # Honest tallies (change: progress must reflect real Milvus work, not chunk
+    # advance): ``indexed_count`` = rows actually upserted to Milvus; ``failed_count``
+    # = ids in chunks whose Milvus index hard-failed. ``done`` advances only for
+    # chunks that did NOT hard-fail, so ``done + failed_count == total`` at the end
+    # and the ring only reaches 100% when nothing failed.
+    indexed_count: int = 0
+    failed_count: int = 0
     in_flight: int = 0
     accepting: bool = True
     failed: bool = False
@@ -265,6 +326,8 @@ async def cancel_stream(stream_id: str) -> bool:
             state._resume.set()
             done = state.done
             total = state.total
+            indexed = state.indexed_count
+            failed = state.failed_count
         await stream_job_manager.publish(
             cleaned,
             {
@@ -273,6 +336,8 @@ async def cancel_stream(stream_id: str) -> bool:
                 "cancelled": True,
                 "done": done,
                 "total": total,
+                "indexed": indexed,
+                "failed": failed,
             },
         )
         await stream_job_manager.finish(cleaned, status=StreamJobStatus.COMPLETE)
@@ -384,13 +449,17 @@ async def _maybe_finish_embedding(state: EmbeddingStreamState) -> None:
         return
     if state.accepting or state.in_flight > 0:
         return
+    # Honest totals: ``total`` is what was attempted (not forced to ``done``), so a
+    # run with failed chunks completes below 100% rather than lying at 100%.
     await stream_job_manager.publish(
         state.stream_id,
         {
             "type": "complete",
             "kind": "embedding",
-            "total": state.done,
+            "total": state.total,
             "done": state.done,
+            "indexed": state.indexed_count,
+            "failed": state.failed_count,
         },
     )
     await stream_job_manager.finish(state.stream_id, status=StreamJobStatus.COMPLETE)
@@ -440,10 +509,19 @@ async def schedule_embedding_batch(
         state.in_flight += 1
         total = state.total
         done = state.done
+        indexed = state.indexed_count
+        failed = state.failed_count
 
     await stream_job_manager.publish(
         stream_id,
-        {"type": "progress", "kind": "embedding", "done": done, "total": total},
+        {
+            "type": "progress",
+            "kind": "embedding",
+            "done": done,
+            "total": total,
+            "indexed": indexed,
+            "failed": failed,
+        },
     )
 
     async def _finish_in_flight() -> None:
@@ -468,40 +546,69 @@ async def schedule_embedding_batch(
             return
         chunk = unique_ids[start : start + _EMBED_PROGRESS_CHUNK]
         try:
-            # Soft-failures inside embed_batch return fewer ids; still advance by chunk size.
-            await embed_batch(chunk)
-        except Exception:
-            logger.exception("Embedding batch failed for stream %s", stream_id)
+            # Returns the mongo ids actually upserted to Milvus (fewer than the
+            # chunk when docs are skipped by never-downgrade precedence — that is a
+            # correct decision, not a failure). Raises only on a hard embed/Milvus
+            # failure (after bounded write-pressure retries) so this chunk is
+            # recorded as failed rather than silently claimed as done.
+            indexed_ids = await embed_batch(chunk)
+        except Exception as exc:
+            logger.exception("Embedding chunk failed for stream %s", stream_id)
             state_inner = _embedding_states.get(stream_id)
             if not state_inner:
                 return
             async with state_inner._lock:
-                state_inner.in_flight = max(0, state_inner.in_flight - 1)
                 if state_inner.cancelled:
                     return
-                state_inner.failed = True
-                await stream_job_manager.publish(
-                    stream_id,
-                    {"type": "error", "kind": "embedding", "detail": "Embedding batch failed"},
-                )
-                await stream_job_manager.finish(
-                    stream_id, status=StreamJobStatus.ERROR, error="Embedding batch failed"
-                )
-                _embedding_states.pop(stream_id, None)
-            return
+                # Record the failure honestly and keep going with later chunks —
+                # never raise mid-stream (P8), never advance ``done`` for a chunk
+                # that produced no Milvus work.
+                state_inner.failed_count += len(chunk)
+                done_now = state_inner.done
+                total_now = state_inner.total
+                indexed_now = state_inner.indexed_count
+                failed_now = state_inner.failed_count
+            await stream_job_manager.publish(
+                stream_id,
+                {
+                    "type": "item_error",
+                    "kind": "embedding",
+                    "detail": f"Embedding chunk failed to index in Milvus: {exc}",
+                    "failed_in_chunk": len(chunk),
+                    "done": done_now,
+                    "total": total_now,
+                    "indexed": indexed_now,
+                    "failed": failed_now,
+                },
+            )
+            continue
 
+        indexed_in_chunk = len(indexed_ids) if indexed_ids else 0
         state_inner = _embedding_states.get(stream_id)
         if not state_inner:
             return
         async with state_inner._lock:
             if state_inner.cancelled:
                 return
+            # The whole chunk was handled without a hard failure (indexed rows +
+            # precedence-skips), so ``done`` advances by the full chunk; the rows
+            # actually written to Milvus are tracked separately in ``indexed_count``.
             state_inner.done += len(chunk)
+            state_inner.indexed_count += indexed_in_chunk
             done_now = state_inner.done
             total_now = state_inner.total
+            indexed_now = state_inner.indexed_count
+            failed_now = state_inner.failed_count
         await stream_job_manager.publish(
             stream_id,
-            {"type": "progress", "kind": "embedding", "done": done_now, "total": total_now},
+            {
+                "type": "progress",
+                "kind": "embedding",
+                "done": done_now,
+                "total": total_now,
+                "indexed": indexed_now,
+                "failed": failed_now,
+            },
         )
 
     await _finish_in_flight()
@@ -512,7 +619,14 @@ def _pagination_total_pages(
     *,
     per_page: int,
     result_count: int,
-) -> int:
+) -> tuple[int, bool]:
+    """Return ``(display_total_pages, more_than_cap)``.
+
+    ``display_total_pages`` is clamped to ``_APOLLO_MAX_PAGE`` (the value the UI
+    uses as the progress denominator); ``more_than_cap`` is True when Apollo's own
+    (uncapped) page count exceeds that clamp — i.e. stopping at the clamp yields a
+    partial ingest, not a genuine end-of-results.
+    """
     nested = dict(apollo_raw.get("pagination") or {})
     total = int(
         nested.get("total_entries")
@@ -520,16 +634,31 @@ def _pagination_total_pages(
         or result_count
         or 0
     )
-    # Cap reported totals at our ingest ceiling for progress UI.
-    total = min(total, _MAX_SEARCH_ENTRIES) if total > 0 else total
     explicit_total_pages = nested.get("total_pages") or apollo_raw.get("total_pages")
     if explicit_total_pages is not None and str(explicit_total_pages).strip() != "":
-        total_pages = max(1, int(explicit_total_pages))
+        raw_total_pages = max(1, int(explicit_total_pages))
     elif total > 0:
-        total_pages = max(1, (total + per_page - 1) // per_page)
+        raw_total_pages = max(1, (total + per_page - 1) // per_page)
     else:
-        total_pages = 1
-    return min(total_pages, _MAX_APOLLO_PAGES)
+        raw_total_pages = 1
+    return min(raw_total_pages, _APOLLO_MAX_PAGE), raw_total_pages > _APOLLO_MAX_PAGE
+
+
+def _apollo_page_cap_hit(exc: Exception, *, page: int) -> bool:
+    """True when ``exc`` is Apollo refusing to page further (its 50k paging cap).
+
+    ``fetch_page`` surfaces Apollo errors as a FastAPI ``HTTPException`` whose
+    ``detail`` is ``{"apollo_status": <int>, "apollo_error": <payload>}`` (see
+    ``ApolloLeadsClient._request``). Duck-typed so the engine keeps no FastAPI
+    dependency. A 422 mentioning the page "threshold" is the documented cap; a
+    422 first seen after page 1 (same params, only ``page`` changed) is treated as
+    the cap too rather than a genuine bad-query error.
+    """
+    detail = getattr(exc, "detail", None)
+    if not isinstance(detail, dict) or detail.get("apollo_status") != 422:
+        return False
+    text = str(detail.get("apollo_error", "")).lower()
+    return "threshold" in text or page > 1
 
 
 PageFetchFn = Callable[[dict[str, Any]], Awaitable[tuple[list[str], dict[str, Any], int]]]
@@ -546,8 +675,11 @@ async def run_paged_search_stream(
 ) -> None:
     """Walk Apollo pages at max page size, publishing ``ids`` events, then ``complete`` / ``error``.
 
-    Always requests ``per_page=100`` (Apollo max) and stops at ``_MAX_SEARCH_ENTRIES`` (100k)
-    or when Apollo reports no further pages.
+    Always requests ``per_page=100`` (Apollo max) and stops at Apollo's 50k paging
+    cap (``_APOLLO_MAX_PAGE``), at ``_MAX_SEARCH_ENTRIES`` (secondary guard), or when
+    Apollo reports no further pages. If the walk stops early because of the cap the
+    terminal ``complete`` carries ``partial: true, reason: "apollo_page_cap"``; a
+    defensive over-threshold 422 mid-walk ends the same clean way (never a raise).
 
     Prefer ``run_paged_search_with_embedding`` for streamed searches so ingest and
     embedding run as peer tasks. ``schedule_embed`` here should only enqueue work
@@ -559,12 +691,14 @@ async def run_paged_search_stream(
         return
     job.status = StreamJobStatus.RUNNING
 
+    partial = False
+    partial_reason: str | None = None
     try:
         page = max(1, int(base_params.get("page") or 1))
         per_page = _APOLLO_MAX_PER_PAGE
         total_pages = 1
 
-        while page <= _MAX_APOLLO_PAGES and job.total_ids < _MAX_SEARCH_ENTRIES:
+        while page <= _APOLLO_MAX_PAGE and job.total_ids < _MAX_SEARCH_ENTRIES:
             if job.cancelled:
                 break
             if job.paused:
@@ -574,10 +708,26 @@ async def run_paged_search_stream(
                 if job.cancelled:
                     break
             page_params = {**base_params, "page": page, "per_page": per_page}
-            mongo_ids, apollo_raw, result_count = await fetch_page(page_params)
+            try:
+                mongo_ids, apollo_raw, result_count = await fetch_page(page_params)
+            except Exception as exc:
+                if _apollo_page_cap_hit(exc, page=page):
+                    # Apollo won't page any further; end cleanly with a partial
+                    # complete (never raise mid-stream, P8) — pages already
+                    # ingested stand. Any other error propagates to the terminal
+                    # error handler below (incl. final 429 exhaustion).
+                    logger.info(
+                        "Apollo page cap hit for stream %s at page %s; ending partial",
+                        stream_id,
+                        page,
+                    )
+                    partial = True
+                    partial_reason = "apollo_page_cap"
+                    break
+                raise
             if job.cancelled:
                 break
-            total_pages = _pagination_total_pages(
+            total_pages, more_than_cap = _pagination_total_pages(
                 apollo_raw,
                 per_page=per_page,
                 result_count=result_count,
@@ -602,26 +752,36 @@ async def run_paged_search_stream(
                     },
                 )
 
-            if (
-                job.cancelled
-                or not mongo_ids
-                or job.total_ids >= _MAX_SEARCH_ENTRIES
-                or page >= total_pages
-                or result_count < per_page
-            ):
+            # Decide whether to stop, and whether stopping means a partial ingest.
+            # ``result_count < per_page`` (a short page) is Apollo genuinely running
+            # out — a complete, not a partial. Reaching the clamped ``total_pages``
+            # while Apollo reported more (``more_than_cap``) is the paging cap.
+            if job.cancelled or not mongo_ids:
+                break
+            if result_count < per_page:
+                break
+            if job.total_ids >= _MAX_SEARCH_ENTRIES:
+                partial = True
+                partial_reason = partial_reason or "max_entries"
+                break
+            if page >= total_pages:
+                if more_than_cap:
+                    partial = True
+                    partial_reason = partial_reason or "apollo_page_cap"
                 break
             page += 1
 
-        await manager.publish(
-            stream_id,
-            {
-                "type": "complete",
-                "kind": "ingest",
-                "total": job.total_ids,
-                "pages": page,
-                "cancelled": job.cancelled,
-            },
-        )
+        complete_event: dict[str, Any] = {
+            "type": "complete",
+            "kind": "ingest",
+            "total": job.total_ids,
+            "pages": page,
+            "cancelled": job.cancelled,
+        }
+        if partial and not job.cancelled:
+            complete_event["partial"] = True
+            complete_event["reason"] = partial_reason or "apollo_page_cap"
+        await manager.publish(stream_id, complete_event)
         await manager.finish(stream_id, status=StreamJobStatus.COMPLETE)
         if on_ingest_complete is not None:
             await on_ingest_complete()
@@ -644,13 +804,62 @@ async def run_paged_search_with_embedding(
     fetch_page: PageFetchFn,
     embed_batch: EmbedBatchFn,
 ) -> None:
-    """Run Apollo ingest and embedding as peer coroutines linked by a queue.
+    """Run Apollo ingest and embedding as peer coroutines linked by a BOUNDED queue.
 
-    Ingest only ``put``s mongo id batches; a sibling consumer embeds them so OpenAI
-    / Milvus work overlaps with the next Apollo page fetch instead of waiting for
-    the ingest coroutine to finish.
+    Ingest only enqueues mongo id batches; a sibling consumer embeds them so OpenAI
+    / Milvus work overlaps with the next Apollo page fetch. The queue is bounded
+    (``ingest_embed_queue_max_pages``) and the consumer only pulls the next batch
+    once an embed slot is free — so when embedding/Milvus falls behind, the queue
+    fills, the Apollo page walk blocks on ``put``, and fetching pauses until
+    embedding catches up. That is the whole point: cooperative backpressure instead
+    of racing unbounded ingest ahead of a memory-capped Milvus.
     """
-    queue: asyncio.Queue[list[str] | None] = asyncio.Queue()
+    settings = get_settings()
+    max_pages = max(1, int(settings.ingest_embed_queue_max_pages))
+    concurrency = max(1, int(settings.embed_batch_concurrency))
+    queue: asyncio.Queue[list[str] | None] = asyncio.Queue(maxsize=max_pages)
+
+    async def _enqueue(mongo_ids: list[str]) -> None:
+        """Blocking-put a batch, announcing ``throttled`` while the queue is full.
+
+        Uses ``put_nowait`` + poll (rather than a bare ``await queue.put``) so it can
+        emit progress-class ``throttled`` events while blocked AND bail promptly if
+        the job is cancelled — a cancelled job must never leave the producer wedged
+        on a full queue.
+        """
+        batch = list(mongo_ids)
+        started = time.monotonic()
+        next_announce = _THROTTLE_FIRST_SECONDS
+        while True:
+            state = _embedding_states.get(embedding_stream_id)
+            ingest_job = stream_job_manager.get(ingest_stream_id)
+            if (
+                state is None
+                or state.cancelled
+                or (ingest_job is not None and ingest_job.cancelled)
+            ):
+                # Embedding gone/cancelled or ingest cancelled: drop and let the
+                # walk wind down instead of blocking forever on a full queue.
+                return
+            try:
+                queue.put_nowait(batch)
+                return
+            except asyncio.QueueFull:
+                pass
+            waited = time.monotonic() - started
+            if waited >= next_announce:
+                await stream_job_manager.publish(
+                    ingest_stream_id,
+                    {
+                        "type": "throttled",
+                        "kind": "ingest",
+                        "reason": "embedding_backlog",
+                        "queue_pages": queue.qsize(),
+                        "waited_s": round(waited, 1),
+                    },
+                )
+                next_announce = waited + _THROTTLE_REPEAT_SECONDS
+            await asyncio.sleep(_THROTTLE_POLL_SECONDS)
 
     async def _ingest() -> None:
         try:
@@ -658,28 +867,30 @@ async def run_paged_search_with_embedding(
                 stream_id=ingest_stream_id,
                 base_params=base_params,
                 fetch_page=fetch_page,
-                schedule_embed=lambda mongo_ids: queue.put(list(mongo_ids)),
+                schedule_embed=_enqueue,
                 on_ingest_complete=None,
             )
         finally:
             # Sentinel: embedding consumer drains remaining batches then closes.
+            # Bounded wait — the consumer is always draining until it sees None.
             await queue.put(None)
 
     async def _embed_consumer() -> None:
         # How many page-sized embedding batches may run at once while ingest
         # continues (env-tunable). Only the short Milvus upsert inside each batch
         # serializes on the priority gate; the OpenAI embed overlaps freely.
-        concurrency = max(1, int(get_settings().embed_batch_concurrency))
         sem = asyncio.Semaphore(concurrency)
         tasks: set[asyncio.Task[None]] = set()
 
         async def _one(batch: list[str]) -> None:
-            async with sem:
+            try:
                 await schedule_embedding_batch(
                     embedding_stream_id,
                     batch,
                     embed_batch=embed_batch,
                 )
+            finally:
+                sem.release()
 
         try:
             while True:
@@ -689,6 +900,15 @@ async def run_paged_search_with_embedding(
                 state = _embedding_states.get(embedding_stream_id)
                 # Drain the queue without work once cancelled so ingest can finish.
                 if state is None or state.cancelled:
+                    continue
+                # Backpressure: wait for a free embed slot BEFORE pulling the next
+                # batch. While every slot is busy (e.g. Milvus write-pressure
+                # retry-backoff) the bounded queue fills and _enqueue blocks the
+                # Apollo walk — the intended end-to-end throttle.
+                await sem.acquire()
+                state = _embedding_states.get(embedding_stream_id)
+                if state is None or state.cancelled:
+                    sem.release()
                     continue
                 task = asyncio.create_task(
                     _one(batch),
@@ -708,6 +928,14 @@ async def run_paged_search_with_embedding(
                 await close_embedding_stream(embedding_stream_id)
 
     await asyncio.gather(_ingest(), _embed_consumer())
+
+
+def _next_buffered(job: StreamJob, after_seq: int) -> _Buffered | None:
+    """First buffered event with ``seq > after_seq`` (history is seq-ordered)."""
+    for buffered in job.history:
+        if buffered.seq > after_seq:
+            return buffered
+    return None
 
 
 async def iter_stream_events(stream_ids: list[str]) -> AsyncIterator[dict[str, Any]]:
@@ -741,7 +969,10 @@ async def iter_stream_events(stream_ids: list[str]) -> AsyncIterator[dict[str, A
     for job in jobs:
         job.subscribers += 1
 
-    cursors = {job.stream_id: 0 for job in jobs}
+    # Track the last seq yielded per job (not a list index): history is ordered by
+    # seq, so the next event to emit is the first buffered entry with a greater seq.
+    # Lossy progress events trimmed from history are simply skipped (never resent).
+    last_seq = {job.stream_id: -1 for job in jobs}
     pending = {job.stream_id: job for job in jobs}
 
     try:
@@ -750,19 +981,18 @@ async def iter_stream_events(stream_ids: list[str]) -> AsyncIterator[dict[str, A
             # Round-robin one event per job so embedding progress is not stuck
             # behind a backlog of ingest ``ids`` events.
             for stream_id, job in list(pending.items()):
-                cursor = cursors[stream_id]
-                if cursor >= len(job.history):
+                buffered = _next_buffered(job, last_seq[stream_id])
+                if buffered is None:
                     if job.status in {
                         StreamJobStatus.COMPLETE,
                         StreamJobStatus.ERROR,
                     }:
                         pending.pop(stream_id, None)
                     continue
-                event = job.history[cursor]
-                cursors[stream_id] = cursor + 1
+                last_seq[stream_id] = buffered.seq
                 progressed = True
-                yield event
-                if event.get("type") in {"complete", "error"}:
+                yield buffered.event
+                if buffered.event.get("type") in {"complete", "error"}:
                     pending.pop(stream_id, None)
 
             if not pending:
