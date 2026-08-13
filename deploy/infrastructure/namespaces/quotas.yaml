@@ -33,5 +33,11 @@ spec:
     # limit; stuck at 85%). +2Gi mirrors the milvus 10->12Gi delta and preserves
     # the prior headroom. requests.memory (the real reservation) is unchanged and
     # stays within worker-allocatable; this is the burstable ceiling only.
-    limits.memory: 30Gi
+    # 30->34Gi (2026-08-13, canary e2e): the backpressure-fix canary trio needs
+    # +2560Mi of limits (leads-canary 1792Mi incl sidecar + search-canary 768Mi;
+    # searchui-canary squeaked into the old ceiling) and 30Gi was already 99%
+    # allocated. Burstable ceiling only; expect to claw back ~4Gi when the
+    # milvus limit is right-sized down (12->~8Gi) after the mmap steady-state
+    # holds (Phase 4 of the memory-capping plan).
+    limits.memory: 34Gi
     pods: "60"
