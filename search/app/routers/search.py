@@ -743,6 +743,23 @@ async def _ingest_leads_via_stream(
                     "ingest_stream_id": ingest_stream_id,
                     "embedding_stream_id": embedding_stream_id,
                 }
+            elif event_type == "embedding_detached":
+                # Leads cancelled/lost the embedding sibling while ingest keeps
+                # storing ids (unembedded; backfill recovers vectors). Purely
+                # informational: the ingest job is unaffected, and the embedding
+                # stream still sends its OWN terminal complete(cancelled) — which
+                # is what flips ``embedding_done`` and publishes the embedding
+                # job terminal — so do NOT touch state or publish_job here (a
+                # premature ``embedding_done`` could early-return before that
+                # terminal lands). Relay with stream context, like ``throttled``.
+                yield {
+                    "type": "embedding_detached",
+                    "kind": "ingest",
+                    "reason": event.get("reason"),
+                    "stored": position,
+                    "ingest_stream_id": ingest_stream_id,
+                    "embedding_stream_id": embedding_stream_id,
+                }
             elif event_type == "complete":
                 ingest_done = True
                 search.total_results = position
@@ -2069,6 +2086,20 @@ async def _enrich_ndjson_events(
                                     "reason": event.get("reason"),
                                     "queue_pages": int(event.get("queue_pages") or 0),
                                     "waited_s": float(event.get("waited_s") or 0.0),
+                                    "ingest_stream_id": ingest_stream_id,
+                                    "embedding_stream_id": embedding_stream_id,
+                                }
+                            )
+                        elif event_type == "embedding_detached":
+                            # Embedding sibling cancelled/gone while this person's
+                            # ingest continues — informational (the embedding
+                            # stream sends its own terminal). Relay with batch
+                            # context; do not advance counters or flip state.
+                            await _emit(
+                                {
+                                    "type": "embedding_detached",
+                                    "kind": "ingest",
+                                    "reason": event.get("reason"),
                                     "ingest_stream_id": ingest_stream_id,
                                     "embedding_stream_id": embedding_stream_id,
                                 }
