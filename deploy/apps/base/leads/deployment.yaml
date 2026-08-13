@@ -54,12 +54,22 @@ spec:
               # core (same 2026-08-11 burst that starved search).
               cpu: 2000m
               memory: 1536Mi
+          # Startup can block minutes on Milvus collection.load() after a Milvus
+          # restart (2026-08-13: liveness killed startup in a loop, hard outage).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            periodSeconds: 10
+            failureThreshold: 42
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8001
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /readyz
