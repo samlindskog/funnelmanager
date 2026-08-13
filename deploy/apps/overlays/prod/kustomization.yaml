@@ -72,7 +72,7 @@ images:
   # `newTag: canary-*`); it is never pulled while the canary is `replicas: 0`.
   - name: ghcr.io/samlindskog/funnelmanager/search-canary
     newName: ghcr.io/samlindskog/funnelmanager/search
-    newTag: canary-5ec74260
+    newTag: canary-d85eb1fe
   # Telemetry-enabled searchui (SPA) canary — the browser-originating half of the
   # full-stack search trace. Same remap pattern: the base uses the canary-logical
   # name `.../searchui-canary`; remap it to the real `searchui` repo with an
