@@ -651,6 +651,11 @@ function ProspectRunner({
 
 const TOP_PEOPLE_DEFAULT = 10
 const TOP_PEOPLE_MAX = 100
+/** Backend compute budget: companies × embed_kinds ≤ this (embed_kinds = max(1, selected)). */
+const COMPUTE_BUDGET = 3000
+/** Soft latency threshold: above this the synchronous request may approach the edge
+ * timeout (~100s) — warn but don't block. */
+const COMPUTE_SOFT_WARN = 1200
 
 function clampPerCompany(n: number): number {
   if (!Number.isFinite(n)) return TOP_PEOPLE_DEFAULT
@@ -669,8 +674,13 @@ function TopPeopleRunner({
   const [grouped, setGrouped] = useState<SimilarityGroupedResponse | null>(null)
 
   const companyCount = form.companyValues.length
+  // embed_kinds = max(1, selected) — omitted/pure-filter both count as 1 (matches backend).
+  const embedKinds = Math.max(1, form.selEmbeds.length)
   const estimated = companyCount * perCompany
+  const computeUnits = companyCount * embedKinds
   const overCap = estimated > GROUPED_MAX_RESULTS
+  const overComputeCap = computeUnits > COMPUTE_BUDGET
+  const softWarn = !overComputeCap && computeUnits > COMPUTE_SOFT_WARN
 
   const runGrouped = useCallback(async () => {
     const passage = form.query.trim()
@@ -686,7 +696,13 @@ function TopPeopleRunner({
     setPerCompany(per)
     if (companyCount * per > GROUPED_MAX_RESULTS) {
       setStageError(
-        `${companyCount} companies × ${per} = ${(companyCount * per).toLocaleString()} exceeds the ${GROUPED_MAX_RESULTS.toLocaleString()} cap. Lower the per-company count or the company list.`,
+        `${companyCount} companies × ${per} = ${(companyCount * per).toLocaleString()} exceeds the ${GROUPED_MAX_RESULTS.toLocaleString()} results cap. Lower the per-company count or the company list.`,
+      )
+      return
+    }
+    if (companyCount * embedKinds > COMPUTE_BUDGET) {
+      setStageError(
+        `${companyCount} companies × ${embedKinds} embed kind${embedKinds === 1 ? '' : 's'} = ${(companyCount * embedKinds).toLocaleString()} exceeds the ${COMPUTE_BUDGET.toLocaleString()} compute budget. Reduce companies or embed kinds.`,
       )
       return
     }
@@ -717,10 +733,14 @@ function TopPeopleRunner({
     } finally {
       setSearching(false)
     }
-  }, [form, companyCount, perCompany, onHistoryRefresh])
+  }, [form, companyCount, embedKinds, perCompany, onHistoryRefresh])
 
   const canRun =
-    companyCount > 0 && !overCap && perCompany >= 1 && (form.hasEmbeds ? Boolean(form.query.trim()) : true)
+    companyCount > 0 &&
+    !overCap &&
+    !overComputeCap &&
+    perCompany >= 1 &&
+    (form.hasEmbeds ? Boolean(form.query.trim()) : true)
 
   const finalStep = (
     <Stack spacing={2} sx={{ pt: 1 }}>
@@ -764,16 +784,27 @@ function TopPeopleRunner({
           slotProps={{ htmlInput: { min: 1, max: TOP_PEOPLE_MAX } }}
           sx={{ maxWidth: 200 }}
         />
-        <Typography
-          data-testid="top-people-estimate"
-          variant="body2"
-          color={overCap ? 'error' : 'text.secondary'}
-        >
-          {companyCount.toLocaleString()} {companyCount === 1 ? 'company' : 'companies'} ×{' '}
-          {perCompany} = {estimated.toLocaleString()} results (max{' '}
-          {GROUPED_MAX_RESULTS.toLocaleString()})
-        </Typography>
+        <Stack data-testid="top-people-estimate" spacing={0.25}>
+          <Typography variant="body2" color={overCap ? 'error' : 'text.secondary'}>
+            {companyCount.toLocaleString()} {companyCount === 1 ? 'company' : 'companies'} ×{' '}
+            {perCompany} = {estimated.toLocaleString()} results (max{' '}
+            {GROUPED_MAX_RESULTS.toLocaleString()})
+          </Typography>
+          <Typography
+            data-testid="top-people-compute"
+            variant="body2"
+            color={overComputeCap ? 'error' : 'text.secondary'}
+          >
+            {companyCount.toLocaleString()} × {embedKinds} embed kind{embedKinds === 1 ? '' : 's'} ={' '}
+            {computeUnits.toLocaleString()} compute (max {COMPUTE_BUDGET.toLocaleString()})
+          </Typography>
+        </Stack>
       </Stack>
+      {softWarn && (
+        <Alert severity="warning" data-testid="top-people-latency-warning" sx={{ py: 0 }}>
+          Large runs may time out — reduce companies or embed kinds.
+        </Alert>
+      )}
       <Box>
         <Button
           data-testid="top-people-run"
@@ -786,6 +817,11 @@ function TopPeopleRunner({
         >
           {searching ? 'Ranking…' : 'Rank people'}
         </Button>
+        {searching && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+            Ranking across companies — this can take a minute or more for large sets.
+          </Typography>
+        )}
       </Box>
       {grouped && <GroupedResultsView response={grouped} />}
     </Stack>
