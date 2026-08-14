@@ -366,6 +366,14 @@ class SimilarityGroupedRequest(BaseModel):
             raise ValueError(
                 "company_ids * per_company_limit must not exceed 5000"
             )
+        # Embed-aware ANN-call budget (mirrors leads): each company runs one ANN
+        # search per selected embed kind. Omitted embeds => ["apollo"] (counts as
+        # 1); a pure-filter run (embeds == []) also counts as 1.
+        embed_count = max(1, len(self.embeds or []))
+        if len(deduped) * embed_count > 3000:
+            raise ValueError(
+                "company_ids * number of embed kinds must not exceed 3000"
+            )
         # Same query-vs-pure-filter rule as SimilaritySearchRequest: a non-empty
         # (or omitted -> ["apollo"]) embed set needs a query; a pure-filter run
         # (embeds == []) never uses query text (company_ids is the mandatory

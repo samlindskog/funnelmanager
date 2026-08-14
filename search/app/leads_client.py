@@ -563,8 +563,13 @@ class LeadsClient:
         *,
         json_body: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float = 90.0,
     ) -> Any:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        # Default 90s covers ordinary calls; a large gate-serialized fan-out (e.g.
+        # grouped similarity) overrides it. The BROWSER leg is still bounded ~100s
+        # by Cloudflare, so a longer timeout here protects internal/MCP-style
+        # callers — the UI caption keeps interactive requests inside the edge budget.
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 method,
                 self._url(path),
@@ -1108,6 +1113,9 @@ class LeadsClient:
             "POST",
             "/api/leads/similarity-search-grouped",
             json_body=json_body,
+            # Gate-serialized per-company ANN fan-out can run to minutes at scale;
+            # override the flat 90s so a legal large request isn't killed mid-flight.
+            timeout=240.0,
         )
         if not isinstance(data, dict):
             raise HTTPException(

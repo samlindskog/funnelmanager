@@ -1826,14 +1826,20 @@ async def _run_grouped_similarity_search(
     page of that flattened order, and ``_append_unique_mongo_ids`` records the
     full flattened order as ``SearchResult`` rows.
 
-    Authoritative gate (mirrors ``_run_similarity_search``): the schema validator
-    is the user-facing 422 layer, but the same invariants are re-checked here as a
-    400 so a non-schema caller can never bypass the fan-out ceiling or the
-    query-vs-pure-filter rule."""
+    Authoritative re-check for non-schema callers: the schema validator is the
+    user-facing 422 layer, but the load-bearing bounds are re-asserted here as
+    400s — ``company_ids`` present and <= 2000, ``per_company_limit`` in 1..100,
+    the 5000-hit fan-out ceiling, and the query-vs-pure-filter rule. (The
+    embed-aware ANN-call budget is enforced at the schema layer and again by
+    leads.)"""
     query = (query or "").strip()
     company_ids = [v.strip() for v in (company_ids or []) if (v or "").strip()]
     if not company_ids:
         raise HTTPException(status_code=400, detail="company_ids is required")
+    if len(company_ids) > 2000:
+        raise HTTPException(
+            status_code=400, detail="company_ids must not exceed 2000 entries"
+        )
     if not 1 <= per_company_limit <= 100:
         raise HTTPException(
             status_code=400, detail="per_company_limit must be between 1 and 100"
