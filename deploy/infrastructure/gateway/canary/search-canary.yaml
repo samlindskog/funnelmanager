@@ -67,4 +67,4 @@ spec:
           namespace: prod
           port: 8000
       timeouts:
-        request: 300s # NDJSON streams (matches the stable /api/search rule)
+        request: 0s # NDJSON streams — no absolute ceiling (matches the stable /api/search rule; see httproutes.yaml)
