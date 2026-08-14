@@ -173,6 +173,19 @@ recorded only so nobody is surprised by them during capacity/incident work:
 
 ---
 
+## 5. `systemctl`: "Failed to allocate directory watch: Too many open files"
+
+> **TL;DR:** Not a service failure — the unit action itself usually succeeded. It means
+> **root's `fs.inotify.max_user_instances` (default 128) is exhausted** on that node:
+> `k3s-agent` + one containerd-shim per pod eat instances, and `systemctl start/stop`
+> needs one more to follow the job. Seen on worker1 2026-08-13 (root at exactly 128/128).
+
+- Diagnose: count `anon_inode:inotify` fds per uid over `/proc/*/fd`; compare to
+  `/proc/sys/fs/inotify/max_user_instances`.
+- Fix (applied on worker1): `/etc/sysctl.d/99-inotify.conf` →
+  `fs.inotify.max_user_instances = 1024`, `sysctl -p` (full path `/usr/sbin/sysctl`
+  — not in PATH over ssh). Other nodes were at ~30–50/128; apply the same there if it recurs.
+
 ## See also
 
 - `deploy/clusters/prod/{infrastructure,apps}.yaml` — the Flux dependency graph.
