@@ -169,7 +169,7 @@ class McpSemanticSearchRequest(BaseModel):
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
     # Multi-company OR filter (additive): people at ANY of these companies.
-    company_ids: list[str] | None = Field(default=None, max_length=100)
+    company_ids: list[str] | None = Field(default=None, max_length=2000)
     entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
@@ -305,7 +305,7 @@ class SimilaritySearchRequest(BaseModel):
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_id: str | None = None
     # Multi-company OR filter (additive): people at ANY of these companies.
-    company_ids: list[str] | None = Field(default=None, max_length=100)
+    company_ids: list[str] | None = Field(default=None, max_length=2000)
     entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None

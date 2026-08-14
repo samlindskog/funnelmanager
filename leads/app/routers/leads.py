@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -2328,10 +2328,14 @@ def _milvus_scalar_expr(
 
 def _doc_passes_filters(
     doc: dict[str, Any],
-    company_filter_ids: list[str] | None,
+    company_filter_ids: Collection[str] | None,
     body: SimilaritySearchRequest,
 ) -> bool:
-    """Authoritative re-check of every requested filter against the hydrated Mongo doc."""
+    """Authoritative re-check of every requested filter against the hydrated Mongo doc.
+
+    Pass ``company_filter_ids`` as a set when calling per-doc in a loop —
+    workflow-scale filters carry hundreds of ids and this runs per candidate.
+    """
     if company_filter_ids:
         if str(doc.get("company_id") or "") not in company_filter_ids:
             return False
@@ -2354,7 +2358,18 @@ async def _resolve_company_filter_ids(
     db: AsyncIOMotorDatabase,
     body: SimilaritySearchRequest,
 ) -> list[str] | None:
-    """Resolve company_id + company_ids (union, order-preserving dedupe) to org _ids."""
+    """Resolve company_id + company_ids (union, order-preserving dedupe) to org _ids.
+
+    People docs canonically store ``company_id`` = the organization DOCUMENT's
+    Mongo ``_id`` (``company_apollo_id`` holds the raw Apollo org id as the
+    resolution key). Each filter entry accepts either id space — a company
+    record's Mongo ``_id`` or its Apollo organization id — and normalizes to
+    the Mongo ``_id``. 404 when any entry misses both spaces.
+
+    Batched: a prospect-run search passes EVERY resolved company (hundreds+),
+    so resolution is two $in queries instead of the former per-id find_one
+    loop (which was up to 2N sequential round trips).
+    """
     values: list[str] = []
     if body.company_id:
         values.append(body.company_id)
@@ -2363,59 +2378,58 @@ async def _resolve_company_filter_ids(
             values.append(value)
     if not values:
         return None
-    resolved: list[str] = []
+
+    # Prefer the Mongo _id space (only for entries that parse as ObjectIds).
+    object_ids: dict[str, ObjectId] = {}
     for value in values:
-        rid = await _resolve_company_filter_id(db, value)
-        if rid and rid not in resolved:
-            resolved.append(rid)
-    return resolved or None
+        try:
+            object_ids[value] = ObjectId(value)
+        except Exception:
+            continue
 
-
-async def _resolve_company_filter_id(
-    db: AsyncIOMotorDatabase,
-    company_id: str | None,
-) -> str | None:
-    """Resolve the filter input to the org document's Mongo ``_id`` string.
-
-    People docs canonically store ``company_id`` = the organization DOCUMENT's
-    Mongo ``_id`` (``company_apollo_id`` holds the raw Apollo org id as the
-    resolution key). The filter accepts either id space — a company record's
-    Mongo ``_id`` or its Apollo organization id — and normalizes to the Mongo
-    ``_id``. 404 only when both lookups miss.
-    """
-    if company_id is None:
-        return None
-    value = company_id.strip()
-    if not value:
-        return None
-
-    org_doc: dict[str, Any] | None = None
-    # Prefer the Mongo _id space (only when the value is a valid ObjectId).
-    try:
-        org_object_id = ObjectId(value)
-    except Exception:
-        org_object_id = None
-    if org_object_id is not None:
-        candidate = await db.leads.find_one({"_id": org_object_id})
-        if candidate and (candidate.get("entity_type") or "person") == "organization":
-            org_doc = candidate
-
-    # Fall back to the Apollo organization id (a non-ObjectId string is a legit
-    # Apollo org id, not a client error).
-    if org_doc is None:
-        org_doc = await db.leads.find_one(
-            {"apollo_id": value, "entity_type": "organization"}
+    resolved_by_value: dict[str, str] = {}
+    if object_ids:
+        cursor = db.leads.find(
+            {"_id": {"$in": list(object_ids.values())}},
+            {"_id": 1, "entity_type": 1},
         )
+        org_mongo_ids: set[str] = set()
+        async for doc in cursor:
+            if (doc.get("entity_type") or "person") == "organization":
+                org_mongo_ids.add(str(doc["_id"]))
+        for value, oid in object_ids.items():
+            if str(oid) in org_mongo_ids:
+                resolved_by_value[value] = str(oid)
 
-    if org_doc is None:
+    # Fall back to the Apollo organization id space for everything unresolved
+    # (a non-ObjectId string is a legit Apollo org id, not a client error).
+    unresolved = [v for v in values if v not in resolved_by_value]
+    if unresolved:
+        cursor = db.leads.find(
+            {"apollo_id": {"$in": unresolved}, "entity_type": "organization"},
+            {"_id": 1, "apollo_id": 1},
+        )
+        async for doc in cursor:
+            apollo_id = str(doc.get("apollo_id") or "")
+            if apollo_id and apollo_id not in resolved_by_value:
+                resolved_by_value[apollo_id] = str(doc["_id"])
+
+    missing = [v for v in values if v not in resolved_by_value]
+    if missing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                f"No organization lead found for company_id {company_id} "
+                f"No organization lead found for company_id {missing[0]} "
                 "(accepts a company record's Mongo id or Apollo organization id)"
             ),
         )
-    return str(org_doc["_id"])
+
+    resolved: list[str] = []
+    for value in values:
+        rid = resolved_by_value[value]
+        if rid not in resolved:
+            resolved.append(rid)
+    return resolved or None
 
 
 async def _pure_filter_similarity(
@@ -2468,6 +2482,9 @@ async def similarity_search(
     filters provide recall; the hydrated Mongo docs are re-checked authoritatively.
     """
     company_filter_ids = await _resolve_company_filter_ids(db, body)
+    # Set for the per-candidate re-check loop; the ordered list still feeds the
+    # Milvus expr builder.
+    company_filter_id_set = set(company_filter_ids) if company_filter_ids else None
     embeds = body.embeds if body.embeds is not None else ["apollo"]
 
     # Pure filter search: no Milvus / OpenAI (works even when either is down).
@@ -2559,7 +2576,7 @@ async def similarity_search(
             if not doc:
                 continue
             # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
-            if not _doc_passes_filters(doc, company_filter_ids, body):
+            if not _doc_passes_filters(doc, company_filter_id_set, body):
                 continue
             results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc, body.fields)))
             if len(results) >= body.limit:

@@ -151,7 +151,7 @@ class SimilaritySearchRequest(BaseModel):
     company_id: str | None = None
     # Multi-company OR filter (additive): people at ANY of these companies.
     # Same dual id-space per entry as company_id; merged with it when both given.
-    company_ids: list[str] | None = Field(default=None, max_length=100)
+    company_ids: list[str] | None = Field(default=None, max_length=2000)
     entity_type: Literal["person", "organization"] | None = None
     email_exists: bool | None = None
     phone_exists: bool | None = None
