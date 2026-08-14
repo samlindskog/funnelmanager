@@ -653,9 +653,11 @@ const TOP_PEOPLE_DEFAULT = 10
 const TOP_PEOPLE_MAX = 100
 /** Backend compute budget: companies × embed_kinds ≤ this (embed_kinds = max(1, selected)). */
 const COMPUTE_BUDGET = 3000
-/** Soft latency threshold: above this the synchronous request may approach the edge
- * timeout (~100s) — warn but don't block. */
-const COMPUTE_SOFT_WARN = 1200
+/** Soft latency threshold: warn but don't block. Calibrated live on the
+ * 2026-08-14 canary e2e: the MilvusGate serializes vector searches at
+ * ~300ms/call, so compute≈414 took ~2min end-to-end. 200 keeps warned-free
+ * runs around the one-minute mark. */
+const COMPUTE_SOFT_WARN = 200
 
 function clampPerCompany(n: number): number {
   if (!Number.isFinite(n)) return TOP_PEOPLE_DEFAULT
