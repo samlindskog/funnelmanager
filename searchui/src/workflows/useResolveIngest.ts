@@ -321,7 +321,15 @@ export function useResolveIngest({ checkpointKey }: ResolveIngestOptions): UseRe
       await runPool(worklist, RESOLVE_CONCURRENCY, resolveOne)
     } finally {
       activeRef.current = false
-      setPhase('confirm')
+      // Auto-advance past the confirm gate when nothing is ingestable — every
+      // company already-ingested / not-found / failed leaves zero pending rows, so
+      // there is nothing to confirm and no ingest to run. Go straight to `done` so
+      // the final step unlocks (this is the zero-Apollo-spend rerank path). Only the
+      // has-pending case still gates on the confirm click.
+      const anyReady = rowsRef.current.some(
+        (row) => Boolean(row.orgRecordId) && row.status === 'pending',
+      )
+      setPhase(anyReady ? 'confirm' : 'done')
     }
   }, [resolveOne])
 
