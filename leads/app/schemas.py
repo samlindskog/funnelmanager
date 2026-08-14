@@ -211,3 +211,57 @@ class SimilarityHitOut(BaseModel):
 
 class SimilaritySearchResponse(BaseModel):
     results: list[SimilarityHitOut] = Field(default_factory=list)
+
+
+class GroupedSimilaritySearchRequest(BaseModel):
+    """Per-company top-X semantic search (additive over similarity-search).
+
+    Same filter/ranking semantics as ``SimilaritySearchRequest`` but scoped to a
+    REQUIRED set of companies, returning the top ``per_company_limit`` hits for each
+    company separately (rather than one flat global ``limit`` list). There is no
+    single ``company_id``; ``company_ids`` is required (each entry accepts the same
+    dual id-space — a company record's Mongo ``_id`` or its Apollo organization id).
+    """
+
+    query: str | None = Field(default=None, max_length=8000)
+    embeds: list[Literal["apollo", "name", "title"]] | None = None
+    company_ids: list[str] = Field(min_length=1, max_length=2000)
+    per_company_limit: int = Field(ge=1, le=100)
+    entity_type: Literal["person", "organization"] | None = None
+    email_exists: bool | None = None
+    phone_exists: bool | None = None
+    linkedin_exists: bool | None = None
+    fields: Literal["full", "display"] = "full"
+
+    @model_validator(mode="after")
+    def _validate(self) -> "GroupedSimilaritySearchRequest":
+        if self.embeds is not None and len(set(self.embeds)) != len(self.embeds):
+            raise ValueError("embeds must not contain duplicate kinds")
+        # Strip + order-preserving dedupe; must stay non-empty (company_ids required).
+        deduped: list[str] = []
+        for value in self.company_ids:
+            entry = (value or "").strip()
+            if entry and entry not in deduped:
+                deduped.append(entry)
+        if not deduped:
+            raise ValueError("company_ids must contain at least one non-blank entry")
+        self.company_ids = deduped
+        # Omitted embeds default to ["apollo"]; [] is an explicit pure-filter run
+        # (which always has the required company_ids filter).
+        effective = self.embeds if self.embeds is not None else ["apollo"]
+        if effective and not (self.query or "").strip():
+            raise ValueError("query is required when embeds is non-empty")
+        if not effective:
+            self.query = None
+        return self
+
+
+class SimilarityGroupOut(BaseModel):
+    company_id: str
+    company: LeadOut
+    hits: list[SimilarityHitOut] = Field(default_factory=list)
+
+
+class GroupedSimilaritySearchResponse(BaseModel):
+    groups: list[SimilarityGroupOut] = Field(default_factory=list)
+    total: int = 0
