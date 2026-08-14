@@ -48,7 +48,7 @@ metadata:
     version: canary
 spec:
   # Idle by default (see ACTIVATION above). build-canary.yml scales to 1.
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: searchui-canary
