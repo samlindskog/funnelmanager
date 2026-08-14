@@ -106,7 +106,7 @@ metadata:
     version: canary
 spec:
   # Idle by default (see ACTIVATION above). build-canary.yml scales up.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: leads-canary
