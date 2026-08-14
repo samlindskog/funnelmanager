@@ -2852,6 +2852,45 @@ _GROUPED_STREAM_MAX_ANN_CALLS = 6000
 # few seconds of idle, to keep the connection warm under the edge's idle timeout.
 _STREAM_PROGRESS_EVERY_N = 10
 _STREAM_HEARTBEAT_SECONDS = 5.0
+# Probe the client connection every N completed companies on the fast-producing
+# path too (the idle branch alone never fires when groups stream steadily).
+_STREAM_DISCONNECT_PROBE_EVERY_N = 5
+
+# Blast-radius bound: at most this many grouped-stream requests may RUN at once
+# process-wide. Without it one principal can queue tens of thousands of bulk ops
+# behind the shared fan-out gate with no external cancel lever. Per-principal
+# quotas are the P4 program's job; this is the coarse concurrency cap. Excess is
+# rejected pre-flight with 429 (a normal status, before the first byte).
+_MAX_CONCURRENT_GROUPED_STREAMS = 4
+# Count of RUNNING grouped streams, lazily bound per event loop (recreated on a new
+# loop, e.g. tests), mirroring _grouped_fanout_semaphore().
+_grouped_stream_active: dict[str, Any] | None = None
+
+
+def _grouped_stream_counter() -> dict[str, Any]:
+    global _grouped_stream_active
+    loop = asyncio.get_running_loop()
+    if _grouped_stream_active is None or _grouped_stream_active.get("loop") is not loop:
+        _grouped_stream_active = {"loop": loop, "count": 0}
+    return _grouped_stream_active
+
+
+def _acquire_grouped_stream_slot() -> bool:
+    """Reserve a run slot (True) or report the cap is full (False).
+
+    Sync check-then-increment with no ``await`` between => atomic under the single
+    event loop, so concurrent requests cannot both slip past a full cap.
+    """
+    state = _grouped_stream_counter()
+    if state["count"] >= _MAX_CONCURRENT_GROUPED_STREAMS:
+        return False
+    state["count"] += 1
+    return True
+
+
+def _release_grouped_stream_slot() -> None:
+    state = _grouped_stream_counter()
+    state["count"] = max(0, state["count"] - 1)
 
 
 @router.post("/similarity-search-grouped/stream")
@@ -2927,6 +2966,7 @@ async def similarity_search_grouped_stream(
         failed = 0
         total_hits = 0
         last_progress_done = 0
+        last_disconnect_probe_done = 0
         terminal_emitted = False
 
         async def _one(idx: int, org_id: str) -> None:
@@ -3016,6 +3056,13 @@ async def similarity_search_grouped_stream(
                 if done - last_progress_done >= _STREAM_PROGRESS_EVERY_N:
                     yield _ndjson_line({"type": "progress", "done": done, "total": total})
                     last_progress_done = done
+                # Live disconnect probe on the fast-producing path (the idle branch
+                # never fires while groups stream steadily). On hang-up, stop — the
+                # finally cancels the producer + remaining per-company work.
+                if done - last_disconnect_probe_done >= _STREAM_DISCONNECT_PROBE_EVERY_N:
+                    last_disconnect_probe_done = done
+                    if await request.is_disconnected():
+                        return
 
             yield _ndjson_line({
                 "type": "complete", "total_hits": total_hits, "done": done, "failed": failed,
@@ -3040,7 +3087,18 @@ async def similarity_search_grouped_stream(
                     pass
                 except Exception:
                     logger.exception("Grouped stream producer cleanup failed")
+            # Free the concurrency slot reserved pre-flight (Starlette always drives
+            # the generator to aclose, so this finally runs exactly once per stream).
+            _release_grouped_stream_slot()
 
+    # Reserve a run slot LAST (after all fallible pre-flight), so there is no failure
+    # point between acquiring and the generator that would leak the slot; reject the
+    # excess pre-flight (429, before the first byte).
+    if not _acquire_grouped_stream_slot():
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="grouped_stream_busy",
+        )
     return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
