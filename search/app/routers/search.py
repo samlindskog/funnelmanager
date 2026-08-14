@@ -43,6 +43,7 @@ from app.schemas import (
     SearchResponse,
     SimilarityGroupedRequest,
     SimilarityGroupedResponse,
+    SimilarityGroupedStreamRequest,
     SimilarityGroupOut,
     SimilarityHitOut,
     SimilaritySearchRequest,
@@ -1800,6 +1801,117 @@ async def similarity_search(
     return response
 
 
+async def _persist_grouped_history(
+    db: AsyncSession,
+    *,
+    flattened_records: list[dict[str, Any]],
+    total: int,
+    query: str,
+    per_company_limit: int,
+    company_ids: list[str],
+    embeds: list[str] | None,
+    entity_type: str | None,
+    email_exists: bool | None,
+    phone_exists: bool | None,
+    linkedin_exists: bool | None,
+    username: str,
+    origin: str,
+    actor: str,
+    streamed: bool = False,
+) -> tuple[SearchHistory, list[dict[str, Any]]]:
+    """Persist ONE grouped-search history row + its ``SearchResult`` index over the
+    flattened (request-order) records, and emit the terminal job event. Shared by
+    the sync and streaming grouped handlers so both write **identical** rows.
+
+    ``streamed`` is additive-only: when False (sync) the persisted params/job meta
+    are byte-for-byte what the sync endpoint always wrote; when True the stream
+    marks ``streamed: true`` on both. Returns ``(row, page_results)`` — the caller
+    builds the response/terminal event from them.
+
+    Expects an already-normalized ``query`` (``""`` for a pure-filter run)."""
+    if query:
+        history_query = _clip_history_query(f"grouped: {query}")
+    else:
+        history_query = _clip_history_query(
+            _similarity_filter_label(
+                company_id=None,
+                company_ids=company_ids,
+                entity_type=entity_type,
+                email_exists=email_exists,
+                phone_exists=phone_exists,
+                linkedin_exists=linkedin_exists,
+            )
+        )
+
+    per_page = _UI_PER_PAGE
+    page_results = flattened_records[:per_page]
+    search_params: dict[str, Any] = {
+        "source": "similarity_grouped",
+        "query": query,
+        "per_company_limit": per_company_limit,
+        # History-row entity_type is always "people" (search-history taxonomy);
+        # the semantic *filter* entity_type is recorded separately.
+        "entity_type": "people",
+        "embeds": embeds,
+        "company_ids": company_ids,
+        "entity_type_filter": entity_type,
+        "email_exists": email_exists,
+        "phone_exists": phone_exists,
+        "linkedin_exists": linkedin_exists,
+    }
+    if streamed:
+        search_params["streamed"] = True
+    row = SearchHistory(
+        username=username,
+        origin=origin,
+        actor=actor,
+        query=history_query,
+        entity_type="people",
+        page=1,
+        per_page=per_page,
+        total_results=total,
+        results_json=orjson.dumps(page_results, default=str).decode(),
+        search_params_json=json.dumps(search_params),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    mongo_ids = [
+        str(record.get("mongo_id") or "").strip()
+        for record in flattened_records
+        if str(record.get("mongo_id") or "").strip()
+    ]
+    await _append_unique_mongo_ids(
+        db,
+        search=row,
+        mongo_ids=mongo_ids,
+        seen=set(),
+        next_position=0,
+    )
+    await db.commit()
+    await db.refresh(row)
+
+    meta: dict[str, Any] = {
+        "kind": "semantic_grouped",
+        "total": total,
+        "companies": len(company_ids),
+        "per_company_limit": per_company_limit,
+    }
+    if streamed:
+        meta["streamed"] = True
+    await publish_job(
+        job_id=f"semg-{row.id}",
+        job_type="semantic_search_grouped",
+        ctx=JobContext(user=username, origin=origin, actor=actor, search_id=row.id),
+        status=JobStatus.COMPLETED,
+        progress=1.0,
+        exit_status="ok",
+        meta=meta,
+    )
+    return row, page_results
+
+
 async def _run_grouped_similarity_search(
     db: AsyncSession,
     client: LeadsClient,
@@ -1904,80 +2016,21 @@ async def _run_grouped_similarity_search(
     raw_total = data.get("total")
     total = int(raw_total) if isinstance(raw_total, (int, float)) else len(flattened_records)
 
-    if query:
-        history_query = _clip_history_query(f"grouped: {query}")
-    else:
-        history_query = _clip_history_query(
-            _similarity_filter_label(
-                company_id=None,
-                company_ids=company_ids,
-                entity_type=entity_type,
-                email_exists=email_exists,
-                phone_exists=phone_exists,
-                linkedin_exists=linkedin_exists,
-            )
-        )
-
-    per_page = _UI_PER_PAGE
-    page_results = flattened_records[:per_page]
-    search_params = {
-        "source": "similarity_grouped",
-        "query": query,
-        "per_company_limit": per_company_limit,
-        # History-row entity_type is always "people" (search-history taxonomy);
-        # the semantic *filter* entity_type is recorded separately.
-        "entity_type": "people",
-        "embeds": embeds,
-        "company_ids": company_ids,
-        "entity_type_filter": entity_type,
-        "email_exists": email_exists,
-        "phone_exists": phone_exists,
-        "linkedin_exists": linkedin_exists,
-    }
-    row = SearchHistory(
+    row, page_results = await _persist_grouped_history(
+        db,
+        flattened_records=flattened_records,
+        total=total,
+        query=query,
+        per_company_limit=per_company_limit,
+        company_ids=company_ids,
+        embeds=embeds,
+        entity_type=entity_type,
+        email_exists=email_exists,
+        phone_exists=phone_exists,
+        linkedin_exists=linkedin_exists,
         username=username,
         origin=origin,
         actor=actor,
-        query=history_query,
-        entity_type="people",
-        page=1,
-        per_page=per_page,
-        total_results=total,
-        results_json=orjson.dumps(page_results, default=str).decode(),
-        search_params_json=json.dumps(search_params),
-    )
-    db.add(row)
-    await db.commit()
-    await db.refresh(row)
-
-    mongo_ids = [
-        str(record.get("mongo_id") or "").strip()
-        for record in flattened_records
-        if str(record.get("mongo_id") or "").strip()
-    ]
-    await _append_unique_mongo_ids(
-        db,
-        search=row,
-        mongo_ids=mongo_ids,
-        seen=set(),
-        next_position=0,
-    )
-    await db.commit()
-    await db.refresh(row)
-
-    await publish_job(
-        job_id=f"semg-{row.id}",
-        job_type="semantic_search_grouped",
-        ctx=JobContext(user=username, origin=origin, actor=actor, search_id=row.id),
-        status=JobStatus.COMPLETED,
-        progress=1.0,
-        exit_status="ok",
-        meta={
-            "kind": "semantic_grouped",
-            "total": total,
-            "companies": len(company_ids),
-            "per_company_limit": per_company_limit,
-        },
     )
 
     return SimilarityGroupedResponse(
@@ -2017,6 +2070,216 @@ async def similarity_grouped(
         email_exists=body.email_exists,
         phone_exists=body.phone_exists,
         linkedin_exists=body.linkedin_exists,
+    )
+
+
+async def _grouped_stream_events(
+    client: LeadsClient,
+    *,
+    query: str | None,
+    per_company_limit: int,
+    company_ids: list[str],
+    username: str,
+    origin: str,
+    actor: str,
+    embeds: list[str] | None = None,
+    entity_type: str | None = None,
+    email_exists: bool | None = None,
+    phone_exists: bool | None = None,
+    linkedin_exists: bool | None = None,
+) -> AsyncIterator[str]:
+    """Relay the leads grouped NDJSON stream to the browser; persist at completion.
+
+    Translation: leads ``group`` -> browser ``group`` (company doc + each hit's
+    lead run through ``lead_to_record`` / ``_normalize_similarity_hits``);
+    ``progress`` heartbeats and per-company ``item_error`` pass through with
+    browser context. Groups are accumulated server-side keyed by their
+    request-order ``index`` (they arrive in COMPLETION order); on leads' terminal
+    ``complete`` the flattened (request-order) records are persisted as the SAME
+    history + result rows the sync endpoint writes, and a terminal browser
+    ``complete`` carrying the new ``search_id`` + history detail is emitted.
+
+    P8: once this generator has started it NEVER raises — a leads/transport/DB
+    failure becomes an ``error`` line, and exactly one terminal (``complete`` or
+    ``error``) is always emitted on any non-cancelled exit. On cancellation
+    (browser disconnect) the leads stream is closed (cancelling leads-side work)
+    and NOTHING is persisted — persistence only runs after leads' ``complete``
+    (i.e. over COMPLETE, never partial, data)."""
+    norm_query = (query or "").strip()
+    # index (request order) -> that company's flattened records, for request-order
+    # flatten at completion even though groups arrive in completion order.
+    groups_by_index: dict[int, list[dict[str, Any]]] = {}
+    terminal_sent = False
+    try:
+        async for event in client.similarity_search_grouped_stream(
+            norm_query or None,
+            per_company_limit=per_company_limit,
+            company_ids=company_ids,
+            embeds=embeds,
+            entity_type=entity_type,
+            email_exists=email_exists,
+            phone_exists=phone_exists,
+            linkedin_exists=linkedin_exists,
+        ):
+            etype = event.get("type")
+            if etype == "group":
+                index = int(event.get("index") or 0)
+                company_id = str(event.get("company_id") or "").strip()
+                company_lead = event.get("company")
+                company_record = (
+                    lead_to_record(company_lead) if isinstance(company_lead, dict) else None
+                )
+                raw_hits = event.get("hits")
+                hits = (
+                    [h for h in raw_hits if isinstance(h, dict)]
+                    if isinstance(raw_hits, list)
+                    else []
+                )
+                scored, records = _normalize_similarity_hits(hits)
+                groups_by_index[index] = records
+                yield _ndjson_line(
+                    {
+                        "type": "group",
+                        "index": index,
+                        "company_id": company_id,
+                        "company": company_record,
+                        "hits": [hit.model_dump(mode="json") for hit in scored],
+                    }
+                )
+            elif etype == "progress":
+                yield _ndjson_line(
+                    {
+                        "type": "progress",
+                        "done": int(event.get("done") or 0),
+                        "total": int(event.get("total") or 0),
+                    }
+                )
+            elif etype == "item_error":
+                yield _ndjson_line(
+                    {
+                        "type": "item_error",
+                        "kind": "group",
+                        "index": int(event.get("index") or 0),
+                        "company_id": str(event.get("company_id") or "").strip(),
+                        "detail": str(event.get("detail") or "group failed"),
+                    }
+                )
+            elif etype == "complete":
+                total_hits = int(event.get("total_hits") or 0)
+                failed = int(event.get("failed") or 0)
+                flattened: list[dict[str, Any]] = []
+                for idx in sorted(groups_by_index):
+                    flattened.extend(groups_by_index[idx])
+
+                async def _do_persist() -> tuple[SearchHistory, list[dict[str, Any]]]:
+                    # Own DB session (the request-scoped one is closed once the
+                    # StreamingResponse body starts) — mirrors _run_search_job.
+                    async with SessionLocal() as sdb:
+                        return await _persist_grouped_history(
+                            sdb,
+                            flattened_records=flattened,
+                            total=total_hits,
+                            query=norm_query,
+                            per_company_limit=per_company_limit,
+                            company_ids=company_ids,
+                            embeds=embeds,
+                            entity_type=entity_type,
+                            email_exists=email_exists,
+                            phone_exists=phone_exists,
+                            linkedin_exists=linkedin_exists,
+                            username=username,
+                            origin=origin,
+                            actor=actor,
+                            streamed=True,
+                        )
+
+                try:
+                    # leads is already done (it sent ``complete``); shield the local
+                    # DB writes so a last-instant disconnect can't leave a partial
+                    # row — this persists COMPLETE data or nothing, never partial.
+                    row, page_results = await asyncio.shield(_do_persist())
+                except Exception:
+                    logger.exception("Grouped stream: failed to persist history")
+                    yield _ndjson_line(
+                        {"type": "error", "detail": "Failed to persist grouped search results"}
+                    )
+                    terminal_sent = True
+                    return
+                yield _ndjson_line(
+                    {
+                        "type": "complete",
+                        "search_id": row.id,
+                        "history": _to_detail(row, page_results).model_dump(mode="json"),
+                        "total": total_hits,
+                        "failed": failed,
+                    }
+                )
+                terminal_sent = True
+                return
+            elif etype == "error":
+                yield _ndjson_line(
+                    {"type": "error", "detail": event.get("detail") or "Grouped search failed"}
+                )
+                terminal_sent = True
+                return
+            # Unknown leads event types are dropped (conservative relay).
+
+        # The leads stream closed without a terminal event — synthesize one so the
+        # browser always sees a terminal (P8 sentinel).
+        if not terminal_sent:
+            yield _ndjson_line(
+                {"type": "error", "detail": "Grouped search stream ended without a terminal event"}
+            )
+            terminal_sent = True
+    except HTTPException as exc:
+        # Pre-stream leads failure (bad status, exchange 503) surfaced as an
+        # HTTPException inside the leads client — emit as a terminal error line,
+        # never raise (P8).
+        if not terminal_sent:
+            yield _ndjson_line({"type": "error", "detail": exc.detail})
+    except Exception:
+        logger.exception("Grouped similarity stream failed")
+        if not terminal_sent:
+            yield _ndjson_line({"type": "error", "detail": "Grouped search stream failed"})
+
+
+@router.post("/searches/similarity-grouped/stream")
+async def similarity_grouped_stream(
+    body: SimilarityGroupedStreamRequest,
+    settings: Settings = Depends(get_settings),
+    user: UserOut = Depends(get_current_user),
+    token: str = Depends(oauth2_scheme),
+) -> StreamingResponse:
+    """Streaming per-company top-X semantic search (NDJSON).
+
+    Same request schema as the sync endpoint, with the embed-aware ANN budget
+    relaxed to 6000. Groups stream back in COMPLETION order (each carries its
+    request-order ``index``) with periodic ``progress`` heartbeats; on completion
+    one cross-user history row is persisted (flattened request order, identical to
+    the sync endpoint) and a terminal ``complete`` with the new ``search_id`` is
+    emitted so the UI can open the history. Never raises once the response has
+    started (P8); a browser disconnect cancels leads-side work and persists
+    nothing."""
+    client = LeadsClient(settings, token)
+    origin, actor = _principal_attribution()
+    generator = _grouped_stream_events(
+        client,
+        query=body.query,
+        per_company_limit=body.per_company_limit,
+        company_ids=body.company_ids,
+        username=user.username,
+        origin=origin,
+        actor=actor,
+        embeds=body.embeds,
+        entity_type=body.entity_type,
+        email_exists=body.email_exists,
+        phone_exists=body.phone_exists,
+        linkedin_exists=body.linkedin_exists,
+    )
+    return StreamingResponse(
+        generator,
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

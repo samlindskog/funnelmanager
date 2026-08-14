@@ -1129,6 +1129,96 @@ class LeadsClient:
             )
         return data
 
+    async def similarity_search_grouped_stream(
+        self,
+        query: str | None = None,
+        *,
+        per_company_limit: int,
+        company_ids: list[str],
+        embeds: list[str] | None = None,
+        entity_type: str | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Streaming per-company top-X semantic search via leads (NDJSON).
+
+        Modeled on :meth:`subscribe_streams`: a per-read timeout with NO total
+        cap (a large gate-serialized fan-out runs long — unlike the sync grouped
+        call's 240s ceiling). Same exchange-not-forward auth as every other call.
+        Yields leads event dicts verbatim for the router to translate; the leads
+        contract emits ``group``/``progress``/``item_error`` and a terminal
+        ``complete`` or ``error``."""
+        json_body: dict[str, Any] = {
+            "per_company_limit": per_company_limit,
+            "company_ids": company_ids,
+            "fields": "display",
+        }
+        if query is not None:
+            json_body["query"] = query
+        if embeds is not None:
+            json_body["embeds"] = embeds
+        if entity_type is not None:
+            json_body["entity_type"] = entity_type
+        if email_exists is not None:
+            json_body["email_exists"] = email_exists
+        if phone_exists is not None:
+            json_body["phone_exists"] = phone_exists
+        if linkedin_exists is not None:
+            json_body["linkedin_exists"] = linkedin_exists
+        headers = {
+            **await self._headers(),
+            "Accept": "application/x-ndjson",
+        }
+        # read=None: a company's ANN work can take a while between emitted lines;
+        # the leads heartbeat ``progress`` line keeps the connection warm. No total
+        # cap — the fan-out legitimately runs to minutes at scale.
+        timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.send(
+                client.build_request(
+                    "POST",
+                    self._url("/api/leads/similarity-search-grouped/stream"),
+                    headers=headers,
+                    json=json_body,
+                ),
+                stream=True,
+            )
+            try:
+                if response.status_code >= 400:
+                    detail: Any
+                    try:
+                        payload = await response.aread()
+                        detail = json.loads(payload.decode("utf-8")).get(
+                            "detail", payload.decode()
+                        )
+                    except Exception:
+                        detail = (await response.aread()).decode("utf-8", errors="replace")
+                    raise HTTPException(
+                        status_code=response.status_code
+                        if response.status_code in {400, 401, 403, 404, 409, 422}
+                        else status.HTTP_502_BAD_GATEWAY,
+                        detail=detail
+                        if response.status_code in {400, 401, 403, 404, 409, 422}
+                        else {"leads_status": response.status_code, "leads_error": detail},
+                    )
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(event, dict):
+                            yield event
+            finally:
+                await response.aclose()
+
     async def resolve_organization_by_name(self, name: str) -> dict[str, Any]:
         mongo_ids = await self.search_organizations(
             {
