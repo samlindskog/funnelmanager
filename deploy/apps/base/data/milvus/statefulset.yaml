@@ -89,12 +89,13 @@ spec:
               # global mmap + readAheadPolicy=random keeps resident memory
               # ~O(active pages), not O(corpus) — verified on a 1,009-domain run
               # (sawtooth 3-10.7GB working set, internal memUsage <=6.8GB, zero
-              # OOM/refusals at the old 12Gi). 12Gi -> 8Gi claws back 4Gi of node
-              # headroom; the write-protection watermarks (0.85/0.95 of this
-              # limit) now engage at ~7-7.8GB and leads backs off gracefully
-              # (canary-tested). History of the 2.5->12Gi OOM ladder: git log
-              # this file (2026-08-10..13).
-              memory: 8192Mi
+              # OOM/refusals at the old 12Gi). 8Gi proved too tight for RECOVERY
+              # workloads (2026-08-14 outage: post-crash reload + WAL replay +
+              # compaction wedged load admission at the 0.95 watermark, ~7.7GB
+              # "used" incl. page cache). 10Gi = steady-state sawtooth + recovery
+              # headroom; request stays 8Gi (sustained band, eviction ranking).
+              # History of the 2.5->12Gi OOM ladder: git log this file.
+              memory: 10240Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
