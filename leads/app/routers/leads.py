@@ -59,6 +59,7 @@ from app.schemas import (
     EmbeddingBackfillResponse,
     GroupedSimilaritySearchRequest,
     GroupedSimilaritySearchResponse,
+    GroupedSimilaritySearchStreamRequest,
     LeadOut,
     SearchIdsOut,
     SimilarityGroupOut,
@@ -2840,6 +2841,207 @@ async def similarity_search_grouped(
             )
         )
     return GroupedSimilaritySearchResponse(groups=groups, total=total)
+
+
+# Streaming grouped variant: same per-company fan-out (the correctness guarantee —
+# grouping search only approximates per-group top-X), streamed so a large company
+# set doesn't 524 on a single synchronous browser leg. Streaming makes big runs
+# legitimate, so the ANN budget is relaxed (schema uses 6000; router mirrors it).
+_GROUPED_STREAM_MAX_ANN_CALLS = 6000
+# Progress heartbeat cadence: emit at least every N completed companies OR every
+# few seconds of idle, to keep the connection warm under the edge's idle timeout.
+_STREAM_PROGRESS_EVERY_N = 10
+_STREAM_HEARTBEAT_SECONDS = 5.0
+
+
+@router.post("/similarity-search-grouped/stream")
+async def similarity_search_grouped_stream(
+    body: GroupedSimilaritySearchStreamRequest,
+    request: Request,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """Streaming per-company top-``per_company_limit`` search (NDJSON).
+
+    Runs the SAME dedicated per-company fan-out as the sync endpoint (the guarantee
+    of each company's true top-X), but emits a ``group`` event AS EACH COMPANY
+    COMPLETES so the browser leg is incremental instead of one ~N*300ms wait.
+
+    Events (NDJSON, one per line):
+      - ``{"type":"group","index":i,"company_id":..,"company":{..},"hits":[..]}``
+        — a company finished (COMPLETION order; ``index`` = request order for placement).
+      - ``{"type":"progress","done":n,"total":N}`` — heartbeat (every ~10 companies
+        or ~5s idle).
+      - ``{"type":"item_error","index":i,"company_id":..,"detail":<code>}`` — ONE
+        company's search failed; NON-terminal, the run continues (siblings are NOT
+        cancelled — that TaskGroup semantic is the sync path's only).
+      - terminal ``{"type":"complete","total_hits":N,"done":N,"failed":M}`` OR
+        ``{"type":"error","detail":<code>}`` (whole-request failure only). Exactly one
+        terminal is emitted; once the stream starts the generator never raises (P8).
+
+    Pre-flight failures (resolution 404, caps 422, OPENAI not configured 503) surface
+    as normal HTTP status codes BEFORE the stream begins.
+    """
+    resolved = await _resolve_company_values(db, body.company_ids)
+    embeds = body.embeds if body.embeds is not None else ["apollo"]
+    total = len(resolved)
+    if total * body.per_company_limit > _GROUPED_MAX_TOTAL_HITS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({total}) * per_company_limit "
+                f"({body.per_company_limit}) exceeds the {_GROUPED_MAX_TOTAL_HITS} cap"
+            ),
+        )
+    if total * max(1, len(embeds)) > _GROUPED_STREAM_MAX_ANN_CALLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({total}) * embed kinds "
+                f"({max(1, len(embeds))}) exceeds the {_GROUPED_STREAM_MAX_ANN_CALLS} "
+                "ANN-call budget"
+            ),
+        )
+    if embeds and not settings.openai_configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OPENAI_API_KEY is not configured",
+        )
+
+    # Batch-hydrate org docs (each group's ``company`` field) across companies (500-chunks).
+    company_docs: dict[str, dict[str, Any]] = {}
+    resolved_object_ids = [ObjectId(rid) for rid in resolved]
+    for chunk_start in range(0, len(resolved_object_ids), _HYDRATE_CHUNK):
+        chunk = resolved_object_ids[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        cursor = db.leads.find({"_id": {"$in": chunk}})
+        async for doc in cursor:
+            company_docs[str(doc["_id"])] = doc
+
+    query = (body.query or "").strip()
+
+    async def _generate() -> AsyncIterator[str]:
+        sem = _grouped_fanout_semaphore()
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        producer: asyncio.Task[None] | None = None
+        done = 0
+        failed = 0
+        total_hits = 0
+        last_progress_done = 0
+        terminal_emitted = False
+
+        async def _one(idx: int, org_id: str) -> None:
+            async with sem:
+                try:
+                    if not embeds:
+                        hits = await _pure_filter_hits(
+                            db, company_filter_ids=[org_id], body=body,
+                            limit=body.per_company_limit,
+                        )
+                    else:
+                        hits = await _vector_ranked_hits(
+                            db, query_vector=query_vector, embeds=embeds,
+                            company_filter_ids=[org_id], company_filter_id_set={org_id},
+                            body=body, limit=body.per_company_limit, settings=settings,
+                            nice=NICE_BULK_READ,
+                        )
+                    company_doc = company_docs.get(org_id)
+                    company_out = (
+                        _serialize_lead(company_doc, body.fields).model_dump()
+                        if company_doc is not None
+                        else None
+                    )
+                    await queue.put({
+                        "type": "group", "index": idx, "company_id": org_id,
+                        "company": company_out, "hits": [hit.model_dump() for hit in hits],
+                    })
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Per-company failure is NON-terminal on the streaming path.
+                    logger.exception("Grouped stream: company %s search failed", org_id)
+                    await queue.put({
+                        "type": "item_error", "index": idx, "company_id": org_id,
+                        "detail": classify_write_error(exc),
+                    })
+
+        async def _producer() -> None:
+            tasks = [asyncio.create_task(_one(i, oid)) for i, oid in enumerate(resolved)]
+            try:
+                # Per-company errors are handled inside _one, so gather never raises.
+                await asyncio.gather(*tasks)
+            finally:
+                await queue.put(None)  # sentinel: producer finished
+
+        try:
+            # Embed the query ONCE (vector mode); a failure here is a whole-request
+            # error (emit an error line, never raise — the stream has started).
+            query_vector: Any = None
+            if embeds:
+                try:
+                    vectors = await embed_texts([query], settings=settings)
+                    query_vector = vectors[0]
+                except Exception as exc:
+                    logger.exception("Grouped stream embed failed")
+                    yield _ndjson_line({
+                        "type": "error",
+                        "detail": f"similarity_unavailable:{classify_write_error(exc)}",
+                    })
+                    terminal_emitted = True
+                    return
+
+            producer = asyncio.create_task(_producer())
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=_STREAM_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # Idle: notice a hung-up caller (finally cancels remaining work),
+                    # else heartbeat to keep the connection warm.
+                    if await request.is_disconnected():
+                        return
+                    yield _ndjson_line({"type": "progress", "done": done, "total": total})
+                    last_progress_done = done
+                    continue
+                if event is None:
+                    break
+                if event["type"] == "group":
+                    done += 1
+                    total_hits += len(event["hits"])
+                elif event["type"] == "item_error":
+                    done += 1
+                    failed += 1
+                yield _ndjson_line(event)
+                if done - last_progress_done >= _STREAM_PROGRESS_EVERY_N:
+                    yield _ndjson_line({"type": "progress", "done": done, "total": total})
+                    last_progress_done = done
+
+            yield _ndjson_line({
+                "type": "complete", "total_hits": total_hits, "done": done, "failed": failed,
+            })
+            terminal_emitted = True
+        except Exception as exc:
+            # Defensive P8: a whole-request failure after the stream started becomes an
+            # error line, never a raised connection reset.
+            logger.exception("Grouped stream failed")
+            if not terminal_emitted:
+                yield _ndjson_line({
+                    "type": "error",
+                    "detail": f"similarity_unavailable:{classify_write_error(exc)}",
+                })
+        finally:
+            # Caller gone or run done: cancel any remaining per-company work.
+            if producer is not None:
+                producer.cancel()
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Grouped stream producer cleanup failed")
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
 @router.post("", response_model=list[LeadOut])
