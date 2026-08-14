@@ -90,6 +90,8 @@ async def clear_resolve_miss(db: AsyncIOMotorDatabase, value: str) -> None:
     if not key:
         return
     try:
-        await db[RESOLVE_MISSES_COLLECTION].delete_one({"value": key})
+        # delete_many, not delete_one: if the unique index ever degraded and left a
+        # duplicate marker, a single delete could leave one surviving a clear.
+        await db[RESOLVE_MISSES_COLLECTION].delete_many({"value": key})
     except Exception:
         logger.exception("resolve-miss clear failed for %s", key)

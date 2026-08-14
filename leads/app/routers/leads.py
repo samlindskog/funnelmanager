@@ -906,8 +906,11 @@ async def _fetch_organizations_search_page(
     # already handles, so search/searchui behavior is unchanged.
     resolve_key = _single_domain_resolve_key(page_params)
     if resolve_key and await is_resolve_miss(database, resolve_key):
-        empty_raw = {"organizations": [], "pagination": {"total_pages": 1, "total_entries": 0}}
-        return [], empty_raw, 0
+        # Match the genuine post-processed empty domain-search shape EXACTLY: the
+        # domain post-processing below sets top-level total_pages=1 and pops the
+        # pagination key (never re-adding it), so a cached miss is structurally
+        # identical to a real empty result and no caller can trip on the difference.
+        return [], {"organizations": [], "total_pages": 1}, 0
 
     client = ApolloLeadsClient(settings)
     # Apollo call: on a credit refusal (422) / rate limit (429) / timeout / 5xx it
@@ -938,14 +941,22 @@ async def _fetch_organizations_search_page(
         id_getter=_organization_id_from_record,
         endpoint=ORG_SEARCH,
     )
-    # Update the negative cache only for the single-domain resolve shape: a genuine
-    # empty Apollo result (the call succeeded above) mints a miss marker; a hit
-    # clears any stale marker so a now-known domain isn't cached as missing.
+    # Update the negative cache only for the single-domain resolve shape. Mint ONLY
+    # on a STRUCTURALLY-VALID empty: the response must actually carry an
+    # organizations/accounts LIST key that is empty. A 200 body missing those keys
+    # entirely is anomalous (not a real "no such company") — don't cache a false
+    # 7-day miss for it; warn instead. A hit clears any stale marker.
     if resolve_key:
         if organizations:
             await clear_resolve_miss(database, resolve_key)
-        else:
+        elif any(isinstance(apollo_raw.get(key), list) for key in ("organizations", "accounts")):
             await mark_resolve_miss(database, resolve_key)
+        else:
+            logger.warning(
+                "Apollo org-search for %s returned a 200 with no organizations/accounts "
+                "list key; not caching (anomalous body)",
+                resolve_key,
+            )
     return mongo_ids, apollo_raw, len(organizations)
 
 
