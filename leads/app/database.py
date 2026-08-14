@@ -51,6 +51,9 @@ async def init_db() -> None:
     await db.leads.create_index("phone")
     await db.leads.create_index("linkedin")
     await db.leads.create_index("domain")
+    # Multikey index on learned alias domains (an org resolvable by a queried domain
+    # that differs from its canonical ``domain``) — backs the resolve alias lookup.
+    await db.leads.create_index("alias_domains")
     await _ensure_resolve_misses_indexes(db)
 
 

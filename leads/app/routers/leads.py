@@ -36,6 +36,7 @@ from app.derived import derive_top_fields
 from app.resolve_cache import (
     clear_resolve_miss,
     is_resolve_miss,
+    learn_domain_alias,
     mark_resolve_miss,
     normalize_resolve_key,
 )
@@ -949,6 +950,11 @@ async def _fetch_organizations_search_page(
     if resolve_key:
         if organizations:
             await clear_resolve_miss(database, resolve_key)
+            # Learn the queried domain as an alias on the PRIMARY matched org (the one
+            # the workflow resolves to = first result), so the FREE resolve path
+            # matches it next pass and this billed org-search never repeats.
+            if mongo_ids:
+                await learn_domain_alias(database, mongo_ids[0], resolve_key)
         elif any(isinstance(apollo_raw.get(key), list) for key in ("organizations", "accounts")):
             await mark_resolve_miss(database, resolve_key)
         else:
@@ -1802,6 +1808,16 @@ async def resolve_organization_lead(
         org_doc = await db.leads.find_one(
             {"domain": value.strip().lower(), "entity_type": "organization"}
         )
+    if org_doc is None:
+        # Learned-alias resolution: an org whose canonical ``domain`` differs from a
+        # previously-queried domain carries that domain in ``alias_domains`` (recorded
+        # on the org-search hit). Matching it here keeps the alias on the FREE path,
+        # so the billed org-search doesn't repeat every pass.
+        alias_key = normalize_resolve_key(value)
+        if alias_key:
+            org_doc = await db.leads.find_one(
+                {"alias_domains": alias_key, "entity_type": "organization"}
+            )
     if org_doc is None:
         # This endpoint stays Mongo-only (no Apollo). A marker check here would be a
         # no-op — a miss-marked domain can still be Mongo-resolvable (ingested as an

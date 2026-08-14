@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.database import RESOLVE_MISSES_COLLECTION
@@ -95,3 +96,30 @@ async def clear_resolve_miss(db: AsyncIOMotorDatabase, value: str) -> None:
         await db[RESOLVE_MISSES_COLLECTION].delete_many({"value": key})
     except Exception:
         logger.exception("resolve-miss clear failed for %s", key)
+
+
+async def learn_domain_alias(
+    db: AsyncIOMotorDatabase, org_mongo_id: str, domain: str
+) -> None:
+    """Record that ``domain`` resolves to an org whose canonical ``domain`` differs.
+
+    An org can exist in Mongo without carrying the domain a workflow queried (an
+    ALIAS domain), so the free resolve 404s and the billed org-search re-bills every
+    pass. On an org-search HIT we ``$addToSet`` the queried domain onto the matched
+    org's ``alias_domains`` (positive knowledge — no TTL), so the FREE resolve path
+    matches it next time. Atomic + best-effort (a failure never breaks the search).
+    """
+    key = normalize_resolve_key(domain)
+    if not key or not org_mongo_id:
+        return
+    try:
+        oid = ObjectId(str(org_mongo_id))
+    except Exception:
+        return
+    try:
+        await db.leads.update_one(
+            {"_id": oid, "entity_type": "organization"},
+            {"$addToSet": {"alias_domains": key}},
+        )
+    except Exception:
+        logger.exception("resolve-alias learn failed (%s -> %s)", key, org_mongo_id)
