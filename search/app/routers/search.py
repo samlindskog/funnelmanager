@@ -41,6 +41,9 @@ from app.schemas import (
     SearchHistorySummary,
     SearchRequest,
     SearchResponse,
+    SimilarityGroupedRequest,
+    SimilarityGroupedResponse,
+    SimilarityGroupOut,
     SimilarityHitOut,
     SimilaritySearchRequest,
     SimilaritySearchResponse,
@@ -1547,6 +1550,31 @@ async def apollo_credits(
     return await client.get_apollo_credits()
 
 
+def _normalize_similarity_hits(
+    hits: list[dict[str, Any]],
+) -> tuple[list[SimilarityHitOut], list[dict[str, Any]]]:
+    """Normalize a list of leads similarity hits, preserving order.
+
+    Each hit's ``lead`` is run through ``lead_to_record``; unnormalizable rows
+    (no dict lead, or a record that fails normalization) are dropped. Returns
+    ``(scored hit-outs, records)`` in the same order — the records list is what
+    a history row / flattened page cache is built from."""
+    scored: list[SimilarityHitOut] = []
+    records: list[dict[str, Any]] = []
+    for hit in hits:
+        lead = hit.get("lead")
+        if not isinstance(lead, dict):
+            continue
+        record = lead_to_record(lead)
+        if not record:
+            continue
+        raw_score = hit.get("score")
+        score = float(raw_score) if isinstance(raw_score, (int, float)) else None
+        scored.append(SimilarityHitOut(score=score, record=record))
+        records.append(record)
+    return scored, records
+
+
 def _similarity_filter_label(
     *,
     company_id: str | None,
@@ -1659,19 +1687,7 @@ async def _run_similarity_search(
             detail=f"Similarity search failed: {exc}",
         ) from exc
 
-    scored: list[SimilarityHitOut] = []
-    records: list[dict[str, Any]] = []
-    for hit in hits:
-        lead = hit.get("lead")
-        if not isinstance(lead, dict):
-            continue
-        record = lead_to_record(lead)
-        if not record:
-            continue
-        raw_score = hit.get("score")
-        score = float(raw_score) if isinstance(raw_score, (int, float)) else None
-        scored.append(SimilarityHitOut(score=score, record=record))
-        records.append(record)
+    scored, records = _normalize_similarity_hits(hits)
 
     per_page = _UI_PER_PAGE
     page_results = records[:per_page]
@@ -1782,6 +1798,220 @@ async def similarity_search(
         linkedin_exists=body.linkedin_exists,
     )
     return response
+
+
+async def _run_grouped_similarity_search(
+    db: AsyncSession,
+    client: LeadsClient,
+    *,
+    query: str | None,
+    per_company_limit: int,
+    company_ids: list[str],
+    username: str,
+    origin: str,
+    actor: str,
+    embeds: list[str] | None = None,
+    entity_type: str | None = None,
+    email_exists: bool | None = None,
+    phone_exists: bool | None = None,
+    linkedin_exists: bool | None = None,
+) -> SimilarityGroupedResponse:
+    """Per-company top-X semantic search + persist ONE cross-user history row.
+
+    For each company in ``company_ids`` leads returns up to ``per_company_limit``
+    ranked hits; groups come back in request order with zero-hit companies
+    present (``hits: []``). Each hit's ``lead`` and each group's ``company`` doc
+    are normalized with ``lead_to_record``. One history row is persisted over the
+    FLATTENED records (company-block order); ``results_json`` caches the first
+    page of that flattened order, and ``_append_unique_mongo_ids`` records the
+    full flattened order as ``SearchResult`` rows.
+
+    Authoritative gate (mirrors ``_run_similarity_search``): the schema validator
+    is the user-facing 422 layer, but the same invariants are re-checked here as a
+    400 so a non-schema caller can never bypass the fan-out ceiling or the
+    query-vs-pure-filter rule."""
+    query = (query or "").strip()
+    company_ids = [v.strip() for v in (company_ids or []) if (v or "").strip()]
+    if not company_ids:
+        raise HTTPException(status_code=400, detail="company_ids is required")
+    if not 1 <= per_company_limit <= 100:
+        raise HTTPException(
+            status_code=400, detail="per_company_limit must be between 1 and 100"
+        )
+    if len(company_ids) * per_company_limit > 5000:
+        raise HTTPException(
+            status_code=400,
+            detail="company_ids * per_company_limit must not exceed 5000",
+        )
+    effective_embeds = embeds if embeds is not None else ["apollo"]
+    if effective_embeds:
+        if not query:
+            raise HTTPException(
+                status_code=400, detail="query is required when embeds is non-empty"
+            )
+    else:
+        # Pure-filter run: query text is unused (company_ids is the mandatory filter).
+        query = ""
+
+    try:
+        data = await client.similarity_search_grouped(
+            query or None,
+            per_company_limit=per_company_limit,
+            company_ids=company_ids,
+            embeds=embeds,
+            entity_type=entity_type,
+            email_exists=email_exists,
+            phone_exists=phone_exists,
+            linkedin_exists=linkedin_exists,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        # Never leak raw exception text to the caller — log it, return a static 502.
+        logger.exception("Grouped similarity search failed")
+        raise HTTPException(status_code=502, detail="Grouped similarity search failed")
+
+    raw_groups = data.get("groups")
+    raw_groups = raw_groups if isinstance(raw_groups, list) else []
+    groups_out: list[SimilarityGroupOut] = []
+    flattened_records: list[dict[str, Any]] = []
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        company_id = str(group.get("company_id") or "").strip()
+        company_lead = group.get("company")
+        company_record = (
+            lead_to_record(company_lead) if isinstance(company_lead, dict) else None
+        )
+        raw_hits = group.get("hits")
+        hits = [h for h in raw_hits if isinstance(h, dict)] if isinstance(raw_hits, list) else []
+        scored, records = _normalize_similarity_hits(hits)
+        groups_out.append(
+            SimilarityGroupOut(
+                company_id=company_id,
+                company=company_record,
+                hits=scored,
+            )
+        )
+        flattened_records.extend(records)
+
+    raw_total = data.get("total")
+    total = int(raw_total) if isinstance(raw_total, (int, float)) else len(flattened_records)
+
+    if query:
+        history_query = _clip_history_query(f"grouped: {query}")
+    else:
+        history_query = _clip_history_query(
+            _similarity_filter_label(
+                company_id=None,
+                company_ids=company_ids,
+                entity_type=entity_type,
+                email_exists=email_exists,
+                phone_exists=phone_exists,
+                linkedin_exists=linkedin_exists,
+            )
+        )
+
+    per_page = _UI_PER_PAGE
+    page_results = flattened_records[:per_page]
+    search_params = {
+        "source": "similarity_grouped",
+        "query": query,
+        "per_company_limit": per_company_limit,
+        # History-row entity_type is always "people" (search-history taxonomy);
+        # the semantic *filter* entity_type is recorded separately.
+        "entity_type": "people",
+        "embeds": embeds,
+        "company_ids": company_ids,
+        "entity_type_filter": entity_type,
+        "email_exists": email_exists,
+        "phone_exists": phone_exists,
+        "linkedin_exists": linkedin_exists,
+    }
+    row = SearchHistory(
+        username=username,
+        origin=origin,
+        actor=actor,
+        query=history_query,
+        entity_type="people",
+        page=1,
+        per_page=per_page,
+        total_results=total,
+        results_json=orjson.dumps(page_results, default=str).decode(),
+        search_params_json=json.dumps(search_params),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    mongo_ids = [
+        str(record.get("mongo_id") or "").strip()
+        for record in flattened_records
+        if str(record.get("mongo_id") or "").strip()
+    ]
+    await _append_unique_mongo_ids(
+        db,
+        search=row,
+        mongo_ids=mongo_ids,
+        seen=set(),
+        next_position=0,
+    )
+    await db.commit()
+    await db.refresh(row)
+
+    await publish_job(
+        job_id=f"semg-{row.id}",
+        job_type="semantic_search_grouped",
+        ctx=JobContext(user=username, origin=origin, actor=actor, search_id=row.id),
+        status=JobStatus.COMPLETED,
+        progress=1.0,
+        exit_status="ok",
+        meta={
+            "kind": "semantic_grouped",
+            "total": total,
+            "companies": len(company_ids),
+            "per_company_limit": per_company_limit,
+        },
+    )
+
+    return SimilarityGroupedResponse(
+        search_id=row.id,
+        history=_to_detail(row, page_results),
+        total=total,
+        groups=groups_out,
+    )
+
+
+@router.post("/searches/similarity-grouped", response_model=SimilarityGroupedResponse)
+async def similarity_grouped(
+    body: SimilarityGroupedRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    user: UserOut = Depends(get_current_user),
+    token: str = Depends(oauth2_scheme),
+) -> SimilarityGroupedResponse:
+    """Per-company top-X semantic search (synchronous JSON).
+
+    For each company in ``company_ids`` return up to ``per_company_limit`` semantic
+    hits, grouped and in request order (zero-hit companies included). Persists one
+    cross-user history row over the flattened (company-block-ordered) records."""
+    client = LeadsClient(settings, token)
+    origin, actor = _principal_attribution()
+    return await _run_grouped_similarity_search(
+        db,
+        client,
+        query=body.query,
+        per_company_limit=body.per_company_limit,
+        company_ids=body.company_ids,
+        username=user.username,
+        origin=origin,
+        actor=actor,
+        embeds=body.embeds,
+        entity_type=body.entity_type,
+        email_exists=body.email_exists,
+        phone_exists=body.phone_exists,
+        linkedin_exists=body.linkedin_exists,
+    )
 
 
 @router.get("/companies/recent")

@@ -325,3 +325,70 @@ class SimilaritySearchResponse(BaseModel):
     query: str
     results: list[SimilarityHitOut] = Field(default_factory=list)
     history: SearchHistoryDetail
+
+
+class SimilarityGroupedRequest(BaseModel):
+    """Per-company top-X semantic search request.
+
+    Like ``SimilaritySearchRequest`` but ``company_ids`` is REQUIRED (1..2000)
+    and there is no global ``limit``; instead ``per_company_limit`` (1..100) caps
+    hits per company. Leads runs one ranked search per company and returns a group
+    per company (in request order, zero-hit companies included). The fan-out is
+    bounded: ``len(company_ids) * per_company_limit`` must be <= 5000.
+    """
+
+    query: str | None = Field(default=None, max_length=8000)
+    embeds: list[Literal["apollo", "name", "title"]] | None = None
+    company_ids: list[str] = Field(min_length=1, max_length=2000)
+    per_company_limit: int = Field(ge=1, le=100)
+    entity_type: Literal["person", "organization"] | None = None
+    email_exists: bool | None = None
+    phone_exists: bool | None = None
+    linkedin_exists: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "SimilarityGroupedRequest":
+        if self.embeds is not None and len(set(self.embeds)) != len(self.embeds):
+            raise ValueError("embeds must not contain duplicate kinds")
+        # Dedupe + drop blank company ids (Field caps the RAW list at 2000; dedupe
+        # only shrinks). At least one must survive.
+        deduped: list[str] = []
+        for value in self.company_ids:
+            entry = (value or "").strip()
+            if entry and entry not in deduped:
+                deduped.append(entry)
+        if not deduped:
+            raise ValueError("company_ids must contain at least one non-blank id")
+        self.company_ids = deduped
+        # Bound the total fan-out (Denial-of-Wallet guard) — matches the leads
+        # contract ceiling so an over-limit request 422s here, not at leads.
+        if len(deduped) * self.per_company_limit > 5000:
+            raise ValueError(
+                "company_ids * per_company_limit must not exceed 5000"
+            )
+        # Same query-vs-pure-filter rule as SimilaritySearchRequest: a non-empty
+        # (or omitted -> ["apollo"]) embed set needs a query; a pure-filter run
+        # (embeds == []) never uses query text (company_ids is the mandatory
+        # filter, always present here) so coerce it to None.
+        effective = self.embeds if self.embeds is not None else ["apollo"]
+        if effective:
+            if not (self.query or "").strip():
+                raise ValueError("query is required when embeds is non-empty")
+        else:
+            self.query = None
+        return self
+
+
+class SimilarityGroupOut(BaseModel):
+    """One company's group of semantic hits (zero-hit companies have hits: [])."""
+
+    company_id: str
+    company: dict[str, Any] | None = None
+    hits: list[SimilarityHitOut] = Field(default_factory=list)
+
+
+class SimilarityGroupedResponse(BaseModel):
+    search_id: int
+    history: SearchHistoryDetail
+    total: int
+    groups: list[SimilarityGroupOut] = Field(default_factory=list)

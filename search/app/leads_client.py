@@ -1062,6 +1062,65 @@ class LeadsClient:
             )
         return [item for item in results if isinstance(item, dict)]
 
+    async def similarity_search_grouped(
+        self,
+        query: str | None = None,
+        *,
+        per_company_limit: int,
+        company_ids: list[str],
+        embeds: list[str] | None = None,
+        entity_type: str | None = None,
+        email_exists: bool | None = None,
+        phone_exists: bool | None = None,
+        linkedin_exists: bool | None = None,
+    ) -> dict[str, Any]:
+        """Per-company top-X semantic search via leads; returns grouped hits.
+
+        Mirrors :meth:`similarity_search` plumbing (audience exchange, error
+        forwarding via ``_request``, slim ``fields="display"`` so each hit's
+        ``lead`` and each group's ``company`` doc feed ``lead_to_record``).
+        ``company_ids`` is required and there is no global ``limit`` — leads
+        returns up to ``per_company_limit`` hits per company. Optional filter
+        params are omitted when ``None`` so leads applies its own defaults
+        (omitted ``embeds`` => ``["apollo"]``).
+
+        Returns the raw leads payload ``{"groups": [...], "total": int}`` for the
+        router to normalize; ``groups`` are in request order with zero-hit
+        companies present (``hits: []``)."""
+        json_body: dict[str, Any] = {
+            "per_company_limit": per_company_limit,
+            "company_ids": company_ids,
+            "fields": "display",
+        }
+        if query is not None:
+            json_body["query"] = query
+        if embeds is not None:
+            json_body["embeds"] = embeds
+        if entity_type is not None:
+            json_body["entity_type"] = entity_type
+        if email_exists is not None:
+            json_body["email_exists"] = email_exists
+        if phone_exists is not None:
+            json_body["phone_exists"] = phone_exists
+        if linkedin_exists is not None:
+            json_body["linkedin_exists"] = linkedin_exists
+        data = await self._request(
+            "POST",
+            "/api/leads/similarity-search-grouped",
+            json_body=json_body,
+        )
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="Leads grouped similarity search returned invalid payload",
+            )
+        if not isinstance(data.get("groups"), list):
+            raise HTTPException(
+                status_code=502,
+                detail="Leads grouped similarity search returned invalid groups",
+            )
+        return data
+
     async def resolve_organization_by_name(self, name: str) -> dict[str, Any]:
         mongo_ids = await self.search_organizations(
             {
