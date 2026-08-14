@@ -50,7 +50,14 @@ spec:
           namespace: prod
           port: 8000
       timeouts:
-        request: 300s # NDJSON streams
+        # 0s DISABLES the absolute request timeout (Gateway API GEP-1742).
+        # 300s guillotined every legitimate >5min NDJSON search stream (a large
+        # company walk + embedding easily exceeds it — reproduced live on the
+        # 2026-08-14 canary e2e: stream cut at exactly 300.03s, browser saw a
+        # network error, company marked failed while the backend continued
+        # detached). Liveness is the stream's own heartbeat/disconnect story
+        # (P8), not an absolute ceiling.
+        request: 0s # NDJSON streams — no absolute ceiling
     - matches:
         - path: { type: PathPrefix, value: /api/mail/ }
       backendRefs:
