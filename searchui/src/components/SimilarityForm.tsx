@@ -37,6 +37,9 @@ export interface SimilarityFormProps {
   onLinkedinFilterChange: (next: TriState) => void
   limit: number
   onLimitChange: (next: number) => void
+  /** Hide the built-in "Result limit" field — the caller supplies its own limit
+   * control (e.g. the top-people-per-company workflow's per-company X). */
+  hideLimit?: boolean
 }
 
 /**
@@ -65,6 +68,7 @@ export function SimilarityForm({
   onLinkedinFilterChange,
   limit,
   onLimitChange,
+  hideLimit = false,
 }: SimilarityFormProps) {
   const selectedEmbeds = selectedEmbedKinds(embeds)
   const hasEmbeds = selectedEmbeds.length > 0
@@ -219,19 +223,21 @@ export function SimilarityForm({
         enriched leads. Company linkage comes from enrichment or from a company-scoped people
         search.
       </FormHelperText>
-      <TextField
-        label="Result limit"
-        type="number"
-        value={limit}
-        onChange={(e) => {
-          const next = Number(e.target.value)
-          if (!Number.isFinite(next)) return
-          onLimitChange(Math.min(SIMILARITY_LIMIT_MAX, Math.max(1, Math.round(next))))
-        }}
-        helperText="Results beyond 100 are paginated"
-        slotProps={{ htmlInput: { min: 1, max: SIMILARITY_LIMIT_MAX } }}
-        sx={{ maxWidth: 220 }}
-      />
+      {!hideLimit && (
+        <TextField
+          label="Result limit"
+          type="number"
+          value={limit}
+          onChange={(e) => {
+            const next = Number(e.target.value)
+            if (!Number.isFinite(next)) return
+            onLimitChange(Math.min(SIMILARITY_LIMIT_MAX, Math.max(1, Math.round(next))))
+          }}
+          helperText="Results beyond 100 are paginated"
+          slotProps={{ htmlInput: { min: 1, max: SIMILARITY_LIMIT_MAX } }}
+          sx={{ maxWidth: 220 }}
+        />
+      )}
     </>
   )
 }

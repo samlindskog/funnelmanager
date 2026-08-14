@@ -94,9 +94,9 @@ const DETAIL_CODE_LABELS: Record<string, string> = {
   ingest_failed: 'Ingest failed',
 }
 
-/** Friendly label for a stream `detail`: known code → phrase; unknown snake_case
- * code → spaced/capitalized; non-code (object/prose) → detailMessage(fallback). */
-function friendlyDetail(detail: unknown, fallback: string): string {
+/** Friendly label for a stream/response `detail`: known code → phrase; unknown
+ * snake_case code → spaced/capitalized; non-code (object/prose) → detailMessage. */
+export function friendlyDetail(detail: unknown, fallback: string): string {
   if (typeof detail === 'string' && detail) {
     const known = DETAIL_CODE_LABELS[detail]
     if (known) return known
@@ -872,6 +872,77 @@ export async function runSimilaritySearch(
   if (params.phoneExists !== undefined) body.phone_exists = params.phoneExists
   if (params.linkedinExists !== undefined) body.linkedin_exists = params.linkedinExists
   return request<SimilaritySearchResponse>('/api/search/similarity-search', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Top-people-per-company — grouped similarity search (one ranked list per company)
+// ---------------------------------------------------------------------------
+
+/** Max (companies × per_company_limit) the backend accepts before a 422. */
+export const GROUPED_MAX_RESULTS = 5000
+
+export type SimilarityGroupedParams = {
+  /** Passage to rank by. Required when embeds is non-empty; ignored (sent null) for
+   * a pure-filter run (embeds: []). */
+  query: string | null
+  /** Which per-kind embeddings to rank by. `[]` = pure filter (no vector ranking). */
+  embeds: EmbedKind[]
+  /** Company record ids / Apollo org ids to group by — 1..2000, required. */
+  companyIds: string[]
+  /** Top-N ranked people to return per company — 1..100, required. */
+  perCompanyLimit: number
+  /** Restrict hits to a record kind (this feature scopes to people). */
+  entityType?: 'person' | 'organization' | null
+  emailExists?: boolean
+  phoneExists?: boolean
+  linkedinExists?: boolean
+}
+
+export type SimilarityGroupHit = {
+  // Pure-filter runs (embeds: []) return null scores (no vector ranking).
+  score: number | null
+  record: ApolloRecord
+}
+
+export type SimilarityGroup = {
+  /** Echoes the requested company id (groups preserve request order). */
+  company_id: string
+  /** The company's own record, or null if it couldn't be hydrated. */
+  company: ApolloRecord | null
+  /** Ranked hits (empty for a zero-hit company). */
+  hits: SimilarityGroupHit[]
+}
+
+export type SimilarityGroupedResponse = {
+  search_id: number
+  /** Same SearchHistoryDetail as the flat similarity flow — appears in history. */
+  history: SearchHistoryDetail
+  total: number
+  /** One group per requested company, in request order (zero-hit companies included). */
+  groups: SimilarityGroup[]
+}
+
+/** Grouped similarity: top-N ranked people per company across many companies.
+ * Throws ApiError(422) if companyIds.length * perCompanyLimit > GROUPED_MAX_RESULTS. */
+export async function runSimilarityGrouped(
+  params: SimilarityGroupedParams,
+): Promise<SimilarityGroupedResponse> {
+  const hasEmbeds = params.embeds.length > 0
+  const body: Record<string, unknown> = {
+    // query is required unless pure-filter (embeds: []), which sends null.
+    query: hasEmbeds ? (params.query ?? '') : null,
+    embeds: params.embeds,
+    company_ids: params.companyIds,
+    per_company_limit: params.perCompanyLimit,
+  }
+  if (params.entityType != null) body.entity_type = params.entityType
+  if (params.emailExists !== undefined) body.email_exists = params.emailExists
+  if (params.phoneExists !== undefined) body.phone_exists = params.phoneExists
+  if (params.linkedinExists !== undefined) body.linkedin_exists = params.linkedinExists
+  return request<SimilarityGroupedResponse>('/api/search/searches/similarity-grouped', {
     method: 'POST',
     body: JSON.stringify(body),
   })
