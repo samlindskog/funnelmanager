@@ -82,7 +82,7 @@ images:
   # build-canary.yml; never pulled while `replicas: 0`.
   - name: ghcr.io/samlindskog/funnelmanager/searchui-canary
     newName: ghcr.io/samlindskog/funnelmanager/searchui
-    newTag: canary-d85eb1fe
+    newTag: canary-73276c28
   # Header/east-west-routed BACKEND leads canary. Same pattern as search-canary:
   # the base uses the canary-logical name `.../leads-canary`; this entry remaps
   # it to the real `leads` repo with an INDEPENDENT `canary-<sha>` tag, kept
