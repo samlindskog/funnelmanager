@@ -48,7 +48,9 @@ from app.milvus_client import (
     _milvus_str_literal,
     classify_write_error,
     index_lead_docs,
+    is_grouping_unsupported,
     search_similar,
+    search_similar_grouped,
 )
 from app.schemas import (
     BatchExistsRequest,
@@ -2658,14 +2660,23 @@ async def similarity_search(
     return SimilaritySearchResponse(results=results)
 
 
-# Per-company fan-out concurrency for the grouped endpoint. Each company runs the
-# same vector search on the serializing Milvus gate; bound in-flight work so a
-# large company set doesn't flood the gate.
+# Per-company fan-out concurrency (fallback path). Each company runs a vector
+# search on the serializing Milvus gate; bound in-flight work.
 _GROUPED_FANOUT_CONCURRENCY = 8
 # P4 cost guards (both re-checked on the RESOLVED company count in the router; the
-# ANN one is also pre-checked in the schema on the raw company_ids count).
+# ANN one is also pre-checked in the schema on the raw company_ids count). These
+# bound the FALLBACK fan-out; the grouping path is only a handful of calls but the
+# caps still gate the request size uniformly.
 _GROUPED_MAX_TOTAL_HITS = 5000  # resolved companies * per_company_limit
 _GROUPED_MAX_ANN_CALLS = 3000  # resolved companies * max(1, embed kinds)
+
+# Milvus grouping-search sizing. group_size overfetches per company (headroom for
+# the authoritative Mongo re-check). companies_per_chunk is bounded so
+# limit(=companies) * group_size stays comfortably under Milvus's grouping product
+# ceiling (16384). Total grouping calls = kinds * ceil(companies / chunk).
+_GROUPING_MAX_GROUP_SIZE = 100
+_GROUPING_MAX_COMPANIES_PER_CALL = 800
+_GROUPING_LIMIT_GROUPSIZE_PRODUCT = 12000
 
 
 class _ClientDisconnected(Exception):
@@ -2674,6 +2685,10 @@ class _ClientDisconnected(Exception):
     A normal exception (not ``CancelledError``, whose TaskGroup semantics are
     ambiguous) so the TaskGroup deterministically cancels the sibling workers.
     """
+
+
+class _GroupingUnsupported(Exception):
+    """The Milvus server rejected grouping search — signals a fallback to fan-out."""
 
 
 # ONE process-wide fan-out semaphore (not per-request): a per-request Semaphore(8)
@@ -2693,6 +2708,194 @@ def _grouped_fanout_semaphore() -> asyncio.Semaphore:
     return _grouped_fanout_sem
 
 
+def _grouping_plan(
+    num_companies: int, num_kinds: int, per_company_limit: int
+) -> tuple[int, int, int]:
+    """Return ``(group_size, companies_per_chunk, total_calls)`` for a grouping run.
+
+    ``group_size`` overfetches ~3x per_company_limit (re-check headroom, capped).
+    ``companies_per_chunk`` keeps ``companies * group_size`` under the product
+    ceiling. ``total_calls = kinds * ceil(companies / chunk)`` — single digits even
+    at thousands of companies.
+    """
+    group_size = min(_GROUPING_MAX_GROUP_SIZE, max(1, per_company_limit) * 3)
+    companies_per_chunk = max(
+        1,
+        min(_GROUPING_MAX_COMPANIES_PER_CALL, _GROUPING_LIMIT_GROUPSIZE_PRODUCT // group_size),
+    )
+    num_chunks = (
+        (num_companies + companies_per_chunk - 1) // companies_per_chunk
+        if num_companies
+        else 0
+    )
+    return group_size, companies_per_chunk, max(1, num_kinds) * num_chunks
+
+
+async def _grouped_via_grouping_search(
+    db: AsyncIOMotorDatabase,
+    *,
+    resolved: list[str],
+    embeds: list[str],
+    query_vector: Any,
+    body: GroupedSimilaritySearchRequest,
+    settings: Settings,
+) -> list[list[SimilarityHitOut]]:
+    """Per-company top hits via Milvus GROUPING search — ``kinds * ceil(companies/chunk)``
+    calls instead of ``companies * kinds``.
+
+    Per embed kind, one grouping search per company chunk (group_by company_id,
+    overfetching ``group_size`` per company). Scores are merged per doc (mean across
+    the kinds that returned it), candidates are batch-hydrated across ALL companies,
+    then each company's candidates get the authoritative Mongo re-check and the top
+    ``per_company_limit`` survivors. If re-check drops a company below
+    ``per_company_limit`` we return what survived (no per-company top-up fan-out).
+
+    Raises ``_GroupingUnsupported`` if the FIRST grouping call is rejected as a
+    grouping capability/param error (caller falls back to the fan-out); any other
+    error propagates (caller maps to a sanitized 503).
+    """
+    per_company_limit = body.per_company_limit
+    group_size, companies_per_chunk, _ = _grouping_plan(
+        len(resolved), len(embeds), per_company_limit
+    )
+
+    per_doc_scores: dict[str, dict[str, float]] = {}
+    candidate_company: dict[str, str] = {}
+    first_call = True
+    for kind in embeds:
+        kind_expr = f"embed_kind == {_milvus_str_literal(kind)}"
+        for chunk_start in range(0, len(resolved), companies_per_chunk):
+            chunk = resolved[chunk_start : chunk_start + companies_per_chunk]
+            # company_id in [chunk] + the other scalar filters (never the embed_kind).
+            scalar = _milvus_scalar_expr(chunk, body)
+            expr = f"{kind_expr} and {scalar}" if scalar else kind_expr
+            try:
+                hits = await search_similar_grouped(
+                    query_vector,
+                    expr=expr,
+                    group_by_field="company_id",
+                    group_size=group_size,
+                    limit=len(chunk),
+                    nice=NICE_BULK_READ,
+                    settings=settings,
+                )
+            except Exception as exc:
+                if first_call and is_grouping_unsupported(exc):
+                    raise _GroupingUnsupported() from exc
+                raise
+            first_call = False
+            for mongo_id, company_id, score in hits:
+                per_doc_scores.setdefault(mongo_id, {})[kind] = score
+                candidate_company[mongo_id] = company_id
+
+    # Batch-hydrate ALL candidate docs across companies (500-chunks; NOT per-company).
+    all_ids = list(per_doc_scores.keys())
+    docs_by_id: dict[str, dict[str, Any]] = {}
+    for chunk_start in range(0, len(all_ids), _HYDRATE_CHUNK):
+        object_ids: list[ObjectId] = []
+        for mongo_id in all_ids[chunk_start : chunk_start + _HYDRATE_CHUNK]:
+            try:
+                object_ids.append(ObjectId(mongo_id))
+            except Exception:
+                continue
+        if not object_ids:
+            continue
+        cursor = db.leads.find({"_id": {"$in": object_ids}})
+        async for doc in cursor:
+            docs_by_id[str(doc["_id"])] = doc
+
+    # Bucket candidates by their (Milvus-reported) company; mean score across kinds.
+    merged_by_company: dict[str, list[tuple[str, float]]] = {}
+    for mongo_id, kind_scores in per_doc_scores.items():
+        company_id = candidate_company.get(mongo_id)
+        if not company_id:
+            continue
+        mean = sum(kind_scores.values()) / len(kind_scores)
+        merged_by_company.setdefault(company_id, []).append((mongo_id, mean))
+    for candidates in merged_by_company.values():
+        candidates.sort(key=lambda item: item[1], reverse=True)
+
+    # Per company (request order): authoritative Mongo re-check + top per_company_limit.
+    # The re-check against ``{org_id}`` drops a doc whose stored company_id drifted
+    # from the grouped value (defends against Milvus scalar staleness).
+    hits_per_company: list[list[SimilarityHitOut]] = []
+    for org_id in resolved:
+        company_hits: list[SimilarityHitOut] = []
+        for mongo_id, score in merged_by_company.get(org_id, []):
+            doc = docs_by_id.get(mongo_id)
+            if not doc:
+                continue
+            if not _doc_passes_filters(doc, {org_id}, body):
+                continue
+            company_hits.append(
+                SimilarityHitOut(score=score, lead=_serialize_lead(doc, body.fields))
+            )
+            if len(company_hits) >= per_company_limit:
+                break
+        hits_per_company.append(company_hits)
+    return hits_per_company
+
+
+async def _grouped_via_fanout(
+    db: AsyncIOMotorDatabase,
+    *,
+    request: Request,
+    resolved: list[str],
+    embeds: list[str],
+    query_vector: Any,
+    body: GroupedSimilaritySearchRequest,
+    settings: Settings,
+) -> list[list[SimilarityHitOut]] | None:
+    """Per-company fan-out (the pure-filter path + the grouping-unsupported fallback).
+
+    One bounded, structured (TaskGroup) task per company reusing the single-search
+    internals; first failure cancels every sibling (no orphans). Returns
+    ``None`` when the caller disconnected; raises a sanitized 503 on Milvus failure.
+    """
+    hits_per_company: list[list[SimilarityHitOut]] = [[] for _ in resolved]
+    sem = _grouped_fanout_semaphore()
+
+    async def _hits_for_company(org_id: str) -> list[SimilarityHitOut]:
+        if not embeds:
+            return await _pure_filter_hits(
+                db, company_filter_ids=[org_id], body=body, limit=body.per_company_limit
+            )
+        return await _vector_ranked_hits(
+            db,
+            query_vector=query_vector,
+            embeds=embeds,
+            company_filter_ids=[org_id],
+            company_filter_id_set={org_id},
+            body=body,
+            limit=body.per_company_limit,
+            settings=settings,
+            nice=NICE_BULK_READ,
+        )
+
+    async def _worker(idx: int, org_id: str) -> None:
+        async with sem:
+            # Cheap abandoned-caller check before spending work; bailing cancels siblings.
+            if await request.is_disconnected():
+                raise _ClientDisconnected()
+            hits_per_company[idx] = await _hits_for_company(org_id)
+
+    disconnected = False
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for idx, oid in enumerate(resolved):
+                tg.create_task(_worker(idx, oid))
+    except* _ClientDisconnected:
+        disconnected = True
+    except* Exception as eg:
+        logger.exception("Grouped similarity fan-out failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"similarity_unavailable:{classify_write_error(eg.exceptions[0])}",
+        ) from eg
+    # ``return`` is not permitted inside an except* block — decide out here.
+    return None if disconnected else hits_per_company
+
+
 @router.post("/similarity-search-grouped", response_model=GroupedSimilaritySearchResponse)
 async def similarity_search_grouped(
     body: GroupedSimilaritySearchRequest,
@@ -2702,19 +2905,21 @@ async def similarity_search_grouped(
 ) -> GroupedSimilaritySearchResponse:
     """Per-company top-``per_company_limit`` semantic search over a required company set.
 
-    Same ranking/filter semantics as ``/similarity-search`` but returns one group per
-    company (in request order, post-dedupe), each with the org lead doc + its top hits.
-    Companies with zero matching hits still appear with ``hits: []`` (completeness).
-    The query is embedded ONCE and reused across every company; each company reuses
-    the single-search internals (``_vector_ranked_hits`` / ``_pure_filter_hits``) and
-    every fan-out search runs at ``NICE_BULK_READ`` so one lone interactive query
-    still wins the Milvus gate.
+    Returns one group per company (in request order, post-dedupe), each with the org
+    lead doc + its top hits; companies with zero hits still appear with ``hits: []``.
+    The query is embedded ONCE and reused across companies.
 
-    Cost guards: the schema pre-rejects ``company_ids * max(1, embeds) > 3000`` (ANN
-    budget, upper bound). THIS router re-checks that on the RESOLVED company count and
-    additionally enforces the hit budget ``resolved * per_company_limit <= 5000``
-    (both 422). Fan-out is structured (a TaskGroup: one failure cancels every sibling
-    — no orphaned per-company tasks) and bounded by a process-wide semaphore.
+    Vector mode uses ONE Milvus GROUPING search per embed kind per company-chunk
+    (``kinds * ceil(companies/chunk)`` calls — see ``_grouped_via_grouping_search``)
+    so a 900-company run is a handful of gate ops, not ~2700. If the server rejects
+    grouping it transparently falls back to the per-company fan-out
+    (``_grouped_via_fanout``); pure-filter mode always uses the fan-out (Mongo-only).
+    Every read runs at ``NICE_BULK_READ`` so a lone interactive query wins the gate.
+
+    Cost guards: the schema pre-rejects ``company_ids * max(1, embeds) > 3000``; THIS
+    router re-checks that on the RESOLVED company count and enforces the hit budget
+    ``resolved * per_company_limit <= 5000`` (both 422; they gate the fallback fan-out
+    and cap request size uniformly).
     """
     resolved = await _resolve_company_values(db, body.company_ids)
     embeds = body.embeds if body.embeds is not None else ["apollo"]
@@ -2736,8 +2941,8 @@ async def similarity_search_grouped(
             ),
         )
 
-    # Batch-hydrate the org docs (for each group's ``company`` field) across all
-    # companies in 500-doc chunks — one cross-company batch win.
+    # Batch-hydrate the org docs (each group's ``company`` field) across all
+    # companies in 500-doc chunks — one cross-company batch.
     company_docs: dict[str, dict[str, Any]] = {}
     resolved_object_ids = [ObjectId(rid) for rid in resolved]
     for chunk_start in range(0, len(resolved_object_ids), _HYDRATE_CHUNK):
@@ -2746,51 +2951,22 @@ async def similarity_search_grouped(
         async for doc in cursor:
             company_docs[str(doc["_id"])] = doc
 
-    # Assigned once below (before the fan-out runs) and closed over by _hits_for_company.
-    query_vector: Any = None
-
-    async def _hits_for_company(org_id: str) -> list[SimilarityHitOut]:
-        # Pure-filter: Mongo-only, one company scope.
-        if not embeds:
-            return await _pure_filter_hits(
-                db,
-                company_filter_ids=[org_id],
-                body=body,
-                limit=body.per_company_limit,
-            )
-        return await _vector_ranked_hits(
-            db,
-            query_vector=query_vector,
-            embeds=embeds,
-            company_filter_ids=[org_id],
-            company_filter_id_set={org_id},
-            body=body,
-            limit=body.per_company_limit,
-            settings=settings,
-            nice=NICE_BULK_READ,
+    if not embeds:
+        # Pure-filter (Mongo-only): grouping search does not apply — use the fan-out.
+        fanout = await _grouped_via_fanout(
+            db, request=request, resolved=resolved, embeds=[], query_vector=None,
+            body=body, settings=settings,
         )
-
-    # Index-addressed results so ordering follows the resolved (request) order, not
-    # task completion order.
-    hits_per_company: list[list[SimilarityHitOut]] = [[] for _ in resolved]
-    sem = _grouped_fanout_semaphore()
-
-    async def _worker(idx: int, org_id: str) -> None:
-        async with sem:
-            # Cheap abandoned-caller check before spending Milvus/OpenAI work: if the
-            # client hung up, bail (the TaskGroup cancels the remaining siblings).
-            if await request.is_disconnected():
-                raise _ClientDisconnected()
-            hits_per_company[idx] = await _hits_for_company(org_id)
-
-    # Embed the query ONCE for the whole request (outside the fan-out try so its
-    # own HTTPException isn't caught by the except* handlers below).
-    if embeds:
+        if fanout is None:
+            return GroupedSimilaritySearchResponse(groups=[], total=0)
+        hits_per_company = fanout
+    else:
         if not settings.openai_configured:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="OPENAI_API_KEY is not configured",
             )
+        # Embed the query ONCE for the whole request; reused for every company/kind.
         query = (body.query or "").strip()
         try:
             vectors = await embed_texts([query], settings=settings)
@@ -2802,26 +2978,28 @@ async def similarity_search_grouped(
             ) from exc
         query_vector = vectors[0]
 
-    disconnected = False
-    # Structured fan-out: the TaskGroup cancels every sibling on the first failure
-    # (no orphaned per-company tasks for a dead request). Only except* clauses here.
-    try:
-        async with asyncio.TaskGroup() as tg:
-            for idx, oid in enumerate(resolved):
-                tg.create_task(_worker(idx, oid))
-    except* _ClientDisconnected:
-        disconnected = True
-    except* Exception as eg:
-        logger.exception("Grouped similarity search failed")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"similarity_unavailable:{classify_write_error(eg.exceptions[0])}",
-        ) from eg
-
-    if disconnected:
-        # Caller is gone; the response won't be delivered — return a valid empty
-        # payload rather than doing (already-cancelled) work.
-        return GroupedSimilaritySearchResponse(groups=[], total=0)
+        try:
+            hits_per_company = await _grouped_via_grouping_search(
+                db, resolved=resolved, embeds=embeds, query_vector=query_vector,
+                body=body, settings=settings,
+            )
+        except _GroupingUnsupported:
+            logger.warning(
+                "Milvus grouping search unsupported; falling back to per-company fan-out"
+            )
+            fanout = await _grouped_via_fanout(
+                db, request=request, resolved=resolved, embeds=embeds,
+                query_vector=query_vector, body=body, settings=settings,
+            )
+            if fanout is None:
+                return GroupedSimilaritySearchResponse(groups=[], total=0)
+            hits_per_company = fanout
+        except Exception as exc:
+            logger.exception("Grouped similarity (grouping) search failed")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"similarity_unavailable:{classify_write_error(exc)}",
+            ) from exc
 
     groups: list[SimilarityGroupOut] = []
     total = 0
