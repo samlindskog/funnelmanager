@@ -44,6 +44,19 @@ export interface ProspectRow {
   /** People stored/linked for this company (grows during ingest). */
   people?: number
   error?: string | null
+  /** Apollo fetching is paused for this company waiting on embedding (backpressure).
+   * Transient — set on a `throttled` event, cleared on the next progress/complete. */
+  throttled?: boolean
+  /** Ingest stopped short (Apollo page cap / max entries) — additive completion flag. */
+  partial?: boolean
+  partialReason?: string | null
+  /** Embeddings that failed to index for this company (honest completion). */
+  embedFailed?: number
+  embedIndexed?: number
+  /** Friendly reason for the embedding failures (e.g. "Milvus under write pressure"). */
+  embedReason?: string
+  /** Embedding was cancelled for this company but leads still collected — sticky info. */
+  embeddingDetached?: boolean
 }
 
 const CHECKPOINT_KEY = 'searchui.prospect.v1'
@@ -110,7 +123,7 @@ function downgradeTransient(row: ProspectRow): ProspectRow {
     return { ...row, status: 'pending', orgRecordId: null, orgApolloId: null, companyName: null }
   }
   if (row.status === 'probing' || row.status === 'ingesting') {
-    return { ...row, status: 'pending' }
+    return { ...row, status: 'pending', throttled: false, embeddingDetached: false }
   }
   return row
 }
@@ -332,23 +345,53 @@ export function useProspectRun(): UseProspectRun {
                   streamId: event.ingest_stream_id,
                 })
               }
-              patchRow(domain, { people: event.stored })
+              // Any progress event clears the paused/throttled indicator.
+              patchRow(domain, { people: event.stored, throttled: false })
+            },
+            onThrottled: () => {
+              // Server-side backpressure paused fetching — expected, not a stall.
+              run.reportIngest({ throttled: true })
+              patchRow(domain, { throttled: true })
+            },
+            onEmbeddingDetached: () => {
+              // Embedding cancelled but leads keep collecting — informational.
+              run.reportIngest({ embeddingDetached: true })
+              patchRow(domain, { embeddingDetached: true })
             },
             onEmbeddingProgress: (event: EmbeddingProgress) => {
+              if ((event.failed ?? 0) > 0) {
+                patchRow(domain, {
+                  embedFailed: event.failed,
+                  embedIndexed: event.indexed,
+                  ...(event.reason ? { embedReason: event.reason } : {}),
+                })
+              }
+              // complete:true / error is terminal even when done < total (failed>0).
               if (event.complete || event.error) {
-                run.reportEmbed({ complete: true, streamId: event.embedding_stream_id })
+                run.reportEmbed({
+                  complete: true,
+                  streamId: event.embedding_stream_id,
+                  failed: event.failed,
+                  indexed: event.indexed,
+                })
                 return
               }
               run.reportEmbed({
                 done: event.done,
                 total: event.total,
                 streamId: event.embedding_stream_id,
+                failed: event.failed,
+                indexed: event.indexed,
               })
             },
             onFirstPage: (page) => patchRow(domain, { people: page.history.total_results }),
             onComplete: (done) => {
               run.reportIngest({ complete: true })
-              patchRow(domain, { people: done.history.total_results })
+              patchRow(domain, {
+                people: done.history.total_results,
+                throttled: false,
+                ...(done.partial ? { partial: true, partialReason: done.reason ?? null } : {}),
+              })
             },
           },
         )

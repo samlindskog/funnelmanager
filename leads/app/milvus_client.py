@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +37,118 @@ _SHORT_MAX = 16
 # Live-ingest flush pacing (see _upsert_lead_vectors_sync).
 _FLUSH_EVERY_ROWS = 10_000
 _rows_since_flush = 0
+
+# Milvus write-pressure cooperation: the prod cluster runs quotaAndLimits
+# growing-segment + memory protection, so an upsert under pressure raises a
+# rate-limit / quota-deny error instead of succeeding. Treat that class as
+# retryable with bounded exponential backoff (the gate is released between
+# attempts so interactive similarity queries still run). After the total budget
+# is spent the error propagates so the caller records a real failure.
+_UPSERT_MAX_BACKOFF_TOTAL_SECONDS = 60.0
+_UPSERT_MAX_SINGLE_BACKOFF_SECONDS = 16.0
+_WRITE_PRESSURE_MARKERS = (
+    "rate limit",
+    "ratelimit",
+    "rate_limit",
+    "quota",
+    "deny to write",
+    "force deny",
+    "memory protection",
+    "disk protection",
+    "disk quota",
+    "too many",
+)
+
+
+def _is_milvus_write_pressure(exc: BaseException) -> bool:
+    """True when ``exc`` looks like Milvus throttling/denying a write under pressure.
+
+    Matches pymilvus rate-limit / quota-deny messages by substring (the SDK does
+    not give a stable dedicated exception type across these). Conservative: an
+    unrecognized error is treated as a hard failure, not retried.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _WRITE_PRESSURE_MARKERS)
+
+
+# Connection/availability markers, so a Milvus-down error is classified distinctly
+# from a generic embed failure (for the sanitized event code — never leak raw text).
+_UNAVAILABLE_MARKERS = (
+    "connect",
+    "connection",
+    "unavailable",
+    "timed out",
+    "timeout",
+    "refused",
+    "unreachable",
+)
+
+
+def classify_write_error(exc: BaseException) -> str:
+    """Classify a hard embed/upsert failure into a FIXED, non-sensitive code.
+
+    Returned verbatim to browsers via the stream ``item_error``/``error`` events, so
+    it must NEVER carry Milvus URIs / quota internals / SDK exception text — those
+    are logged server-side only. One of: ``milvus_write_pressure``,
+    ``milvus_unavailable``, ``embedding_failed``.
+    """
+    if _is_milvus_write_pressure(exc):
+        return "milvus_write_pressure"
+    text = str(exc).lower()
+    if any(marker in text for marker in _UNAVAILABLE_MARKERS):
+        return "milvus_unavailable"
+    return "embedding_failed"
+
+
+@dataclass
+class WritePressureBudget:
+    """Amortized write-pressure retry budget shared across one embedding stream.
+
+    All chunks of a stream share ONE budget (bound to the ``upsert_lead_vectors``
+    calls via ``use_write_pressure_budget``), so a big stream under sustained Milvus
+    pressure spends a single bounded total (config
+    ``embed_write_pressure_budget_seconds``) rather than a fresh per-chunk budget
+    that would multiply into hours. Once spent, pressure-failures propagate at once.
+    """
+
+    remaining: float
+
+    @classmethod
+    def create(cls, total_seconds: float) -> "WritePressureBudget":
+        return cls(remaining=max(0.0, float(total_seconds)))
+
+
+# Bound to the current embedding stream's budget for the duration of an
+# ``embed_batch`` call (set by ``schedule_embedding_batch``); ``None`` for one-off
+# enrich/match/background embeds, which fall back to the per-call cap below.
+_write_pressure_budget: contextvars.ContextVar[WritePressureBudget | None] = (
+    contextvars.ContextVar("milvus_write_pressure_budget", default=None)
+)
+
+
+@contextlib.contextmanager
+def use_write_pressure_budget(budget: "WritePressureBudget | None"):
+    """Bind ``budget`` as the active per-stream write-pressure budget within scope."""
+    token = _write_pressure_budget.set(budget)
+    try:
+        yield
+    finally:
+        _write_pressure_budget.reset(token)
+
+
+class LeadIndexingError(Exception):
+    """A hard embed/Milvus failure for a batch, carrying honest attempt accounting.
+
+    ``attempted`` = docs that were actually going to be upserted (already past the
+    never-downgrade precedence skip), so the streamed caller charges only these as
+    failed and counts precedence-skips as done-but-not-failed. ``code`` is the
+    sanitized classification (see ``classify_write_error``).
+    """
+
+    def __init__(self, *, attempted: int, code: str) -> None:
+        super().__init__(code)
+        self.attempted = attempted
+        self.code = code
 
 # UNIX-nice priority tiers for the Milvus gate: lower runs first. The pymilvus
 # SDK is not reliably concurrent-safe, so every op still serializes through one
@@ -368,11 +481,53 @@ async def upsert_lead_vectors(
     ``nice`` sets the gate priority of this write: live-search embeds pass
     ``NICE_SEARCH_EMBED`` and backfills ``NICE_BACKFILL`` so an interactive
     ``search_similar`` (``NICE_INTERACTIVE``) always wins the next gate slot.
+
+    Under Milvus write-pressure (rate-limit / quota-deny) the upsert is retried
+    with bounded exponential backoff. The gate is released between attempts so the
+    backoff does not block interactive queries; embedding naturally stalls, which —
+    via the bounded ingest queue upstream — pauses the Apollo walk.
+
+    The backoff budget is amortized PER STREAM: if a ``WritePressureBudget`` is bound
+    (``use_write_pressure_budget``, set by the streamed embed path) every chunk of
+    that stream draws down the same shared total, so a big stream can't retry for
+    hours. Unbound (one-off enrich/match/background embed) it falls back to a bounded
+    per-call cap. Once the budget is spent the error propagates so the caller records
+    the chunk as failed.
     """
     if not rows:
         return
-    async with _gate()(nice):
-        await asyncio.to_thread(_upsert_lead_vectors_sync, rows, settings=settings)
+    budget = _write_pressure_budget.get()
+    attempt = 0
+    call_waited = 0.0
+    while True:
+        try:
+            async with _gate()(nice):
+                await asyncio.to_thread(_upsert_lead_vectors_sync, rows, settings=settings)
+            return
+        except Exception as exc:
+            if not _is_milvus_write_pressure(exc):
+                raise
+            # Remaining budget: shared per-stream if bound, else the per-call cap.
+            if budget is not None:
+                remaining = budget.remaining
+            else:
+                remaining = _UPSERT_MAX_BACKOFF_TOTAL_SECONDS - call_waited
+            if remaining <= 0:
+                raise
+            backoff = min(2.0**attempt, _UPSERT_MAX_SINGLE_BACKOFF_SECONDS, remaining)
+            logger.warning(
+                "Milvus write-pressure on upsert (%s); backing off %.1fs (remaining budget %.1fs)",
+                exc,
+                backoff,
+                remaining,
+            )
+            # Gate released here (outside the async with) so interactive queries run.
+            await asyncio.sleep(backoff)
+            if budget is not None:
+                budget.remaining = max(0.0, budget.remaining - backoff)
+            else:
+                call_waited += backoff
+            attempt += 1
 
 
 def _search_similar_sync(
@@ -546,6 +701,7 @@ async def index_lead_docs(
     source_precedence: int,
     force: bool = False,
     nice: int = NICE_SEARCH_EMBED,
+    raise_on_failure: bool = False,
     settings: Settings | None = None,
 ) -> list[tuple[str, int]]:
     """Embed and upsert person/organization Mongo docs, respecting embedding precedence.
@@ -571,8 +727,15 @@ async def index_lead_docs(
     doesn't, may leave a stale/leftover Milvus row — harmless because query-time
     filters are re-checked authoritatively against Mongo (see the router).
 
-    Soft-fails; returns ``[(mongo_id, stored_precedence), ...]`` (one per doc)
-    for docs indexed.
+    Returns ``[(mongo_id, stored_precedence), ...]`` (one per doc) for docs indexed
+    — fewer than ``docs`` when some are skipped by never-downgrade precedence.
+
+    ``raise_on_failure`` controls what happens on a HARD embed/Milvus failure
+    (after write-pressure retries are exhausted): the default ``False`` soft-fails
+    (logs + returns ``[]``, preserving the single-enrich/match/backfill behavior of
+    saving the Mongo doc and leaving the vector for a later backfill); the streamed
+    embed path passes ``True`` so the failure propagates and the stream can record
+    the chunk as failed (honest progress) instead of claiming 100%.
     """
     cfg = settings or get_settings()
     if not docs:
@@ -648,6 +811,13 @@ async def index_lead_docs(
             )
         await upsert_lead_vectors(rows, nice=nice, settings=cfg)
         return [(item.mongo_id, item.stored_precedence) for item in prepared]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to index %s lead(s) in Milvus", len(prepared))
+        if raise_on_failure:
+            # Carry the ATTEMPTED count (docs past the precedence skip) + a sanitized
+            # code so the streamed caller charges only real attempts as failed and
+            # never relays raw exception text to browsers.
+            raise LeadIndexingError(
+                attempted=len(prepared), code=classify_write_error(exc)
+            ) from exc
         return []

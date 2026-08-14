@@ -388,7 +388,7 @@ const ResultsListPane = memo(function ResultsListPane({
   const [pendingEnrichCount, setPendingEnrichCount] = useState<number | null>(null)
   const [dontAskAgain, setDontAskAgain] = useState(false)
   const [actionMessage, setActionMessage] = useState<{
-    severity: 'success' | 'error' | 'info'
+    severity: 'success' | 'error' | 'info' | 'warning'
     text: string
   } | null>(null)
   const checkAnchorRef = useRef<number | null>(null)
@@ -568,6 +568,10 @@ const ResultsListPane = memo(function ResultsListPane({
     const hydratedMongoIds = new Set<string>()
     const hydrateTasks: Promise<void>[] = []
     let phonePending = 0
+    // Highest server-reported embedding failure count across both enrich streams,
+    // plus the friendly reason mapped from the last failure's detail code.
+    let embedFailed = 0
+    let embedReason: string | undefined
 
     const hydrateIds = (mongoIds: string[]) => {
       const unique = [
@@ -634,14 +638,31 @@ const ResultsListPane = memo(function ResultsListPane({
           event.waterfall_pending_count ?? 0,
         )
       },
+      onThrottled: () => {
+        // Backpressure: fetching paused for embedding. Mark the ingest ring paused;
+        // the next progress event clears it.
+        run.reportIngest({ throttled: true })
+      },
+      onEmbeddingDetached: () => {
+        // Embedding cancelled but fetching continues — informational, not an error.
+        run.reportIngest({ embeddingDetached: true })
+      },
       onEmbeddingProgress: (event: EmbeddingProgress) => {
         // Only embedding stream ids here so cancelling embedding never touches ingest.
         const embedStreamIds = event.active_embedding_stream_ids
+        if ((event.failed ?? 0) > 0) {
+          embedFailed = Math.max(embedFailed, event.failed ?? 0)
+          if (event.reason) embedReason = event.reason
+        }
+        // complete:true / error is terminal even when done < total (failed>0);
+        // a non-terminal item_error just updates the failure count and continues.
         if (event.complete || event.error) {
           run.reportEmbed({
             complete: true,
             streamId: event.embedding_stream_id,
             streamIds: embedStreamIds,
+            failed: event.failed,
+            indexed: event.indexed,
           })
           return
         }
@@ -650,6 +671,8 @@ const ResultsListPane = memo(function ResultsListPane({
           total: event.total,
           streamId: event.embedding_stream_id,
           streamIds: embedStreamIds,
+          failed: event.failed,
+          indexed: event.indexed,
         })
       },
       onIds: hydrateIds,
@@ -732,17 +755,25 @@ const ResultsListPane = memo(function ResultsListPane({
       phonePending > 0
         ? ` Waterfall/phone results pending for ${phonePending} (async webhook).`
         : ''
+    // Embedding failures are non-fatal (the lead is still stored/enriched) — surface
+    // them as a warning caption alongside the enrich outcome.
+    const embedNote =
+      embedFailed > 0
+        ? ` ${embedFailed} embedding${embedFailed === 1 ? '' : 's'} failed${
+            embedReason ? ` (${embedReason})` : ''
+          }.`
+        : ''
 
     if (failures.length) {
       setActionMessage({
         severity: 'error',
-        text: `Enriched ${succeeded}, failed ${failures.length}. ${failures[0]}${pendingNote}`,
+        text: `Enriched ${succeeded}, failed ${failures.length}. ${failures[0]}${pendingNote}${embedNote}`,
       })
       return
     }
     setActionMessage({
-      severity: 'success',
-      text: `Enriched ${succeeded} lead${succeeded === 1 ? '' : 's'}.${pendingNote}`,
+      severity: embedFailed > 0 ? 'warning' : 'success',
+      text: `Enriched ${succeeded} lead${succeeded === 1 ? '' : 's'}.${pendingNote}${embedNote}`,
     })
   }, [
     channels,

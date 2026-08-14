@@ -119,4 +119,9 @@ export interface SearchResponse {
     total_entries?: number
     total_pages?: number
   }
+  /** Terminal `complete` events set this when ingest stopped short of the full set
+   * (Apollo page cap / max entries). Absent on paged/history fetches. */
+  partial?: boolean
+  /** Why the run is partial: "apollo_page_cap" | "max_entries" (server vocabulary). */
+  reason?: string
 }

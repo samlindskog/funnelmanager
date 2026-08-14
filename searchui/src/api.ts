@@ -82,6 +82,34 @@ function detailMessage(detail: unknown, fallback: string): string {
   return fallback
 }
 
+/** Stream `detail` fields (embedding item_error + terminal ingest error) are now
+ * machine codes rather than prose. Map the known ones to short friendly strings;
+ * anything else humanizes the raw code so a future code still reads sensibly. */
+const DETAIL_CODE_LABELS: Record<string, string> = {
+  milvus_write_pressure: 'Milvus under write pressure',
+  milvus_unavailable: 'Milvus unavailable',
+  embedding_failed: 'Embedding failed',
+  apollo_rate_limited: 'Apollo rate-limited',
+  apollo_error: 'Apollo error',
+  ingest_failed: 'Ingest failed',
+}
+
+/** Friendly label for a stream `detail`: known code → phrase; unknown snake_case
+ * code → spaced/capitalized; non-code (object/prose) → detailMessage(fallback). */
+function friendlyDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string' && detail) {
+    const known = DETAIL_CODE_LABELS[detail]
+    if (known) return known
+    // Humanize an unknown but code-shaped string (lower snake_case, no spaces).
+    if (/^[a-z][a-z0-9_]*$/.test(detail)) {
+      const spaced = detail.replace(/_/g, ' ')
+      return spaced.charAt(0).toUpperCase() + spaced.slice(1)
+    }
+    return detail
+  }
+  return detailMessage(detail, fallback)
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${await bearerToken()}`)
@@ -135,6 +163,9 @@ export type SearchProgress = {
   ids?: string[]
   ingest_stream_id?: string
   embedding_stream_id?: string
+  /** ingest_complete may report the run stopped short (Apollo page cap / max entries). */
+  partial?: boolean
+  partial_reason?: string
   /** All in-flight leads stream jobs (enrich batch); cancel should hit every id. */
   active_stream_ids?: string[]
   /** In-flight ingest stream jobs only; cancelling fetching must not touch embedding. */
@@ -154,6 +185,18 @@ export type EmbeddingProgress = {
   error?: string
   /** True while a batch is running but not yet counted in ``done``. */
   in_flight?: boolean
+  /** Rows actually indexed into Milvus so far (honest count; `done` counts attempts). */
+  indexed?: number
+  /** Rows that failed to embed/index so far. On the terminal `complete` event,
+   * `total` is ATTEMPTED, so `done` < `total` legitimately when `failed` > 0. */
+  failed?: number
+  /** Set when this update came from an `item_error` line (a per-chunk enrich
+   * failure) rather than a progress/complete line — non-terminal; a `complete`
+   * still follows. Carries a human-readable `error`/detail. */
+  item_error?: boolean
+  /** Friendly, display-ready failure reason mapped from the `detail`/`error`
+   * machine code (e.g. "Milvus under write pressure"). Undefined when healthy. */
+  reason?: string
   embedding_stream_id?: string
   active_stream_ids?: string[]
   /** In-flight embedding stream jobs only; cancelling embedding must not touch ingest. */
@@ -162,9 +205,68 @@ export type EmbeddingProgress = {
   waterfall_pending_count?: number
 }
 
+/** Backpressure notice: Apollo ingest is deliberately paused while embedding
+ * catches up. Non-terminal and informational — expected, healthy behavior. */
+export type ThrottleEvent = {
+  kind: 'ingest'
+  reason?: string | null
+  queue_pages: number
+  waited_s: number
+  stored: number
+  ingest_stream_id?: string
+  embedding_stream_id?: string
+}
+
+function parseThrottle(event: Record<string, unknown>): ThrottleEvent {
+  return {
+    kind: 'ingest',
+    reason: typeof event.reason === 'string' ? event.reason : null,
+    queue_pages: Number(event.queue_pages) || 0,
+    waited_s: Number(event.waited_s) || 0,
+    stored: Number(event.stored) || 0,
+    ingest_stream_id:
+      typeof event.ingest_stream_id === 'string' ? event.ingest_stream_id : undefined,
+    embedding_stream_id:
+      typeof event.embedding_stream_id === 'string' ? event.embedding_stream_id : undefined,
+  }
+}
+
+/** Parse an `embedding_progress` / embedding `item_error` line into EmbeddingProgress. */
+function parseEmbedding(
+  event: Record<string, unknown>,
+  extra: Partial<EmbeddingProgress> = {},
+): EmbeddingProgress {
+  // item_error carries `detail`; a terminal embedding error carries `error`.
+  // Both are now machine codes — map to a friendly reason for display.
+  const rawCode =
+    typeof event.detail === 'string'
+      ? event.detail
+      : typeof event.error === 'string'
+        ? event.error
+        : undefined
+  return {
+    kind: 'embedding',
+    done: Number(event.done) || 0,
+    total: Number(event.total) || 0,
+    complete: Boolean(event.complete),
+    error: typeof event.error === 'string' ? event.error : undefined,
+    indexed: typeof event.indexed === 'number' ? event.indexed : undefined,
+    failed: typeof event.failed === 'number' ? event.failed : undefined,
+    reason: rawCode ? friendlyDetail(rawCode, rawCode) : undefined,
+    embedding_stream_id:
+      typeof event.embedding_stream_id === 'string' ? event.embedding_stream_id : undefined,
+    ...extra,
+  }
+}
+
 export type RunSearchHandlers = {
   onProgress?: (progress: SearchProgress) => void
   onEmbeddingProgress?: (progress: EmbeddingProgress) => void
+  /** Fired while ingest is paused waiting for embedding to catch up (backpressure). */
+  onThrottled?: (event: ThrottleEvent) => void
+  /** Fired once when embedding was cancelled but ingest keeps collecting leads
+   * (embeddings can be backfilled later). Informational, not an error. */
+  onEmbeddingDetached?: () => void
   /** Fired as soon as page 1 is hydrated; further UI pages use sync fetchSearchPage. */
   onFirstPage?: (response: SearchResponse) => void
   /** Fired when Apollo ingest finishes (embedding may still be running). */
@@ -180,8 +282,14 @@ export async function runSearch(
   params: RunSearchParams,
   handlers: RunSearchHandlers | ((progress: SearchProgress) => void) = {},
 ): Promise<SearchResponse> {
-  const { onProgress, onEmbeddingProgress, onFirstPage, onComplete } =
-    typeof handlers === 'function' ? { onProgress: handlers } : handlers
+  const {
+    onProgress,
+    onEmbeddingProgress,
+    onThrottled,
+    onEmbeddingDetached,
+    onFirstPage,
+    onComplete,
+  } = typeof handlers === 'function' ? { onProgress: handlers } : handlers
 
   const headers = new Headers()
   headers.set('Authorization', `Bearer ${await bearerToken()}`)
@@ -260,17 +368,15 @@ export async function runSearch(
               : undefined,
         })
       } else if (event.type === 'embedding_progress') {
-        onEmbeddingProgress?.({
-          kind: 'embedding',
-          done: Number(event.done) || 0,
-          total: Number(event.total) || 0,
-          complete: Boolean(event.complete),
-          error: typeof event.error === 'string' ? event.error : undefined,
-          embedding_stream_id:
-            typeof event.embedding_stream_id === 'string'
-              ? event.embedding_stream_id
-              : undefined,
-        })
+        onEmbeddingProgress?.(parseEmbedding(event))
+      } else if (event.type === 'throttled') {
+        onThrottled?.(parseThrottle(event))
+      } else if (event.type === 'embedding_detached') {
+        // Embedding stream cancelled; ingest keeps collecting. Informational.
+        onEmbeddingDetached?.()
+      } else if (event.type === 'item_error' && event.kind === 'embedding') {
+        // Per-chunk embedding failure — non-terminal; a `complete` still follows.
+        onEmbeddingProgress?.(parseEmbedding(event, { complete: false, item_error: true }))
       } else if (event.type === 'first_page') {
         firstPage = asSearchResponse(event)
         onFirstPage?.(firstPage)
@@ -279,7 +385,7 @@ export async function runSearch(
         onComplete?.(complete)
       } else if (event.type === 'error') {
         const detail = event.detail ?? 'Search failed'
-        throw new ApiError(502, detail, detailMessage(detail, 'Search failed'))
+        throw new ApiError(502, detail, friendlyDetail(detail, 'Search failed'))
       }
     }
   }
@@ -368,6 +474,10 @@ export async function enrichLead(
 export type EnrichStreamHandlers = {
   onProgress?: (progress: SearchProgress) => void
   onEmbeddingProgress?: (progress: EmbeddingProgress) => void
+  /** Fired while ingest is paused waiting for embedding to catch up (backpressure). */
+  onThrottled?: (event: ThrottleEvent) => void
+  /** Fired once when embedding was cancelled but ingest keeps collecting leads. */
+  onEmbeddingDetached?: () => void
   /** Called with mongo `_id`s from each progress event (hydrate via getPersonLead). */
   onIds?: (mongoIds: string[]) => void
   onComplete?: () => void
@@ -381,7 +491,15 @@ async function consumePeopleProgressStream(
   handlers: EnrichStreamHandlers,
   errorLabel: string,
 ): Promise<void> {
-  const { onProgress, onEmbeddingProgress, onIds, onComplete, signal } = handlers
+  const {
+    onProgress,
+    onEmbeddingProgress,
+    onThrottled,
+    onEmbeddingDetached,
+    onIds,
+    onComplete,
+    signal,
+  } = handlers
   if (signal?.aborted) return
 
   const headers = new Headers()
@@ -490,35 +608,37 @@ async function consumePeopleProgressStream(
             waterfall_pending: Boolean(event.waterfall_pending),
           })
           if (mongoIds.length) onIds?.(mongoIds)
-        } else if (event.type === 'embedding_progress') {
+        } else if (event.type === 'embedding_progress' || event.type === 'item_error') {
+          // `item_error` with kind:"embedding" is a non-terminal per-chunk failure;
+          // it carries the same done/total/indexed/failed shape (a `complete` follows).
+          if (event.type === 'item_error' && event.kind !== 'embedding') continue
           const activeIds = Array.isArray(event.active_stream_ids)
             ? event.active_stream_ids.map((id) => String(id).trim()).filter(Boolean)
             : undefined
           const activeEmbeddingIds = Array.isArray(event.active_embedding_stream_ids)
             ? event.active_embedding_stream_ids.map((id) => String(id).trim()).filter(Boolean)
             : undefined
-          onEmbeddingProgress?.({
-            kind: 'embedding',
-            done: Number(event.done) || 0,
-            total: Number(event.total) || 0,
-            complete: Boolean(event.complete),
-            error: typeof event.error === 'string' ? event.error : undefined,
-            in_flight: Boolean(event.in_flight),
-            embedding_stream_id:
-              typeof event.embedding_stream_id === 'string'
-                ? event.embedding_stream_id
-                : undefined,
-            active_stream_ids: activeIds,
-            active_embedding_stream_ids: activeEmbeddingIds,
-            phone_reveal_pending_count:
-              typeof event.phone_reveal_pending_count === 'number'
-                ? event.phone_reveal_pending_count
-                : undefined,
-            waterfall_pending_count:
-              typeof event.waterfall_pending_count === 'number'
-                ? event.waterfall_pending_count
-                : undefined,
-          })
+          onEmbeddingProgress?.(
+            parseEmbedding(event, {
+              complete: event.type === 'item_error' ? false : Boolean(event.complete),
+              item_error: event.type === 'item_error',
+              in_flight: Boolean(event.in_flight),
+              active_stream_ids: activeIds,
+              active_embedding_stream_ids: activeEmbeddingIds,
+              phone_reveal_pending_count:
+                typeof event.phone_reveal_pending_count === 'number'
+                  ? event.phone_reveal_pending_count
+                  : undefined,
+              waterfall_pending_count:
+                typeof event.waterfall_pending_count === 'number'
+                  ? event.waterfall_pending_count
+                  : undefined,
+            }),
+          )
+        } else if (event.type === 'throttled') {
+          onThrottled?.(parseThrottle(event))
+        } else if (event.type === 'embedding_detached') {
+          onEmbeddingDetached?.()
         } else if (event.type === 'ingest_complete') {
           // Clear/update the fetch circle when ingest finishes (embed may continue).
           const activeIds = Array.isArray(event.active_stream_ids)
@@ -540,6 +660,9 @@ async function consumePeopleProgressStream(
                 : undefined,
             active_stream_ids: activeIds,
             active_ingest_stream_ids: activeIngestIds,
+            // Per-person ingest_complete may report the walk was capped short.
+            partial: event.partial ? true : undefined,
+            partial_reason: typeof event.reason === 'string' ? event.reason : undefined,
             // Reuse total_pages<=0 clear path when the whole batch ingest is done.
             ...(event.complete ? { page: 0, total_pages: 0, stored: Number(event.stored) || 0 } : {}),
           })
@@ -548,7 +671,7 @@ async function consumePeopleProgressStream(
           onComplete?.()
         } else if (event.type === 'error') {
           const detail = event.detail ?? `${errorLabel} failed`
-          throw new ApiError(502, detail, detailMessage(detail, `${errorLabel} failed`))
+          throw new ApiError(502, detail, friendlyDetail(detail, `${errorLabel} failed`))
         }
       }
     }

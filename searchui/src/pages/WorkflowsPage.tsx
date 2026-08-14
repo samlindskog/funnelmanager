@@ -22,6 +22,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -440,6 +441,7 @@ function ProspectRunner({
                     <TableBody>
                       {rows.map((row) => {
                         const meta = STATUS_META[row.status]
+                        const embedFailed = row.embedFailed ?? 0
                         return (
                           <TableRow key={row.domain} data-testid={`prospect-row-${row.domain}`}>
                             <TableCell sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
@@ -448,9 +450,55 @@ function ProspectRunner({
                             <TableCell>{row.companyName || '—'}</TableCell>
                             <TableCell align="right">
                               {row.people != null ? row.people.toLocaleString() : '—'}
+                              {embedFailed > 0 && (
+                                <Typography
+                                  variant="caption"
+                                  color="warning.main"
+                                  sx={{ display: 'block', lineHeight: 1.2 }}
+                                >
+                                  {embedFailed.toLocaleString()} embed failed
+                                  {row.embedReason ? ` (${row.embedReason})` : ''}
+                                </Typography>
+                              )}
                             </TableCell>
                             <TableCell>
-                              <Chip size="small" label={meta.label} color={meta.color} variant="outlined" />
+                              <Stack direction="row" spacing={0.5} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                                <Chip size="small" label={meta.label} color={meta.color} variant="outlined" />
+                                {row.throttled && (
+                                  <Chip
+                                    size="small"
+                                    label="Throttled"
+                                    color="warning"
+                                    variant="outlined"
+                                    data-testid={`prospect-throttled-${row.domain}`}
+                                  />
+                                )}
+                                {row.embeddingDetached && (
+                                  <Tooltip title="Embedding cancelled — leads still collecting; embeddings can be backfilled later">
+                                    <Chip
+                                      size="small"
+                                      label="Embed cancelled"
+                                      color="info"
+                                      variant="outlined"
+                                      data-testid={`prospect-embed-detached-${row.domain}`}
+                                    />
+                                  </Tooltip>
+                                )}
+                                {row.partial && (
+                                  <Chip
+                                    size="small"
+                                    label={
+                                      row.partialReason === 'apollo_page_cap'
+                                        ? 'Page cap'
+                                        : row.partialReason === 'max_entries'
+                                          ? 'Max entries'
+                                          : 'Partial'
+                                    }
+                                    color="warning"
+                                    variant="outlined"
+                                  />
+                                )}
+                              </Stack>
                             </TableCell>
                           </TableRow>
                         )

@@ -44,6 +44,7 @@ from app.milvus_client import (
     NICE_BACKFILL,
     NICE_SEARCH_EMBED,
     _milvus_str_literal,
+    classify_write_error,
     index_lead_docs,
     search_similar,
 )
@@ -63,6 +64,7 @@ from app.schemas import (
     StreamSubscribeRequest,
 )
 from app.stream_jobs import (
+    _safe_ingest_error_detail,
     cancel_stream,
     close_embedding_stream,
     create_embedding_stream,
@@ -207,12 +209,18 @@ async def _embed_mongo_ids_batch(
     source_precedence: int,
     force: bool = False,
     nice: int = NICE_SEARCH_EMBED,
+    raise_on_failure: bool = True,
 ) -> list[str]:
     """Embed leads (respecting precedence) and record source. Returns indexed mongo ids.
 
     ``force`` re-embeds even docs that already carry a vector (backfill); see
     ``index_lead_docs``. ``nice`` sets the Milvus-gate priority of the upsert
     (live search passes ``NICE_SEARCH_EMBED``; backfill passes ``NICE_BACKFILL``).
+
+    ``raise_on_failure`` defaults ``True``: this is the streamed/background embed
+    path, so a hard Milvus failure propagates to the caller (the stream records the
+    chunk as failed — honest progress — and the background embed logs it) rather
+    than being silently swallowed to ``[]``.
     """
     if not mongo_ids:
         return []
@@ -227,7 +235,11 @@ async def _embed_mongo_ids_batch(
         return []
     docs = [doc async for doc in db.leads.find({"_id": {"$in": object_ids}})]
     indexed = await index_lead_docs(
-        docs, source_precedence=source_precedence, force=force, nice=nice
+        docs,
+        source_precedence=source_precedence,
+        force=force,
+        nice=nice,
+        raise_on_failure=raise_on_failure,
     )
     if indexed:
         await _mark_embedded(indexed)
@@ -1100,7 +1112,10 @@ async def _run_enrich_stream_job(
                             "page": index,
                             "total_pages": total,
                             "apollo_id": apollo_id,
-                            "detail": f"{apollo_id}: {exc}",
+                            # Sanitized code only (full exception logged above); the
+                            # apollo_id rides its own field. Raw str(exc) here reached
+                            # browsers verbatim via search — a backend-internals leak.
+                            "detail": _safe_ingest_error_detail(exc),
                         },
                     )
                     continue
@@ -1132,11 +1147,14 @@ async def _run_enrich_stream_job(
             await manager.finish(ingest_stream_id, status=StreamJobStatus.COMPLETE)
         except Exception as exc:
             logger.exception("Enrich stream job %s failed", ingest_stream_id)
+            # Sanitized code only — the full exception is logged above; this detail
+            # is relayed verbatim to browsers by search.
+            detail = _safe_ingest_error_detail(exc)
             await manager.publish(
                 ingest_stream_id,
-                {"type": "error", "kind": "ingest", "detail": str(exc)},
+                {"type": "error", "kind": "ingest", "detail": detail},
             )
-            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=str(exc))
+            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=detail)
         finally:
             await queue.put(None)
 
@@ -1460,7 +1478,10 @@ async def _run_match_stream_job(
                             "page": index,
                             "total_pages": total,
                             "apollo_id": apollo_id,
-                            "detail": f"{apollo_id}: {exc}",
+                            # Sanitized code only (full exception logged above); the
+                            # apollo_id rides its own field. Raw str(exc) here reached
+                            # browsers verbatim via search — a backend-internals leak.
+                            "detail": _safe_ingest_error_detail(exc),
                         },
                     )
                     continue
@@ -1494,11 +1515,14 @@ async def _run_match_stream_job(
             await manager.finish(ingest_stream_id, status=StreamJobStatus.COMPLETE)
         except Exception as exc:
             logger.exception("Match stream job %s failed", ingest_stream_id)
+            # Sanitized code only — the full exception is logged above; this detail
+            # is relayed verbatim to browsers by search.
+            detail = _safe_ingest_error_detail(exc)
             await manager.publish(
                 ingest_stream_id,
-                {"type": "error", "kind": "ingest", "detail": str(exc)},
+                {"type": "error", "kind": "ingest", "detail": detail},
             )
-            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=str(exc))
+            await manager.finish(ingest_stream_id, status=StreamJobStatus.ERROR, error=detail)
         finally:
             await queue.put(None)
 
@@ -2484,9 +2508,12 @@ async def similarity_search(
         raise
     except Exception as exc:
         logger.exception("Similarity search failed")
+        # Sanitized code only — this 503 detail is forwarded verbatim into the
+        # browser-facing (and MCP-tool) error body by search, so it must not carry
+        # the raw Milvus exception text (URIs / quota internals). Full exc logged above.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Similarity search unavailable: {exc}",
+            detail=f"similarity_unavailable:{classify_write_error(exc)}",
         ) from exc
 
     # Mean similarity over the selected kinds each doc actually has (no zero-penalty).
