@@ -181,9 +181,18 @@ export interface ResolveIngestOptions {
   /** localStorage key for this workflow's checkpoint (distinct per workflow so a
    * Prospect run and a Top-people run persist independently). */
   checkpointKey: string
+  /** Keep the checkpoint after reaching `done` so a reload restores the resolved
+   * set + unlocked final step. Top-people needs this (its final step reranks the
+   * resolved companies in place). Prospect leaves it off — reaching `done` means
+   * the user moved on to the saved-leads search, so it clears (its original
+   * behavior; a completed Prospect run does not resume on reopen). */
+  persistDoneState?: boolean
 }
 
-export function useResolveIngest({ checkpointKey }: ResolveIngestOptions): UseResolveIngest {
+export function useResolveIngest({
+  checkpointKey,
+  persistDoneState = false,
+}: ResolveIngestOptions): UseResolveIngest {
   const progress = useProgress()
   const [rows, setRows] = useState<ResolveIngestRow[]>([])
   const [phase, setPhase] = useState<ResolveIngestPhase>('idle')
@@ -315,10 +324,19 @@ export function useResolveIngest({ checkpointKey }: ResolveIngestOptions): UseRe
     activeRef.current = true
     setPhase('resolving')
     try {
-      const worklist = rowsRef.current
-        .filter((row) => row.status === 'pending' && !row.orgRecordId)
-        .map((row) => row.domain)
-      await runPool(worklist, RESOLVE_CONCURRENCY, resolveOne)
+      // Drain the queue completely before advancing. A single runPool pass can, in
+      // some interleavings, return with rows still unresolved-pending (a partial /
+      // transient drain, or rows added after it started); re-filter and keep going
+      // until NO unresolved-pending row remains. This guarantees the phase advance
+      // below fires only when every input is in a settled terminal state — never on
+      // a momentary drain (which caused step 3 to unlock with a partial company set).
+      while (true) {
+        const worklist = rowsRef.current
+          .filter((row) => row.status === 'pending' && !row.orgRecordId)
+          .map((row) => row.domain)
+        if (!worklist.length) break
+        await runPool(worklist, RESOLVE_CONCURRENCY, resolveOne)
+      }
     } finally {
       activeRef.current = false
       // Auto-advance past the confirm gate when nothing is ingestable — every
@@ -460,10 +478,14 @@ export function useResolveIngest({ checkpointKey }: ResolveIngestOptions): UseRe
     // 'idle' | 'confirm' | 'done' restore state only and wait for the user.
   }, [runResolve, runIngest])
 
-  // ---- persist a checkpoint on every change; drop it once the run completes.
+  // ---- persist a checkpoint on every change. When `persistDoneState` is on, the
+  // `done` state is persisted too (NOT cleared) so a reload restores the resolved
+  // company set + the unlocked final step — the whole point of the zero-ingest
+  // rerank path; it is then dropped only by an explicit reset() (Start over).
+  // Otherwise reaching `done` clears it (Prospect's original behavior).
   useEffect(() => {
     if (phase === 'idle' && rows.length === 0) return
-    if (phase === 'done') {
+    if (phase === 'done' && !persistDoneState) {
       clearCheckpoint()
       return
     }
@@ -473,7 +495,7 @@ export function useResolveIngest({ checkpointKey }: ResolveIngestOptions): UseRe
     } catch {
       /* best-effort; the run continues in-memory without a checkpoint. */
     }
-  }, [phase, rows, skipIfIngested, checkpointKey, clearCheckpoint])
+  }, [phase, rows, skipIfIngested, checkpointKey, persistDoneState, clearCheckpoint])
 
   const setDomains = useCallback((raw: string[]) => {
     const seen = new Set<string>()

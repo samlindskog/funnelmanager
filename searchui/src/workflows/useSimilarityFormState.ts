@@ -50,8 +50,15 @@ export function useSimilarityFormState(opts: {
     name: true,
     title: true,
   })
-  const [companies, setCompanies] = useState<CompanyOption[]>([])
+  const [companies, setCompaniesRaw] = useState<CompanyOption[]>([])
   const [companyOptions, setCompanyOptions] = useState<CompanyOption[]>([])
+  // Once the user edits the company chips, their set wins — the auto-derive below
+  // stops overwriting it. Reset whenever a new run starts (phase leaves `done`).
+  const companiesTouchedRef = useRef(false)
+  const setCompanies = useCallback((next: CompanyOption[]) => {
+    companiesTouchedRef.current = true
+    setCompaniesRaw(next)
+  }, [])
   const [resolvingCompany, setResolvingCompany] = useState(false)
   const [companyResolveError, setCompanyResolveError] = useState<string | null>(null)
   const [emailFilter, setEmailFilter] = useState<TriState>('any')
@@ -73,15 +80,17 @@ export function useSimilarityFormState(opts: {
     }
   }, [])
 
-  // Pre-fill the company chips from the run's resolved orgs once ingest completes;
-  // clear the guard if the run restarts so a later run re-fills.
-  const prefilledRef = useRef(false)
+  // DERIVE the company chips from the run's resolved orgs while the final step is
+  // unlocked (phase==='done') and the user hasn't edited the set. This re-runs on
+  // every resolvedCompanies change, so even a mis-timed done→partial-set transition
+  // self-corrects as the rest of the companies settle (belt-and-suspenders with the
+  // hook's drain-until-settled advance). A new run (phase leaves `done`) re-arms it.
   useEffect(() => {
-    if (phase === 'done' && !prefilledRef.current) {
-      prefilledRef.current = true
-      setCompanies(resolvedCompanies)
+    if (phase === 'done') {
+      if (!companiesTouchedRef.current) setCompaniesRaw(resolvedCompanies)
+    } else {
+      companiesTouchedRef.current = false
     }
-    if (phase !== 'done') prefilledRef.current = false
   }, [phase, resolvedCompanies])
 
   const addCompanyValue = useCallback(
@@ -94,7 +103,9 @@ export function useSimilarityFormState(opts: {
       try {
         const known = companyOptions.find(already)
         const resolved = known ?? (await resolveCompany(value))
-        setCompanies((current) =>
+        // Explicit user action — their set wins from here on.
+        companiesTouchedRef.current = true
+        setCompaniesRaw((current) =>
           current.some(
             (c) => c.mongo_id === resolved.mongo_id && c.apollo_id === resolved.apollo_id,
           )
@@ -111,7 +122,8 @@ export function useSimilarityFormState(opts: {
   )
 
   const reset = useCallback(() => {
-    setCompanies([])
+    companiesTouchedRef.current = false
+    setCompaniesRaw([])
     setCompanyResolveError(null)
   }, [])
 

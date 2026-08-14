@@ -659,7 +659,7 @@ function TopPeopleRunner({
   onExit,
   onHistoryRefresh,
 }: { onExit: () => void } & WorkflowsPageProps) {
-  const run = useResolveIngest({ checkpointKey: 'searchui.top-people.v1' })
+  const run = useResolveIngest({ checkpointKey: 'searchui.top-people.v1', persistDoneState: true })
   const form = useSimilarityFormState({ resolvedCompanies: run.resolvedCompanies, phase: run.phase })
   const grouped = useGroupedStream()
   const [perCompany, setPerCompany] = useState(TOP_PEOPLE_DEFAULT)
