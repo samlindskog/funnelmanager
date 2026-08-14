@@ -94,8 +94,11 @@ spec:
               # compaction wedged load admission at the 0.95 watermark, ~7.7GB
               # "used" incl. page cache). 10Gi = steady-state sawtooth + recovery
               # headroom; request stays 8Gi (sustained band, eviction ranking).
+              # 10Gi ALSO refused loads during the same recovery (compaction backlog
+              # competes with collection load) -> back to 12Gi, the value that ran
+              # the full e2e flawlessly. The cap experiment resumes only with data.
               # History of the 2.5->12Gi OOM ladder: git log this file.
-              memory: 10240Mi
+              memory: 12288Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus
