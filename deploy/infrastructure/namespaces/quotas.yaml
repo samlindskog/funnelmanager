@@ -26,7 +26,11 @@ spec:
     # steady-state usage (milvus 3Gi, minio 768Mi, mongo 512Mi, neo4j 1Gi, …) —
     # pods running far above their request were first-in-line for eviction
     # under node pressure, which for mongo/milvus would be an incident.
-    requests.memory: 12Gi
+    # 12->16Gi (2026-08-14, Phase 4 right-sizing): requests raised to observed
+    # sustained usage (milvus 3->8Gi, mongo 0.5->1.25Gi, minio 0.75->1.25Gi,
+    # leads 0.25->0.75Gi) so the data stack stops running 2-3x over its
+    # reservations (eviction-ordering risk). Sum of prod requests lands ~15.5Gi.
+    requests.memory: 16Gi
     # 26->28Gi with milvus at 10Gi (2026-08-12).
     # 28->30Gi with milvus at 12Gi (2026-08-13): 10Gi could not fully load the
     # ~1.15M-vector leads_embeds_v2 (querycoord watermark keys off the container

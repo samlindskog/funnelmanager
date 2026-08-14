@@ -23,6 +23,44 @@ spec:
   values:
     alertmanager:
       enabled: false
+    # Capacity alerting rules (Phase 4 of the 2026-08-13/14 milvus memory-capping
+    # program). NOTE: alertmanager is disabled, so these fire visibly in
+    # Prometheus/Grafana (`ALERTS{}` series, alert list panels) but are NOT
+    # delivered anywhere — attaching a delivery channel is a separate decision.
+    serverFiles:
+      alerting_rules.yml:
+        groups:
+          - name: funnelmanager-capacity
+            rules:
+              # The memory-capped milvus design keeps resident ~O(active pages);
+              # sustained working-set near the (now 8Gi) limit means the model is
+              # being outgrown — check "OOM if load"/write-denial log lines and
+              # the runbook before raising anything.
+              - alert: MilvusMemoryNearLimit
+                expr: >-
+                  container_memory_working_set_bytes{namespace="prod",pod="milvus-0",container="milvus"}
+                    / on(namespace,pod,container)
+                  kube_pod_container_resource_limits{namespace="prod",pod="milvus-0",container="milvus",resource="memory"}
+                  > 0.92
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: "milvus-0 working set >92% of its memory limit for 15m"
+                  description: "The mmap'd memory-capped design should sawtooth well below the limit; sustained pressure means load refusals / write throttling are imminent. Runbook: docs/ops-runbook.md (Milvus memory model)."
+              # mmap trades RAM for disk: the corpus now grows the node
+              # filesystem (~84GB for the 2026-08-14 1,009-domain run).
+              - alert: NodeRootDiskHigh
+                expr: >-
+                  1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+                    / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+                  > 0.80
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: "Node root filesystem >80% full for 30m"
+                  description: "Milvus mmap + MinIO segments + Mongo payloads grow disk with corpus size. Check per-run growth and prune/expand before 90%. Runbook: docs/ops-runbook.md (Milvus memory model)."
     prometheus-pushgateway:
       # Sink for the objstore-metrics CronJob (measure bucket size/count ->
       # push every 30m). fullnameOverride pins the Service to

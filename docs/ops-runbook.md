@@ -165,3 +165,50 @@ new source label is invisible to that allowlist until listed.
 - `deploy/infrastructure/identity/networkpolicies.yaml` — Keycloak ingress/egress.
 - `.claude/skills/canary/SKILL.md` — canary lifecycle + ARMED prerequisites.
 - `docs/authentication.md` — the RFC 8693 exchange model these policies protect.
+
+---
+
+## Milvus memory model (memory-capped, 2026-08-14) — and what to do when it alerts
+
+Since v1.16.0 Milvus runs a **memory-capped** design: resident memory tracks
+*active pages*, not corpus size. The pieces (all in
+`deploy/apps/base/data/milvus/`):
+
+- **Global mmap** (`milvus-config` ConfigMap → `user.yaml`): sealed data, indexes,
+  and growing segments load via the page cache. Corpus growth lands on **disk**
+  (worker2 local-path + MinIO), not RAM (~84GB disk for a 1,009-domain run).
+- **`queryNode.cache.readAheadPolicy: random`** — the load-bearing line. The
+  default `willneed` pre-faults whole mmap'd files into the page cache, and
+  Milvus's own `GetUsedMemoryCount()` counts that cache (cgroup usage), so load
+  admission deadlocks at the watermark ("OOM if load" storms) while the real
+  working set is far smaller. `random` keeps the cache demand-driven.
+- **Write protection** (`growingSegmentsSizeProtection` + default memProtection):
+  under memory pressure Milvus throttles/denies inserts instead of dying; leads
+  (since v1.16.0) treats a deny as retry-with-backoff inside a per-stream 300s
+  budget, and its bounded ingest→embed queue pauses the Apollo walk (`throttled`
+  UI events) until embedding catches up.
+- **Limit 8Gi = request** (Guaranteed for memory; watermarks engage ~7-7.8GB).
+  A ConfigMap-only change **never restarts the pod** — roll it deliberately
+  (`kubectl -n prod delete pod milvus-0`) and only when leads is idle (no
+  embedding in flight — check `logs deploy/leads -c leads | grep openai`).
+
+**`MilvusMemoryNearLimit` fires** (working set >92% of limit for 15m):
+1. `kubectl logs milvus-0 -n prod | grep -cE "OOM if load|no sufficient"` — a
+   storm means load admission is wedged; check internal accounting vs working set
+   (`grep -oE "memUsage\(MB\)=[0-9.]+"`). Internal ≪ working-set ⇒ page-cache
+   inflation (readahead regression?); internal ≈ limit ⇒ the corpus/active-set
+   genuinely outgrew the cap.
+2. Check write denials (`grep -iE "deny to write|memory quota"`) — leads should
+   be backing off, searches keep working.
+3. Remedies in order: confirm mmap/readahead config still mounted in the pod;
+   prune/compact the collection; only then raise the limit (and the quota) —
+   that is the *last* lever, not the first.
+
+**`NodeRootDiskHigh` fires:** disk is the resource that scales with corpus now.
+Check `du` of `/var/lib/rancher/k3s/storage/` (milvus mmap + local PVCs) and
+MinIO/Mongo growth; prune retired collections/old segments or expand the node
+before 90%.
+
+**Alert delivery caveat:** alertmanager is *disabled* — these rules fire in
+Prometheus/Grafana (`ALERTS{alertstate="firing"}`) but page nobody. Wiring a
+contact point is an open follow-up.

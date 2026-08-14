@@ -51,8 +51,11 @@ spec:
             timeoutSeconds: 20
           resources:
             requests:
-              cpu: 100m
-              memory: 512Mi
+              # Right-sized 2026-08-14 (usage ~1.1GB / ~200m sustained during the
+              # e2e bulk run — running 2x over the old 512Mi request made mongo an
+              # early eviction candidate under node pressure).
+              cpu: 200m
+              memory: 1280Mi
             limits:
               cpu: 1000m
               memory: 1536Mi
