@@ -239,3 +239,26 @@ before 90%.
 **Alert delivery caveat:** alertmanager is *disabled* — these rules fire in
 Prometheus/Grafana (`ALERTS{alertstate="firing"}`) but page nobody. Wiring a
 contact point is an open follow-up.
+
+### Addendum (2026-08-14 outage): taint latch + GC sizing + recovery limits
+
+- **Kubelet DiskPressure can LATCH:** observed three times — the condition stays
+  `True` (and keeps evicting) after free space recovers above the configured
+  threshold. `ssh <node> systemctl restart k3s-agent` unlatches it (running pods
+  survive an agent restart). Check `kubectl get --raw /api/v1/nodes/<n>/proxy/configz`
+  vs `stats/summary` when the numbers look contradictory.
+- **Eviction cannot reclaim volume-pinned space:** on a node whose disk is full
+  of local-path PVC data, disk-pressure eviction is a pure denial-of-service
+  spiral — the evicted data pods are the ones holding the space and cannot
+  reschedule elsewhere. Temporary eviction-floor overrides
+  (`/etc/rancher/k3s/config.yaml` → `kubelet-arg: eviction-hard=...`) are the
+  bridge; REMOVE them once the disk drains (done 2026-08-14).
+- **Milvus GC is the disk drain:** the aggressive `dataCoord.gc` settings in the
+  milvus user.yaml (10m scan/drop, 2h missing) took worker1 96%→52% in ~1h.
+  Compaction bursts transiently need ~5-8GB headroom — do not run this node
+  hot.
+- **Milvus recovery needs the 12Gi limit:** 8Gi and 10Gi both wedge load
+  admission after a crash (reload + WAL replay + compaction backlog compete);
+  12Gi is the operational floor until measured otherwise.
+- **After an app-db outage, restart `search`:** stale asyncpg pool connections
+  hang requests (no error, no access-log line) while readiness stays green.
