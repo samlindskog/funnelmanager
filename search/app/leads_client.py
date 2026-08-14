@@ -1194,12 +1194,16 @@ class LeadsClient:
                         )
                     except Exception:
                         detail = (await response.aread()).decode("utf-8", errors="replace")
+                    # 429 grouped_stream_busy (leads concurrent-stream cap) joins the
+                    # client-error passthrough set so its detail reaches the relay's
+                    # error line verbatim, exactly like the 404/422s.
+                    passthrough = {400, 401, 403, 404, 409, 422, 429}
                     raise HTTPException(
                         status_code=response.status_code
-                        if response.status_code in {400, 401, 403, 404, 409, 422}
+                        if response.status_code in passthrough
                         else status.HTTP_502_BAD_GATEWAY,
                         detail=detail
-                        if response.status_code in {400, 401, 403, 404, 409, 422}
+                        if response.status_code in passthrough
                         else {"leads_status": response.status_code, "leads_error": detail},
                     )
                 buffer = ""

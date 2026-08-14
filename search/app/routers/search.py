@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import csv
 import io
 import json
@@ -2109,120 +2110,148 @@ async def _grouped_stream_events(
     # index (request order) -> that company's flattened records, for request-order
     # flatten at completion even though groups arrive in completion order.
     groups_by_index: dict[int, list[dict[str, Any]]] = {}
+    # Defensive accumulation bounds. Leads is trusted-internal; this is
+    # belt-and-suspenders so a malformed/oversized leads payload can never make us
+    # accumulate + shield-persist an unbounded response. A breach is terminal:
+    # emit an error, stop consuming, and persist NOTHING.
+    group_count = 0
+    running_hits = 0
+    _MAX_GROUPS = 2000
+    _MAX_HITS_PER_GROUP = 100
+    _MAX_TOTAL_HITS = 5000
     terminal_sent = False
     try:
-        async for event in client.similarity_search_grouped_stream(
-            norm_query or None,
-            per_company_limit=per_company_limit,
-            company_ids=company_ids,
-            embeds=embeds,
-            entity_type=entity_type,
-            email_exists=email_exists,
-            phone_exists=phone_exists,
-            linkedin_exists=linkedin_exists,
-        ):
-            etype = event.get("type")
-            if etype == "group":
-                index = int(event.get("index") or 0)
-                company_id = str(event.get("company_id") or "").strip()
-                company_lead = event.get("company")
-                company_record = (
-                    lead_to_record(company_lead) if isinstance(company_lead, dict) else None
-                )
-                raw_hits = event.get("hits")
-                hits = (
-                    [h for h in raw_hits if isinstance(h, dict)]
-                    if isinstance(raw_hits, list)
-                    else []
-                )
-                scored, records = _normalize_similarity_hits(hits)
-                groups_by_index[index] = records
-                yield _ndjson_line(
-                    {
-                        "type": "group",
-                        "index": index,
-                        "company_id": company_id,
-                        "company": company_record,
-                        "hits": [hit.model_dump(mode="json") for hit in scored],
-                    }
-                )
-            elif etype == "progress":
-                yield _ndjson_line(
-                    {
-                        "type": "progress",
-                        "done": int(event.get("done") or 0),
-                        "total": int(event.get("total") or 0),
-                    }
-                )
-            elif etype == "item_error":
-                yield _ndjson_line(
-                    {
-                        "type": "item_error",
-                        "kind": "group",
-                        "index": int(event.get("index") or 0),
-                        "company_id": str(event.get("company_id") or "").strip(),
-                        "detail": str(event.get("detail") or "group failed"),
-                    }
-                )
-            elif etype == "complete":
-                total_hits = int(event.get("total_hits") or 0)
-                failed = int(event.get("failed") or 0)
-                flattened: list[dict[str, Any]] = []
-                for idx in sorted(groups_by_index):
-                    flattened.extend(groups_by_index[idx])
-
-                async def _do_persist() -> tuple[SearchHistory, list[dict[str, Any]]]:
-                    # Own DB session (the request-scoped one is closed once the
-                    # StreamingResponse body starts) — mirrors _run_search_job.
-                    async with SessionLocal() as sdb:
-                        return await _persist_grouped_history(
-                            sdb,
-                            flattened_records=flattened,
-                            total=total_hits,
-                            query=norm_query,
-                            per_company_limit=per_company_limit,
-                            company_ids=company_ids,
-                            embeds=embeds,
-                            entity_type=entity_type,
-                            email_exists=email_exists,
-                            phone_exists=phone_exists,
-                            linkedin_exists=linkedin_exists,
-                            username=username,
-                            origin=origin,
-                            actor=actor,
-                            streamed=True,
+        # contextlib.aclosing => the leads async generator is deterministically
+        # aclose()d on every exit path (normal, terminal return, or a disconnect
+        # unwind), closing the leads connection and cancelling leads-side work --
+        # not left to GC-driven generator finalization.
+        async with contextlib.aclosing(
+            client.similarity_search_grouped_stream(
+                norm_query or None,
+                per_company_limit=per_company_limit,
+                company_ids=company_ids,
+                embeds=embeds,
+                entity_type=entity_type,
+                email_exists=email_exists,
+                phone_exists=phone_exists,
+                linkedin_exists=linkedin_exists,
+            )
+        ) as stream:
+            async for event in stream:
+                etype = event.get("type")
+                if etype == "group":
+                    index = int(event.get("index") or 0)
+                    company_id = str(event.get("company_id") or "").strip()
+                    company_lead = event.get("company")
+                    company_record = (
+                        lead_to_record(company_lead) if isinstance(company_lead, dict) else None
+                    )
+                    raw_hits = event.get("hits")
+                    hits = (
+                        [h for h in raw_hits if isinstance(h, dict)]
+                        if isinstance(raw_hits, list)
+                        else []
+                    )
+                    group_count += 1
+                    running_hits += len(hits)
+                    if (
+                        group_count > _MAX_GROUPS
+                        or len(hits) > _MAX_HITS_PER_GROUP
+                        or running_hits > _MAX_TOTAL_HITS
+                    ):
+                        yield _ndjson_line(
+                            {"type": "error", "detail": "grouped_stream_overflow"}
                         )
-
-                try:
-                    # leads is already done (it sent ``complete``); shield the local
-                    # DB writes so a last-instant disconnect can't leave a partial
-                    # row — this persists COMPLETE data or nothing, never partial.
-                    row, page_results = await asyncio.shield(_do_persist())
-                except Exception:
-                    logger.exception("Grouped stream: failed to persist history")
+                        terminal_sent = True
+                        return
+                    scored, records = _normalize_similarity_hits(hits)
+                    groups_by_index[index] = records
                     yield _ndjson_line(
-                        {"type": "error", "detail": "Failed to persist grouped search results"}
+                        {
+                            "type": "group",
+                            "index": index,
+                            "company_id": company_id,
+                            "company": company_record,
+                            "hits": [hit.model_dump(mode="json") for hit in scored],
+                        }
+                    )
+                elif etype == "progress":
+                    yield _ndjson_line(
+                        {
+                            "type": "progress",
+                            "done": int(event.get("done") or 0),
+                            "total": int(event.get("total") or 0),
+                        }
+                    )
+                elif etype == "item_error":
+                    yield _ndjson_line(
+                        {
+                            "type": "item_error",
+                            "kind": "group",
+                            "index": int(event.get("index") or 0),
+                            "company_id": str(event.get("company_id") or "").strip(),
+                            "detail": str(event.get("detail") or "group failed"),
+                        }
+                    )
+                elif etype == "complete":
+                    total_hits = int(event.get("total_hits") or 0)
+                    failed = int(event.get("failed") or 0)
+                    flattened: list[dict[str, Any]] = []
+                    for idx in sorted(groups_by_index):
+                        flattened.extend(groups_by_index[idx])
+
+                    async def _do_persist() -> tuple[SearchHistory, list[dict[str, Any]]]:
+                        # Own DB session (the request-scoped one is closed once the
+                        # StreamingResponse body starts) — mirrors _run_search_job.
+                        async with SessionLocal() as sdb:
+                            return await _persist_grouped_history(
+                                sdb,
+                                flattened_records=flattened,
+                                total=total_hits,
+                                query=norm_query,
+                                per_company_limit=per_company_limit,
+                                company_ids=company_ids,
+                                embeds=embeds,
+                                entity_type=entity_type,
+                                email_exists=email_exists,
+                                phone_exists=phone_exists,
+                                linkedin_exists=linkedin_exists,
+                                username=username,
+                                origin=origin,
+                                actor=actor,
+                                streamed=True,
+                            )
+
+                    try:
+                        # leads is already done (it sent ``complete``); shield the local
+                        # DB writes so a last-instant disconnect can't leave a partial
+                        # row — this persists COMPLETE data or nothing, never partial.
+                        row, page_results = await asyncio.shield(_do_persist())
+                    except Exception:
+                        logger.exception("Grouped stream: failed to persist history")
+                        yield _ndjson_line(
+                            {"type": "error", "detail": "Failed to persist grouped search results"}
+                        )
+                        terminal_sent = True
+                        return
+                    yield _ndjson_line(
+                        {
+                            "type": "complete",
+                            "search_id": row.id,
+                            "history": _to_detail(row, page_results).model_dump(mode="json"),
+                            "total": total_hits,
+                            "failed": failed,
+                        }
                     )
                     terminal_sent = True
                     return
-                yield _ndjson_line(
-                    {
-                        "type": "complete",
-                        "search_id": row.id,
-                        "history": _to_detail(row, page_results).model_dump(mode="json"),
-                        "total": total_hits,
-                        "failed": failed,
-                    }
-                )
-                terminal_sent = True
-                return
-            elif etype == "error":
-                yield _ndjson_line(
-                    {"type": "error", "detail": event.get("detail") or "Grouped search failed"}
-                )
-                terminal_sent = True
-                return
-            # Unknown leads event types are dropped (conservative relay).
+                elif etype == "error":
+                    yield _ndjson_line(
+                        {"type": "error", "detail": event.get("detail") or "Grouped search failed"}
+                    )
+                    terminal_sent = True
+                    return
+                # Unknown leads event types are dropped (conservative relay).
 
         # The leads stream closed without a terminal event — synthesize one so the
         # browser always sees a terminal (P8 sentinel).
@@ -2232,9 +2261,9 @@ async def _grouped_stream_events(
             )
             terminal_sent = True
     except HTTPException as exc:
-        # Pre-stream leads failure (bad status, exchange 503) surfaced as an
-        # HTTPException inside the leads client — emit as a terminal error line,
-        # never raise (P8).
+        # Pre-stream leads failure (bad status incl. a 429 grouped_stream_busy,
+        # or an exchange 503) surfaced as an HTTPException inside the leads client
+        # — emit as a terminal error line, never raise (P8).
         if not terminal_sent:
             yield _ndjson_line({"type": "error", "detail": exc.detail})
     except Exception:
