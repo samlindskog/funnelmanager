@@ -2,9 +2,20 @@ import DownloadIcon from '@mui/icons-material/Download'
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined'
 import LinkedInIcon from '@mui/icons-material/LinkedIn'
 import PhoneOutlinedIcon from '@mui/icons-material/PhoneOutlined'
-import { Box, Button, Chip, Divider, Stack, Typography } from '@mui/material'
-import type { SimilarityGroup, SimilarityGroupedResponse } from '../api'
+import {
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  Divider,
+  LinearProgress,
+  Skeleton,
+  Stack,
+  Tooltip,
+  Typography,
+} from '@mui/material'
 import type { ApolloRecord } from '../types'
+import type { GroupedRunView, GroupedSlot } from '../workflows/useGroupedStream'
 import {
   contactPresence,
   csvEscape,
@@ -15,27 +26,28 @@ import {
   secondaryText,
 } from './record'
 
-/** Company display name for a group: the hydrated company record's name, else the
- * echoed id (so a company that failed to hydrate is still labelled). */
-function groupTitle(group: SimilarityGroup): string {
-  const name = group.company ? recordCompany(group.company) : null
-  return name || group.company_id
+/** Company display name for a slot: the hydrated record's name, else the request
+ * chip's name, else the echoed id (so an unhydrated company is still labelled). */
+function slotTitle(slot: GroupedSlot): string {
+  const name = slot.company ? recordCompany(slot.company) : null
+  return name || slot.companyName || slot.companyId
 }
 
-function groupDomain(group: SimilarityGroup): string | null {
-  const company = group.company
+function slotDomain(slot: GroupedSlot): string | null {
+  const company = slot.company
   if (company && company.entity_type === 'company') return (company.domain || '').trim() || null
   return null
 }
 
-/** Flat CSV with a leading company column — one row per hit across every group,
- * built client-side from the grouped payload. Zero-hit companies contribute no rows. */
-function downloadGroupedCsv(response: SimilarityGroupedResponse): void {
+/** Flat CSV with a leading company column — one row per hit across every done slot,
+ * built client-side from the streamed slots (only enabled once ranking completes). */
+function downloadGroupedCsv(view: GroupedRunView): void {
   const lines = ['company,company_domain,score,mongo_id,name,email,linkedin,phone,title']
-  for (const group of response.groups) {
-    const company = groupTitle(group)
-    const domain = groupDomain(group) || ''
-    for (const hit of group.hits) {
+  for (const slot of view.slots) {
+    if (slot.status !== 'done') continue
+    const company = slotTitle(slot)
+    const domain = slotDomain(slot) || ''
+    for (const hit of slot.hits) {
       const record = hit.record
       const score = hit.score != null ? String(hit.score) : ''
       const mongoId = (record.mongo_id || '').trim() || 'null'
@@ -56,7 +68,7 @@ function downloadGroupedCsv(response: SimilarityGroupedResponse): void {
   try {
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `top-people-${response.search_id}.csv`
+    anchor.download = `top-people-${view.searchId ?? 'export'}.csv`
     anchor.rel = 'noopener'
     document.body.appendChild(anchor)
     anchor.click()
@@ -120,13 +132,13 @@ function HitRow({ score, record }: { score: number | null; record: ApolloRecord 
   )
 }
 
-function GroupSection({ group }: { group: SimilarityGroup }) {
-  const title = groupTitle(group)
-  const domain = groupDomain(group)
-  const hitCount = group.hits.length
+function SlotSection({ slot }: { slot: GroupedSlot }) {
+  const title = slotTitle(slot)
+  const domain = slotDomain(slot)
+  const hitCount = slot.hits.length
   return (
     <Box
-      data-testid={`grouped-company-${group.company_id}`}
+      data-testid={`grouped-company-${slot.companyId}`}
       sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}
     >
       <Box
@@ -148,47 +160,85 @@ function GroupSection({ group }: { group: SimilarityGroup }) {
           </Typography>
         )}
         <Box sx={{ flex: 1 }} />
-        <Typography variant="caption" color={hitCount ? 'text.secondary' : 'text.disabled'}>
-          {hitCount ? `${hitCount} ${hitCount === 1 ? 'person' : 'people'}` : 'No matches'}
-        </Typography>
+        {slot.status === 'pending' && (
+          <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center' }}>
+            <CircularProgress size={12} />
+            <Typography variant="caption" color="text.secondary">
+              Ranking…
+            </Typography>
+          </Stack>
+        )}
+        {slot.status === 'error' && (
+          <Chip
+            size="small"
+            color="error"
+            variant="outlined"
+            label={slot.errorReason ? `Failed — ${slot.errorReason}` : 'Failed'}
+          />
+        )}
+        {slot.status === 'done' && (
+          <Typography variant="caption" color={hitCount ? 'text.secondary' : 'text.disabled'}>
+            {hitCount ? `${hitCount} ${hitCount === 1 ? 'person' : 'people'}` : 'No matches'}
+          </Typography>
+        )}
       </Box>
-      {group.hits.map((hit, index) => (
-        <HitRow key={hit.record.mongo_id || hit.record.id || index} score={hit.score} record={hit.record} />
-      ))}
+      {slot.status === 'pending' && (
+        <Box sx={{ px: 1, py: 0.75 }}>
+          <Skeleton variant="text" width="55%" />
+          <Skeleton variant="text" width="40%" />
+        </Box>
+      )}
+      {slot.status === 'done' &&
+        slot.hits.map((hit, index) => (
+          <HitRow key={hit.record.mongo_id || hit.record.id || index} score={hit.score} record={hit.record} />
+        ))}
     </Box>
   )
 }
 
-export function GroupedResultsView({ response }: { response: SimilarityGroupedResponse }) {
-  const companyCount = response.groups.length
-  const withHits = response.groups.filter((g) => g.hits.length > 0).length
+export function GroupedResultsView({ view }: { view: GroupedRunView }) {
+  if (!view.active) return null
+  const withHits = view.slots.filter((s) => s.status === 'done' && s.hits.length > 0).length
   return (
     <Stack spacing={1.5} data-testid="grouped-results">
-      <Stack
-        direction="row"
-        spacing={1.5}
-        sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}
-      >
-        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-          {response.total.toLocaleString()} {response.total === 1 ? 'person' : 'people'} across{' '}
-          {withHits}/{companyCount} {companyCount === 1 ? 'company' : 'companies'}
-        </Typography>
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+        {view.complete ? (
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            {view.totalHits.toLocaleString()} {view.totalHits === 1 ? 'person' : 'people'} across{' '}
+            {withHits}/{view.total} {view.total === 1 ? 'company' : 'companies'}
+            {view.failedTotal > 0 ? ` · ${view.failedTotal} failed` : ''}
+          </Typography>
+        ) : (
+          <Typography data-testid="grouped-progress" variant="subtitle1" sx={{ fontWeight: 700 }}>
+            {view.ranked.toLocaleString()} of {view.total.toLocaleString()} companies ranked
+          </Typography>
+        )}
         <Box sx={{ flex: 1 }} />
-        <Button
-          data-testid="grouped-export"
-          size="small"
-          variant="outlined"
-          startIcon={<DownloadIcon />}
-          disabled={response.total === 0}
-          onClick={() => downloadGroupedCsv(response)}
-        >
-          Export CSV
-        </Button>
+        <Tooltip title={view.complete ? '' : 'Available when ranking completes'}>
+          <span>
+            <Button
+              data-testid="grouped-export"
+              size="small"
+              variant="outlined"
+              startIcon={<DownloadIcon />}
+              disabled={!view.complete || view.totalHits === 0}
+              onClick={() => downloadGroupedCsv(view)}
+            >
+              Export CSV
+            </Button>
+          </span>
+        </Tooltip>
       </Stack>
+      {view.streaming && (
+        <LinearProgress
+          variant={view.total > 0 ? 'determinate' : 'indeterminate'}
+          value={view.total > 0 ? Math.round((view.ranked / view.total) * 100) : undefined}
+        />
+      )}
       <Divider />
       <Stack spacing={1.25}>
-        {response.groups.map((group) => (
-          <GroupSection key={group.company_id} group={group} />
+        {view.slots.map((slot) => (
+          <SlotSection key={slot.companyId || slot.index} slot={slot} />
         ))}
       </Stack>
     </Stack>

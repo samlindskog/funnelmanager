@@ -27,19 +27,13 @@ import {
   Typography,
 } from '@mui/material'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import {
-  friendlyDetail,
-  runSimilarityGrouped,
-  runSimilaritySearch,
-  ApiError,
-  GROUPED_MAX_RESULTS,
-  type SimilarityGroupedResponse,
-} from '../api'
+import { runSimilaritySearch, GROUPED_MAX_RESULTS } from '../api'
 import { GroupedResultsView } from '../components/GroupedResultsView'
 import { SimilarityForm } from '../components/SimilarityForm'
 import { SIMILARITY_LIMIT_MAX, triToBool } from '../components/similarity'
 import { parseCsv } from '../csv'
 import type { SearchHistoryDetail } from '../types'
+import { useGroupedStream } from '../workflows/useGroupedStream'
 import { useProspectRun } from '../workflows/useProspectRun'
 import {
   useResolveIngest,
@@ -651,13 +645,10 @@ function ProspectRunner({
 
 const TOP_PEOPLE_DEFAULT = 10
 const TOP_PEOPLE_MAX = 100
-/** Backend compute budget: companies × embed_kinds ≤ this (embed_kinds = max(1, selected)). */
-const COMPUTE_BUDGET = 3000
-/** Soft latency threshold: warn but don't block. Calibrated live on the
- * 2026-08-14 canary e2e: the MilvusGate serializes vector searches at
- * ~300ms/call, so compute≈414 took ~2min end-to-end. 200 keeps warned-free
- * runs around the one-minute mark. */
-const COMPUTE_SOFT_WARN = 200
+/** Backend compute budget: companies × embed_kinds ≤ this (embed_kinds = max(1, selected)).
+ * Streaming makes big runs legitimate, so this hard cap is the only latency-related gate
+ * (the earlier soft "may time out" warning is gone). Mirrors the backend's 6000. */
+const COMPUTE_BUDGET = 6000
 
 function clampPerCompany(n: number): number {
   if (!Number.isFinite(n)) return TOP_PEOPLE_DEFAULT
@@ -670,11 +661,11 @@ function TopPeopleRunner({
 }: { onExit: () => void } & WorkflowsPageProps) {
   const run = useResolveIngest({ checkpointKey: 'searchui.top-people.v1' })
   const form = useSimilarityFormState({ resolvedCompanies: run.resolvedCompanies, phase: run.phase })
+  const grouped = useGroupedStream()
   const [perCompany, setPerCompany] = useState(TOP_PEOPLE_DEFAULT)
-  const [searching, setSearching] = useState(false)
   const [stageError, setStageError] = useState<string | null>(null)
-  const [grouped, setGrouped] = useState<SimilarityGroupedResponse | null>(null)
 
+  const streaming = grouped.view.streaming
   const companyCount = form.companyValues.length
   // embed_kinds = max(1, selected) — omitted/pure-filter both count as 1 (matches backend).
   const embedKinds = Math.max(1, form.selEmbeds.length)
@@ -682,7 +673,6 @@ function TopPeopleRunner({
   const computeUnits = companyCount * embedKinds
   const overCap = estimated > GROUPED_MAX_RESULTS
   const overComputeCap = computeUnits > COMPUTE_BUDGET
-  const softWarn = !overComputeCap && computeUnits > COMPUTE_SOFT_WARN
 
   const runGrouped = useCallback(async () => {
     const passage = form.query.trim()
@@ -709,9 +699,10 @@ function TopPeopleRunner({
       return
     }
     setStageError(null)
-    setSearching(true)
-    try {
-      const response = await runSimilarityGrouped({
+    // The workflow always streams (one path, all sizes); the hook owns the
+    // incremental state, error handling, and abort.
+    const { completed } = await grouped.run(
+      {
         query: form.hasEmbeds ? passage : null,
         embeds: form.selEmbeds,
         companyIds: form.companyValues,
@@ -720,22 +711,11 @@ function TopPeopleRunner({
         emailExists: triToBool(form.emailFilter),
         phoneExists: triToBool(form.phoneFilter),
         linkedinExists: triToBool(form.linkedinFilter),
-      })
-      setGrouped(response)
-      await onHistoryRefresh()
-    } catch (err) {
-      setGrouped(null)
-      setStageError(
-        err instanceof ApiError
-          ? friendlyDetail(err.detail, err.message)
-          : err instanceof Error
-            ? err.message
-            : 'Grouped search failed',
-      )
-    } finally {
-      setSearching(false)
-    }
-  }, [form, companyCount, embedKinds, perCompany, onHistoryRefresh])
+      },
+      form.companies,
+    )
+    if (completed) await onHistoryRefresh()
+  }, [form, companyCount, embedKinds, perCompany, grouped, onHistoryRefresh])
 
   const canRun =
     companyCount > 0 &&
@@ -750,7 +730,9 @@ function TopPeopleRunner({
         Rank the ingested people per company and keep the top few of each. Company chips are
         pre-filled from the run; edit them freely.
       </Typography>
-      {stageError && <Alert severity="error">{stageError}</Alert>}
+      {(stageError || grouped.error) && (
+        <Alert severity="error">{stageError || grouped.error}</Alert>
+      )}
       <SimilarityForm
         query={form.query}
         onQueryChange={form.setQuery}
@@ -802,30 +784,25 @@ function TopPeopleRunner({
           </Typography>
         </Stack>
       </Stack>
-      {softWarn && (
-        <Alert severity="warning" data-testid="top-people-latency-warning" sx={{ py: 0 }}>
-          Large runs may time out — reduce companies or embed kinds.
-        </Alert>
-      )}
       <Box>
         <Button
           data-testid="top-people-run"
           variant="contained"
           size="large"
-          startIcon={searching ? <CircularProgress size={18} color="inherit" /> : <FormatListNumberedIcon />}
-          disabled={searching || !canRun}
+          startIcon={streaming ? <CircularProgress size={18} color="inherit" /> : <FormatListNumberedIcon />}
+          disabled={streaming || !canRun}
           onClick={() => void runGrouped()}
           sx={{ px: 3 }}
         >
-          {searching ? 'Ranking…' : 'Rank people'}
+          {streaming ? 'Ranking…' : 'Rank people'}
         </Button>
-        {searching && (
+        {streaming && (
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
-            Ranking across companies — this can take a minute or more for large sets.
+            Ranking company by company — results stream in as they're ready.
           </Typography>
         )}
       </Box>
-      {grouped && <GroupedResultsView response={grouped} />}
+      {grouped.view.active && <GroupedResultsView view={grouped.view} />}
     </Stack>
   )
 
@@ -840,8 +817,7 @@ function TopPeopleRunner({
       onExit={onExit}
       onStartOverExtra={() => {
         setStageError(null)
-        setGrouped(null)
-        form.reset()
+        grouped.reset()
       }}
     />
   )

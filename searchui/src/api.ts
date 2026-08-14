@@ -907,29 +907,58 @@ export type SimilarityGroupHit = {
   record: ApolloRecord
 }
 
-export type SimilarityGroup = {
-  /** Echoes the requested company id (groups preserve request order). */
+/** A `group` stream event — one company's ranked list, carrying its request-order
+ * `index` (events arrive in COMPLETION order, so the UI places by index). */
+export type SimilarityGroupEvent = {
+  index: number
   company_id: string
-  /** The company's own record, or null if it couldn't be hydrated. */
   company: ApolloRecord | null
-  /** Ranked hits (empty for a zero-hit company). */
   hits: SimilarityGroupHit[]
 }
 
-export type SimilarityGroupedResponse = {
-  search_id: number
-  /** Same SearchHistoryDetail as the flat similarity flow — appears in history. */
-  history: SearchHistoryDetail
-  total: number
-  /** One group per requested company, in request order (zero-hit companies included). */
-  groups: SimilarityGroup[]
+/** A non-terminal per-company failure (`item_error`); ranking continues. */
+export type SimilarityGroupItemError = {
+  index: number
+  company_id: string
+  /** Machine detail code. */
+  detail: string
+  /** Friendly, display-ready mapping of `detail`. */
+  reason: string
 }
 
-/** Grouped similarity: top-N ranked people per company across many companies.
- * Throws ApiError(422) if companyIds.length * perCompanyLimit > GROUPED_MAX_RESULTS. */
-export async function runSimilarityGrouped(
+/** Terminal `complete` — the run is persisted and appears in normal search history. */
+export type SimilarityGroupedComplete = {
+  search_id: number
+  history: SearchHistoryDetail
+  /** Total hits across all companies. */
+  total: number
+  /** Companies that failed to rank. */
+  failed: number
+}
+
+export type GroupedStreamHandlers = {
+  onGroup?: (group: SimilarityGroupEvent) => void
+  /** Heartbeat progress (done/total companies) — keeps the connection alive. */
+  onProgress?: (progress: { done: number; total: number }) => void
+  onItemError?: (error: SimilarityGroupItemError) => void
+  onComplete?: (complete: SimilarityGroupedComplete) => void
+  /** Abort cancels the browser read AND the backend ranking work. */
+  signal?: AbortSignal
+}
+
+/** Grouped similarity as an NDJSON stream: one ranked list per company streamed in
+ * completion order (each event carries its request-order `index`), progress
+ * heartbeats, non-terminal per-company `item_error`s, and a terminal `complete`
+ * (persisted → appears in history) or `error`. Same tolerant-parser + never-tear-
+ * down-siblings conventions as runSearch; a terminal `{"type":"error"}` throws an
+ * ApiError to the caller. Aborting the signal cancels backend work. */
+export async function runSimilarityGroupedStream(
   params: SimilarityGroupedParams,
-): Promise<SimilarityGroupedResponse> {
+  handlers: GroupedStreamHandlers = {},
+): Promise<void> {
+  const { onGroup, onProgress, onItemError, onComplete, signal } = handlers
+  if (signal?.aborted) return
+
   const hasEmbeds = params.embeds.length > 0
   const body: Record<string, unknown> = {
     // query is required unless pure-filter (embeds: []), which sends null.
@@ -942,8 +971,109 @@ export async function runSimilarityGrouped(
   if (params.emailExists !== undefined) body.email_exists = params.emailExists
   if (params.phoneExists !== undefined) body.phone_exists = params.phoneExists
   if (params.linkedinExists !== undefined) body.linkedin_exists = params.linkedinExists
-  return request<SimilarityGroupedResponse>('/api/search/searches/similarity-grouped', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
+
+  const headers = new Headers()
+  headers.set('Authorization', `Bearer ${await bearerToken()}`)
+  headers.set('Content-Type', 'application/json')
+  headers.set('Accept', 'application/x-ndjson')
+
+  let response: Response
+  try {
+    response = await fetch('/api/search/searches/similarity-grouped/stream', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (err) {
+    if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) return
+    throw err
+  }
+  if (response.status === 401) throw handleUnauthorized()
+  if (!response.ok) {
+    let detail: unknown = `Request failed (${response.status})`
+    try {
+      const data = await response.json()
+      detail = data.detail ?? detail
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(response.status, detail, friendlyDetail(detail, `Request failed (${response.status})`))
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) throw new ApiError(502, 'Empty stream', 'Grouped ranking stream returned no body')
+
+  const onAbort = () => {
+    void reader.cancel()
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      if (signal?.aborted) break
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      while (true) {
+        const newline = buffer.indexOf('\n')
+        if (newline < 0) break
+        const line = buffer.slice(0, newline).trim()
+        buffer = buffer.slice(newline + 1)
+        if (!line) continue
+        let event: Record<string, unknown>
+        try {
+          event = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        if (signal?.aborted) break
+        if (event.type === 'group') {
+          const hits = Array.isArray(event.hits)
+            ? event.hits.map((h) => {
+                const hit = h as Record<string, unknown>
+                return {
+                  score: typeof hit.score === 'number' ? hit.score : null,
+                  record: hit.record as ApolloRecord,
+                }
+              })
+            : []
+          onGroup?.({
+            index: Number(event.index) || 0,
+            company_id: String(event.company_id ?? ''),
+            company: (event.company ?? null) as ApolloRecord | null,
+            hits,
+          })
+        } else if (event.type === 'progress') {
+          onProgress?.({ done: Number(event.done) || 0, total: Number(event.total) || 0 })
+        } else if (event.type === 'item_error') {
+          const detail = typeof event.detail === 'string' ? event.detail : ''
+          onItemError?.({
+            index: Number(event.index) || 0,
+            company_id: String(event.company_id ?? ''),
+            detail,
+            reason: friendlyDetail(detail, 'Ranking failed'),
+          })
+        } else if (event.type === 'complete') {
+          onComplete?.({
+            search_id: Number(event.search_id) || 0,
+            history: event.history as SearchHistoryDetail,
+            total: Number(event.total) || 0,
+            failed: Number(event.failed) || 0,
+          })
+        } else if (event.type === 'error') {
+          const detail = event.detail ?? 'Grouped ranking failed'
+          throw new ApiError(502, detail, friendlyDetail(detail, 'Grouped ranking failed'))
+        }
+        // Unknown event types are tolerated (e.g. a future heartbeat).
+      }
+    }
+  } catch (err) {
+    if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) return
+    throw err
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
+  }
 }
