@@ -42,6 +42,8 @@ from app.embeddings import (
 )
 from app.milvus_client import (
     NICE_BACKFILL,
+    NICE_BULK_READ,
+    NICE_INTERACTIVE,
     NICE_SEARCH_EMBED,
     _milvus_str_literal,
     classify_write_error,
@@ -55,8 +57,11 @@ from app.schemas import (
     ApolloParamsBody,
     BatchMongoIdsRequest,
     EmbeddingBackfillResponse,
+    GroupedSimilaritySearchRequest,
+    GroupedSimilaritySearchResponse,
     LeadOut,
     SearchIdsOut,
+    SimilarityGroupOut,
     SimilarityHitOut,
     SimilaritySearchRequest,
     SimilaritySearchResponse,
@@ -2305,7 +2310,8 @@ _HYDRATE_CHUNK = 500
 
 
 def _milvus_scalar_expr(
-    company_filter_ids: list[str] | None, body: SimilaritySearchRequest
+    company_filter_ids: list[str] | None,
+    body: "SimilaritySearchRequest | GroupedSimilaritySearchRequest",
 ) -> str:
     """Milvus filter expr over the derived scalar fields (recall; re-checked in Mongo)."""
     parts: list[str] = []
@@ -2329,7 +2335,7 @@ def _milvus_scalar_expr(
 def _doc_passes_filters(
     doc: dict[str, Any],
     company_filter_ids: Collection[str] | None,
-    body: SimilaritySearchRequest,
+    body: "SimilaritySearchRequest | GroupedSimilaritySearchRequest",
 ) -> bool:
     """Authoritative re-check of every requested filter against the hydrated Mongo doc.
 
@@ -2360,15 +2366,8 @@ async def _resolve_company_filter_ids(
 ) -> list[str] | None:
     """Resolve company_id + company_ids (union, order-preserving dedupe) to org _ids.
 
-    People docs canonically store ``company_id`` = the organization DOCUMENT's
-    Mongo ``_id`` (``company_apollo_id`` holds the raw Apollo org id as the
-    resolution key). Each filter entry accepts either id space — a company
-    record's Mongo ``_id`` or its Apollo organization id — and normalizes to
-    the Mongo ``_id``. 404 when any entry misses both spaces.
-
-    Batched: a prospect-run search passes EVERY resolved company (hundreds+),
-    so resolution is two $in queries instead of the former per-id find_one
-    loop (which was up to 2N sequential round trips).
+    Thin wrapper that builds the ordered value list from the single-search body and
+    delegates to ``_resolve_company_values`` (shared with the grouped endpoint).
     """
     values: list[str] = []
     if body.company_id:
@@ -2378,6 +2377,27 @@ async def _resolve_company_filter_ids(
             values.append(value)
     if not values:
         return None
+    return await _resolve_company_values(db, values) or None
+
+
+async def _resolve_company_values(
+    db: AsyncIOMotorDatabase,
+    values: list[str],
+) -> list[str]:
+    """Resolve an ordered list of company id-space entries to org Mongo ``_id``s.
+
+    People docs canonically store ``company_id`` = the organization DOCUMENT's
+    Mongo ``_id`` (``company_apollo_id`` holds the raw Apollo org id as the
+    resolution key). Each entry accepts either id space — a company record's Mongo
+    ``_id`` or its Apollo organization id — and normalizes to the Mongo ``_id``.
+    Order-preserving dedupe on the resolved ids. 404 when any entry misses both
+    spaces.
+
+    Batched: a prospect-run search passes EVERY resolved company (hundreds+), so
+    resolution is two $in queries instead of a per-id find_one loop.
+    """
+    if not values:
+        return []
 
     # Prefer the Mongo _id space (only for entries that parse as ObjectIds).
     object_ids: dict[str, ObjectId] = {}
@@ -2429,15 +2449,21 @@ async def _resolve_company_filter_ids(
         rid = resolved_by_value[value]
         if rid not in resolved:
             resolved.append(rid)
-    return resolved or None
+    return resolved
 
 
-async def _pure_filter_similarity(
+async def _pure_filter_hits(
     db: AsyncIOMotorDatabase,
-    body: SimilaritySearchRequest,
+    *,
     company_filter_ids: list[str] | None,
-) -> SimilaritySearchResponse:
-    """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
+    body: "SimilaritySearchRequest | GroupedSimilaritySearchRequest",
+    limit: int,
+) -> list[SimilarityHitOut]:
+    """Straight Mongo filter search (no Milvus / OpenAI); score is null.
+
+    Shared by the single similarity endpoint (``limit=body.limit``) and the grouped
+    endpoint (one call per company, ``limit=per_company_limit``).
+    """
     query: dict[str, Any] = {}
     if body.entity_type is not None:
         query["entity_type"] = body.entity_type
@@ -2460,12 +2486,118 @@ async def _pure_filter_similarity(
             query[field] = {"$ne": None}
         elif flag is False:
             query[field] = None  # matches missing or null
-    cursor = db.leads.find(query).sort("updated_at", -1).limit(body.limit)
-    docs = await cursor.to_list(length=body.limit)
-    results = [
+    cursor = db.leads.find(query).sort("updated_at", -1).limit(limit)
+    docs = await cursor.to_list(length=limit)
+    return [
         SimilarityHitOut(score=None, lead=_serialize_lead(doc, body.fields)) for doc in docs
     ]
-    return SimilaritySearchResponse(results=results)
+
+
+async def _pure_filter_similarity(
+    db: AsyncIOMotorDatabase,
+    body: SimilaritySearchRequest,
+    company_filter_ids: list[str] | None,
+) -> SimilaritySearchResponse:
+    """Straight Mongo filter search (no Milvus / OpenAI); score is null."""
+    hits = await _pure_filter_hits(
+        db, company_filter_ids=company_filter_ids, body=body, limit=body.limit
+    )
+    return SimilaritySearchResponse(results=hits)
+
+
+async def _vector_ranked_hits(
+    db: AsyncIOMotorDatabase,
+    *,
+    query_vector: Any,
+    embeds: list[str],
+    company_filter_ids: list[str] | None,
+    company_filter_id_set: set[str] | None,
+    body: "SimilaritySearchRequest | GroupedSimilaritySearchRequest",
+    limit: int,
+    settings: Settings,
+    nice: int = NICE_INTERACTIVE,
+) -> list[SimilarityHitOut]:
+    """Rank leads by mean similarity across the selected embed kinds, filtered.
+
+    The shared core of the vector path: one ANN search per embed kind reusing the
+    single pre-computed ``query_vector``, mean-score merge, then an authoritative
+    Mongo re-check while filling to ``limit``. Reused by the single endpoint
+    (``limit=body.limit``, default ``NICE_INTERACTIVE``) and per-company by the
+    grouped endpoint (``limit=per_company_limit``, ``nice=NICE_BULK_READ`` so one
+    lone user query outranks the fan-out). ``search_similar`` may raise (Milvus
+    down) — the caller maps that to a sanitized 503.
+    """
+    scalar_expr = _milvus_scalar_expr(company_filter_ids, body)
+    # Split the ANN candidate budget across the selected kinds. Total candidate
+    # work is bounded by max(16384, limit * len(embeds)): the per-kind floor of
+    # `limit` is deliberate (each kind must be able to contribute a full result
+    # set). Each kind is one ANN search on the serializing Milvus gate.
+    oversample = min(limit * 4, max(limit, 16384 // len(embeds)))
+    # score contributions per doc, keyed by the kinds it appears in.
+    per_doc_scores: dict[str, dict[str, float]] = {}
+    for kind in embeds:
+        expr = f"embed_kind == {_milvus_str_literal(kind)}"
+        if scalar_expr:
+            expr = f"{expr} and {scalar_expr}"
+        hits = await search_similar(
+            query_vector, expr=expr, limit=oversample, nice=nice, settings=settings
+        )
+        for mongo_id, score in hits:
+            per_doc_scores.setdefault(mongo_id, {})[kind] = score
+
+    # Mean similarity over the selected kinds each doc actually has (no zero-penalty).
+    merged: list[tuple[str, float]] = []
+    for mongo_id, kind_scores in per_doc_scores.items():
+        if not kind_scores:
+            continue
+        merged.append((mongo_id, sum(kind_scores.values()) / len(kind_scores)))
+    merged.sort(key=lambda item: item[1], reverse=True)
+
+    # Fill to ``limit`` AFTER the authoritative Mongo re-check: hydrate the merged
+    # candidates in score order, chunked (the 500 convention), applying the filters
+    # per doc and accumulating passing hits until ``limit`` is reached or candidates
+    # are exhausted. Bound the scan to cap worst-case sequential Mongo work; when the
+    # cap truncates before ``limit`` accumulates we log (no silent caps).
+    hydration_cap = max(limit * 10, 2000)
+    candidates = merged[:hydration_cap]
+    results: list[SimilarityHitOut] = []
+    for chunk_start in range(0, len(candidates), _HYDRATE_CHUNK):
+        if len(results) >= limit:
+            break
+        chunk = candidates[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        object_ids: list[ObjectId] = []
+        for mongo_id, _score in chunk:
+            try:
+                object_ids.append(ObjectId(mongo_id))
+            except Exception:
+                continue
+        if not object_ids:
+            continue
+        docs_by_id: dict[str, dict[str, Any]] = {}
+        cursor = db.leads.find({"_id": {"$in": object_ids}})
+        async for doc in cursor:
+            docs_by_id[str(doc["_id"])] = doc
+        # Preserve merged score order within the chunk.
+        for mongo_id, score in chunk:
+            doc = docs_by_id.get(mongo_id)
+            if not doc:
+                continue
+            # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
+            if not _doc_passes_filters(doc, company_filter_id_set, body):
+                continue
+            results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc, body.fields)))
+            if len(results) >= limit:
+                break
+    if len(results) < limit and len(merged) > hydration_cap:
+        logger.warning(
+            "vector_ranked_hits hydration cap reached: examined %s of %s merged "
+            "candidate(s), returning %s of requested %s result(s)",
+            len(candidates),
+            len(merged),
+            len(results),
+            limit,
+        )
+    return results
 
 
 @router.post("/similarity-search", response_model=SimilaritySearchResponse)
@@ -2501,26 +2633,16 @@ async def similarity_search(
     try:
         vectors = await embed_texts([query], settings=settings)
         query_vector = vectors[0]
-        scalar_expr = _milvus_scalar_expr(company_filter_ids, body)
-        # Split the ANN candidate budget across the selected kinds. Total candidate
-        # work is bounded by max(16384, limit * len(embeds)): the per-kind floor of
-        # `limit` is deliberate (each kind must be able to contribute a full result
-        # set), so a large limit CAN exceed 16384 (e.g. limit=10000 x 3 kinds =
-        # 30000) — but it never N-multiplies the 16384 ceiling the way an unsplit
-        # min(limit*4, 16384) per kind would. This endpoint is agent-reachable and
-        # each kind is one ANN search on the serializing Milvus gate (P4 amplification).
-        oversample = min(body.limit * 4, max(body.limit, 16384 // len(embeds)))
-        # score contributions per doc, keyed by the kinds it appears in.
-        per_doc_scores: dict[str, dict[str, float]] = {}
-        for kind in embeds:
-            expr = f"embed_kind == {_milvus_str_literal(kind)}"
-            if scalar_expr:
-                expr = f"{expr} and {scalar_expr}"
-            hits = await search_similar(
-                query_vector, expr=expr, limit=oversample, settings=settings
-            )
-            for mongo_id, score in hits:
-                per_doc_scores.setdefault(mongo_id, {})[kind] = score
+        results = await _vector_ranked_hits(
+            db,
+            query_vector=query_vector,
+            embeds=embeds,
+            company_filter_ids=company_filter_ids,
+            company_filter_id_set=company_filter_id_set,
+            body=body,
+            limit=body.limit,
+            settings=settings,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -2533,64 +2655,191 @@ async def similarity_search(
             detail=f"similarity_unavailable:{classify_write_error(exc)}",
         ) from exc
 
-    # Mean similarity over the selected kinds each doc actually has (no zero-penalty).
-    merged: list[tuple[str, float]] = []
-    for mongo_id, kind_scores in per_doc_scores.items():
-        if not kind_scores:
-            continue
-        merged.append((mongo_id, sum(kind_scores.values()) / len(kind_scores)))
-    merged.sort(key=lambda item: item[1], reverse=True)
-
-    # Fill to ``limit`` AFTER the authoritative Mongo re-check: hydrate the merged
-    # candidates in score order, chunked (the 500 convention), applying the filters
-    # per doc and accumulating passing hits until ``limit`` is reached or candidates
-    # are exhausted. Truncating to ``limit`` before the re-check could return fewer
-    # than ``limit`` rows when the head of the list carries stale Milvus scalars.
-    # Bound the fill-to-limit hydration scan: examine at most this many merged
-    # candidates (each hydrated from Mongo in 500-doc chunks). Caps the worst-case
-    # sequential Mongo work on this agent-reachable endpoint; when the cap
-    # truncates before ``limit`` results accumulate we log (no silent caps) and
-    # return what passed.
-    hydration_cap = max(body.limit * 10, 2000)
-    candidates = merged[:hydration_cap]
-    results: list[SimilarityHitOut] = []
-    for chunk_start in range(0, len(candidates), _HYDRATE_CHUNK):
-        if len(results) >= body.limit:
-            break
-        chunk = candidates[chunk_start : chunk_start + _HYDRATE_CHUNK]
-        object_ids: list[ObjectId] = []
-        for mongo_id, _score in chunk:
-            try:
-                object_ids.append(ObjectId(mongo_id))
-            except Exception:
-                continue
-        if not object_ids:
-            continue
-        docs_by_id: dict[str, dict[str, Any]] = {}
-        cursor = db.leads.find({"_id": {"$in": object_ids}})
-        async for doc in cursor:
-            docs_by_id[str(doc["_id"])] = doc
-        # Preserve merged score order within the chunk.
-        for mongo_id, score in chunk:
-            doc = docs_by_id.get(mongo_id)
-            if not doc:
-                continue
-            # Authoritative re-check against Mongo (defends against Milvus scalar staleness).
-            if not _doc_passes_filters(doc, company_filter_id_set, body):
-                continue
-            results.append(SimilarityHitOut(score=score, lead=_serialize_lead(doc, body.fields)))
-            if len(results) >= body.limit:
-                break
-    if len(results) < body.limit and len(merged) > hydration_cap:
-        logger.warning(
-            "similarity_search hydration cap reached: examined %s of %s merged "
-            "candidate(s), returning %s of requested %s result(s)",
-            len(candidates),
-            len(merged),
-            len(results),
-            body.limit,
-        )
     return SimilaritySearchResponse(results=results)
+
+
+# Per-company fan-out concurrency for the grouped endpoint. Each company runs the
+# same vector search on the serializing Milvus gate; bound in-flight work so a
+# large company set doesn't flood the gate.
+_GROUPED_FANOUT_CONCURRENCY = 8
+# P4 cost guards (both re-checked on the RESOLVED company count in the router; the
+# ANN one is also pre-checked in the schema on the raw company_ids count).
+_GROUPED_MAX_TOTAL_HITS = 5000  # resolved companies * per_company_limit
+_GROUPED_MAX_ANN_CALLS = 3000  # resolved companies * max(1, embed kinds)
+
+
+class _ClientDisconnected(Exception):
+    """Raised by a per-company worker when the caller has hung up mid-fan-out.
+
+    A normal exception (not ``CancelledError``, whose TaskGroup semantics are
+    ambiguous) so the TaskGroup deterministically cancels the sibling workers.
+    """
+
+
+# ONE process-wide fan-out semaphore (not per-request): a per-request Semaphore(8)
+# would let N concurrent grouped requests run 8N searches at once. Lazily bound to
+# the running loop (recreated on a new loop, e.g. tests), mirroring the _gate() /
+# _embed_sem() pattern.
+_grouped_fanout_sem: asyncio.Semaphore | None = None
+_grouped_fanout_sem_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _grouped_fanout_semaphore() -> asyncio.Semaphore:
+    global _grouped_fanout_sem, _grouped_fanout_sem_loop
+    loop = asyncio.get_running_loop()
+    if _grouped_fanout_sem is None or _grouped_fanout_sem_loop is not loop:
+        _grouped_fanout_sem = asyncio.Semaphore(_GROUPED_FANOUT_CONCURRENCY)
+        _grouped_fanout_sem_loop = loop
+    return _grouped_fanout_sem
+
+
+@router.post("/similarity-search-grouped", response_model=GroupedSimilaritySearchResponse)
+async def similarity_search_grouped(
+    body: GroupedSimilaritySearchRequest,
+    request: Request,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+) -> GroupedSimilaritySearchResponse:
+    """Per-company top-``per_company_limit`` semantic search over a required company set.
+
+    Same ranking/filter semantics as ``/similarity-search`` but returns one group per
+    company (in request order, post-dedupe), each with the org lead doc + its top hits.
+    Companies with zero matching hits still appear with ``hits: []`` (completeness).
+    The query is embedded ONCE and reused across every company; each company reuses
+    the single-search internals (``_vector_ranked_hits`` / ``_pure_filter_hits``) and
+    every fan-out search runs at ``NICE_BULK_READ`` so one lone interactive query
+    still wins the Milvus gate.
+
+    Cost guards: the schema pre-rejects ``company_ids * max(1, embeds) > 3000`` (ANN
+    budget, upper bound). THIS router re-checks that on the RESOLVED company count and
+    additionally enforces the hit budget ``resolved * per_company_limit <= 5000``
+    (both 422). Fan-out is structured (a TaskGroup: one failure cancels every sibling
+    — no orphaned per-company tasks) and bounded by a process-wide semaphore.
+    """
+    resolved = await _resolve_company_values(db, body.company_ids)
+    embeds = body.embeds if body.embeds is not None else ["apollo"]
+    if len(resolved) * body.per_company_limit > _GROUPED_MAX_TOTAL_HITS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({len(resolved)}) * per_company_limit "
+                f"({body.per_company_limit}) exceeds the {_GROUPED_MAX_TOTAL_HITS} cap"
+            ),
+        )
+    if len(resolved) * max(1, len(embeds)) > _GROUPED_MAX_ANN_CALLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({len(resolved)}) * embed kinds "
+                f"({max(1, len(embeds))}) exceeds the {_GROUPED_MAX_ANN_CALLS} "
+                "ANN-call budget"
+            ),
+        )
+
+    # Batch-hydrate the org docs (for each group's ``company`` field) across all
+    # companies in 500-doc chunks — one cross-company batch win.
+    company_docs: dict[str, dict[str, Any]] = {}
+    resolved_object_ids = [ObjectId(rid) for rid in resolved]
+    for chunk_start in range(0, len(resolved_object_ids), _HYDRATE_CHUNK):
+        chunk = resolved_object_ids[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        cursor = db.leads.find({"_id": {"$in": chunk}})
+        async for doc in cursor:
+            company_docs[str(doc["_id"])] = doc
+
+    # Assigned once below (before the fan-out runs) and closed over by _hits_for_company.
+    query_vector: Any = None
+
+    async def _hits_for_company(org_id: str) -> list[SimilarityHitOut]:
+        # Pure-filter: Mongo-only, one company scope.
+        if not embeds:
+            return await _pure_filter_hits(
+                db,
+                company_filter_ids=[org_id],
+                body=body,
+                limit=body.per_company_limit,
+            )
+        return await _vector_ranked_hits(
+            db,
+            query_vector=query_vector,
+            embeds=embeds,
+            company_filter_ids=[org_id],
+            company_filter_id_set={org_id},
+            body=body,
+            limit=body.per_company_limit,
+            settings=settings,
+            nice=NICE_BULK_READ,
+        )
+
+    # Index-addressed results so ordering follows the resolved (request) order, not
+    # task completion order.
+    hits_per_company: list[list[SimilarityHitOut]] = [[] for _ in resolved]
+    sem = _grouped_fanout_semaphore()
+
+    async def _worker(idx: int, org_id: str) -> None:
+        async with sem:
+            # Cheap abandoned-caller check before spending Milvus/OpenAI work: if the
+            # client hung up, bail (the TaskGroup cancels the remaining siblings).
+            if await request.is_disconnected():
+                raise _ClientDisconnected()
+            hits_per_company[idx] = await _hits_for_company(org_id)
+
+    # Embed the query ONCE for the whole request (outside the fan-out try so its
+    # own HTTPException isn't caught by the except* handlers below).
+    if embeds:
+        if not settings.openai_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OPENAI_API_KEY is not configured",
+            )
+        query = (body.query or "").strip()
+        try:
+            vectors = await embed_texts([query], settings=settings)
+        except Exception as exc:
+            logger.exception("Grouped similarity embed failed")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"similarity_unavailable:{classify_write_error(exc)}",
+            ) from exc
+        query_vector = vectors[0]
+
+    disconnected = False
+    # Structured fan-out: the TaskGroup cancels every sibling on the first failure
+    # (no orphaned per-company tasks for a dead request). Only except* clauses here.
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for idx, oid in enumerate(resolved):
+                tg.create_task(_worker(idx, oid))
+    except* _ClientDisconnected:
+        disconnected = True
+    except* Exception as eg:
+        logger.exception("Grouped similarity search failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"similarity_unavailable:{classify_write_error(eg.exceptions[0])}",
+        ) from eg
+
+    if disconnected:
+        # Caller is gone; the response won't be delivered — return a valid empty
+        # payload rather than doing (already-cancelled) work.
+        return GroupedSimilaritySearchResponse(groups=[], total=0)
+
+    groups: list[SimilarityGroupOut] = []
+    total = 0
+    for org_id, hits in zip(resolved, hits_per_company, strict=True):
+        company_doc = company_docs.get(org_id)
+        if company_doc is None:
+            # Resolution just confirmed this org exists; a miss here is a rare race.
+            logger.warning("Grouped similarity: company doc %s vanished post-resolution", org_id)
+            continue
+        total += len(hits)
+        groups.append(
+            SimilarityGroupOut(
+                company_id=org_id,
+                company=_serialize_lead(company_doc, body.fields),
+                hits=hits,
+            )
+        )
+    return GroupedSimilaritySearchResponse(groups=groups, total=total)
 
 
 @router.post("", response_model=list[LeadOut])
