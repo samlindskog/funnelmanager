@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -230,6 +230,11 @@ class GroupedSimilaritySearchRequest(BaseModel):
     budget authoritatively.
     """
 
+    # Pre-resolution ANN-call budget (subclasses relax it). The synchronous endpoint
+    # keeps 3000; the streaming variant raises it since streaming makes big runs
+    # legitimate (no ~100s browser leg to fit).
+    _ANN_CALL_BUDGET: ClassVar[int] = 3000
+
     query: str | None = Field(default=None, max_length=8000)
     embeds: list[Literal["apollo", "name", "title"]] | None = None
     company_ids: list[str] = Field(min_length=1, max_length=2000)
@@ -263,13 +268,25 @@ class GroupedSimilaritySearchRequest(BaseModel):
         # ANN-call budget (upper bound; the router re-checks on the resolved count).
         # ``max(1, ...)`` floors pure-filter (no ANN) at 1 so the guard still bounds
         # the company set. Fan-out ANN calls ~= companies * embed kinds.
+        budget = type(self)._ANN_CALL_BUDGET
         ann_budget = len(self.company_ids) * max(1, len(self.embeds) if self.embeds else 0)
-        if ann_budget > 3000:
+        if ann_budget > budget:
             raise ValueError(
                 f"company_ids ({len(self.company_ids)}) * embed kinds exceeds the "
-                "3000 ANN-call budget; narrow the company set or embed kinds"
+                f"{budget} ANN-call budget; narrow the company set or embed kinds"
             )
         return self
+
+
+class GroupedSimilaritySearchStreamRequest(GroupedSimilaritySearchRequest):
+    """Streaming variant of the grouped request (identical shape/validation).
+
+    Streaming removes the ~100s browser leg, so the ANN-call budget is relaxed to
+    6000. The other guards are unchanged: ``company_ids`` <= 2000 (field bound) and
+    the router still enforces ``resolved * per_company_limit`` <= 5000.
+    """
+
+    _ANN_CALL_BUDGET: ClassVar[int] = 6000
 
 
 class SimilarityGroupOut(BaseModel):

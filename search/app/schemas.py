@@ -327,14 +327,60 @@ class SimilaritySearchResponse(BaseModel):
     history: SearchHistoryDetail
 
 
+def _validate_grouped_similarity(model: Any, *, embed_budget: int) -> Any:
+    """Shared validation for the grouped similarity requests (sync + stream).
+
+    Identical except for the embed-aware ANN-call budget ceiling: the sync
+    variant uses 3000, the stream variant relaxes it to 6000 (streaming absorbs a
+    larger gate-serialized fan-out). Dedupes/strips ``company_ids`` in place and
+    applies the same query-vs-pure-filter rule as ``SimilaritySearchRequest``.
+    """
+    if model.embeds is not None and len(set(model.embeds)) != len(model.embeds):
+        raise ValueError("embeds must not contain duplicate kinds")
+    # Dedupe + drop blank company ids (Field caps the RAW list at 2000; dedupe
+    # only shrinks). At least one must survive.
+    deduped: list[str] = []
+    for value in model.company_ids:
+        entry = (value or "").strip()
+        if entry and entry not in deduped:
+            deduped.append(entry)
+    if not deduped:
+        raise ValueError("company_ids must contain at least one non-blank id")
+    model.company_ids = deduped
+    # Bound the per-company hit fan-out (Denial-of-Wallet guard) — matches the
+    # leads contract ceiling so an over-limit request 422s here, not at leads.
+    if len(deduped) * model.per_company_limit > 5000:
+        raise ValueError("company_ids * per_company_limit must not exceed 5000")
+    # Embed-aware ANN-call budget (mirrors leads): each company runs one ANN
+    # search per selected embed kind. Omitted embeds => ["apollo"] (counts as 1);
+    # a pure-filter run (embeds == []) also counts as 1.
+    embed_count = max(1, len(model.embeds or []))
+    if len(deduped) * embed_count > embed_budget:
+        raise ValueError(
+            f"company_ids * number of embed kinds must not exceed {embed_budget}"
+        )
+    # Same query-vs-pure-filter rule as SimilaritySearchRequest: a non-empty (or
+    # omitted -> ["apollo"]) embed set needs a query; a pure-filter run
+    # (embeds == []) never uses query text (company_ids is the mandatory filter,
+    # always present here) so coerce it to None.
+    effective = model.embeds if model.embeds is not None else ["apollo"]
+    if effective:
+        if not (model.query or "").strip():
+            raise ValueError("query is required when embeds is non-empty")
+    else:
+        model.query = None
+    return model
+
+
 class SimilarityGroupedRequest(BaseModel):
     """Per-company top-X semantic search request.
 
     Like ``SimilaritySearchRequest`` but ``company_ids`` is REQUIRED (1..2000)
     and there is no global ``limit``; instead ``per_company_limit`` (1..100) caps
     hits per company. Leads runs one ranked search per company and returns a group
-    per company (in request order, zero-hit companies included). The fan-out is
-    bounded: ``len(company_ids) * per_company_limit`` must be <= 5000.
+    per company (in request order, zero-hit companies included). Bounded fan-out:
+    ``company_ids * per_company_limit`` <= 5000 and ``company_ids * embed kinds``
+    <= 3000.
     """
 
     query: str | None = Field(default=None, max_length=8000)
@@ -348,43 +394,19 @@ class SimilarityGroupedRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "SimilarityGroupedRequest":
-        if self.embeds is not None and len(set(self.embeds)) != len(self.embeds):
-            raise ValueError("embeds must not contain duplicate kinds")
-        # Dedupe + drop blank company ids (Field caps the RAW list at 2000; dedupe
-        # only shrinks). At least one must survive.
-        deduped: list[str] = []
-        for value in self.company_ids:
-            entry = (value or "").strip()
-            if entry and entry not in deduped:
-                deduped.append(entry)
-        if not deduped:
-            raise ValueError("company_ids must contain at least one non-blank id")
-        self.company_ids = deduped
-        # Bound the total fan-out (Denial-of-Wallet guard) — matches the leads
-        # contract ceiling so an over-limit request 422s here, not at leads.
-        if len(deduped) * self.per_company_limit > 5000:
-            raise ValueError(
-                "company_ids * per_company_limit must not exceed 5000"
-            )
-        # Embed-aware ANN-call budget (mirrors leads): each company runs one ANN
-        # search per selected embed kind. Omitted embeds => ["apollo"] (counts as
-        # 1); a pure-filter run (embeds == []) also counts as 1.
-        embed_count = max(1, len(self.embeds or []))
-        if len(deduped) * embed_count > 3000:
-            raise ValueError(
-                "company_ids * number of embed kinds must not exceed 3000"
-            )
-        # Same query-vs-pure-filter rule as SimilaritySearchRequest: a non-empty
-        # (or omitted -> ["apollo"]) embed set needs a query; a pure-filter run
-        # (embeds == []) never uses query text (company_ids is the mandatory
-        # filter, always present here) so coerce it to None.
-        effective = self.embeds if self.embeds is not None else ["apollo"]
-        if effective:
-            if not (self.query or "").strip():
-                raise ValueError("query is required when embeds is non-empty")
-        else:
-            self.query = None
-        return self
+        return _validate_grouped_similarity(self, embed_budget=3000)
+
+
+class SimilarityGroupedStreamRequest(SimilarityGroupedRequest):
+    """Streaming grouped variant — same fields/validators as the sync request but
+    the embed-aware ANN-call budget is relaxed to 6000 (the NDJSON transport can
+    absorb a larger gate-serialized fan-out). Overriding ``_validate`` by the same
+    name replaces the parent model-validator (pydantic keys validators by name),
+    so only the 6000 ceiling runs for the stream request."""
+
+    @model_validator(mode="after")
+    def _validate(self) -> "SimilarityGroupedStreamRequest":
+        return _validate_grouped_similarity(self, embed_budget=6000)
 
 
 class SimilarityGroupOut(BaseModel):

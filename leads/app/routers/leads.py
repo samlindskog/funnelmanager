@@ -33,6 +33,13 @@ from app.apollo_endpoints import (
 from app.config import Settings, get_settings
 from app.database import get_database, get_db
 from app.derived import derive_top_fields
+from app.resolve_cache import (
+    clear_resolve_miss,
+    is_resolve_miss,
+    learn_domain_alias,
+    mark_resolve_miss,
+    normalize_resolve_key,
+)
 from app.embeddings import (
     EMBED_SOURCE_COMPLETE_INFO,
     EMBED_SOURCE_MATCH,
@@ -59,6 +66,7 @@ from app.schemas import (
     EmbeddingBackfillResponse,
     GroupedSimilaritySearchRequest,
     GroupedSimilaritySearchResponse,
+    GroupedSimilaritySearchStreamRequest,
     LeadOut,
     SearchIdsOut,
     SimilarityGroupOut,
@@ -856,13 +864,58 @@ async def _fetch_people_search_page(
     return mongo_ids, apollo_raw, len(people)
 
 
+# Org-search params that don't change WHICH orgs match (only paging), so a
+# domain-only search carrying just these is a pure "resolve this one domain".
+_ORG_RESOLVE_ALLOWED_PARAMS = frozenset(
+    {"q_organization_domains_list", "q_organization_domains_list[]", "page", "per_page"}
+)
+
+
+def _single_domain_resolve_key(page_params: dict[str, Any]) -> str | None:
+    """Normalized domain if ``page_params`` is a pure single-domain org resolve, else None.
+
+    The negative-resolve cache applies ONLY to this shape (one domain, no other
+    result-narrowing filters like name/keywords/multi-domain) — a broad search
+    returning empty is not the stable "Apollo has no org for this domain" fact.
+    """
+    domains = page_params.get("q_organization_domains_list") or page_params.get(
+        "q_organization_domains_list[]"
+    )
+    if isinstance(domains, str):
+        domains = [domains]
+    if not isinstance(domains, list) or len(domains) != 1:
+        return None
+    for key, value in page_params.items():
+        if key in _ORG_RESOLVE_ALLOWED_PARAMS:
+            continue
+        if value in (None, "", [], {}):
+            continue
+        return None  # a meaningful extra filter => not a pure single-domain resolve
+    return normalize_resolve_key(str(domains[0] or "")) or None
+
+
 async def _fetch_organizations_search_page(
     settings: Settings,
     page_params: dict[str, Any],
     db: AsyncIOMotorDatabase | None = None,
 ) -> tuple[list[str], dict[str, Any], int]:
     database = db if db is not None else get_db()
+
+    # Negative-resolve cache (single-domain resolve shape only): a cached genuine
+    # miss short-circuits BEFORE the Apollo call, saving ~1 export credit per
+    # re-uploaded unknown domain. Returns the identical empty result the caller
+    # already handles, so search/searchui behavior is unchanged.
+    resolve_key = _single_domain_resolve_key(page_params)
+    if resolve_key and await is_resolve_miss(database, resolve_key):
+        # Match the genuine post-processed empty domain-search shape EXACTLY: the
+        # domain post-processing below sets top-level total_pages=1 and pops the
+        # pagination key (never re-adding it), so a cached miss is structurally
+        # identical to a real empty result and no caller can trip on the difference.
+        return [], {"organizations": [], "total_pages": 1}, 0
+
     client = ApolloLeadsClient(settings)
+    # Apollo call: on a credit refusal (422) / rate limit (429) / timeout / 5xx it
+    # RAISES and propagates — so no marker is minted for those (non-poisoning).
     apollo_raw = await client.search_organizations(page_params)
     # Every mixed_companies/search CALL costs 1 Apollo export credit, and an
     # exact-domain resolve fuzzy-matches ~10 pages of irrelevant orgs (a
@@ -889,6 +942,27 @@ async def _fetch_organizations_search_page(
         id_getter=_organization_id_from_record,
         endpoint=ORG_SEARCH,
     )
+    # Update the negative cache only for the single-domain resolve shape. Mint ONLY
+    # on a STRUCTURALLY-VALID empty: the response must actually carry an
+    # organizations/accounts LIST key that is empty. A 200 body missing those keys
+    # entirely is anomalous (not a real "no such company") — don't cache a false
+    # 7-day miss for it; warn instead. A hit clears any stale marker.
+    if resolve_key:
+        if organizations:
+            await clear_resolve_miss(database, resolve_key)
+            # Learn the queried domain as an alias on the PRIMARY matched org (the one
+            # the workflow resolves to = first result), so the FREE resolve path
+            # matches it next pass and this billed org-search never repeats.
+            if mongo_ids:
+                await learn_domain_alias(database, mongo_ids[0], resolve_key)
+        elif any(isinstance(apollo_raw.get(key), list) for key in ("organizations", "accounts")):
+            await mark_resolve_miss(database, resolve_key)
+        else:
+            logger.warning(
+                "Apollo org-search for %s returned a 200 with no organizations/accounts "
+                "list key; not caching (anomalous body)",
+                resolve_key,
+            )
     return mongo_ids, apollo_raw, len(organizations)
 
 
@@ -1735,6 +1809,22 @@ async def resolve_organization_lead(
             {"domain": value.strip().lower(), "entity_type": "organization"}
         )
     if org_doc is None:
+        # Learned-alias resolution: an org whose canonical ``domain`` differs from a
+        # previously-queried domain carries that domain in ``alias_domains`` (recorded
+        # on the org-search hit). Matching it here keeps the alias on the FREE path,
+        # so the billed org-search doesn't repeat every pass.
+        alias_key = normalize_resolve_key(value)
+        if alias_key:
+            org_doc = await db.leads.find_one(
+                {"alias_domains": alias_key, "entity_type": "organization"}
+            )
+    if org_doc is None:
+        # This endpoint stays Mongo-only (no Apollo). A marker check here would be a
+        # no-op — a miss-marked domain can still be Mongo-resolvable (ingested as an
+        # org via a people-search), so it must be checked AFTER Mongo, where the 404
+        # is already identical. The real credit saving is the org-search path this
+        # 404 falls through to; the resolve endpoint's role is keeping the cache
+        # consistent (below).
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
@@ -1742,6 +1832,9 @@ async def resolve_organization_lead(
                 "(accepts a company record's Mongo id or Apollo organization id)"
             ),
         )
+    # A Mongo hit means the domain IS known — clear any stale miss marker so a
+    # domain that later appeared (e.g. via a people-search) isn't cached as missing.
+    await clear_resolve_miss(db, value)
     return _serialize_lead(org_doc, "display")
 
 
@@ -2840,6 +2933,265 @@ async def similarity_search_grouped(
             )
         )
     return GroupedSimilaritySearchResponse(groups=groups, total=total)
+
+
+# Streaming grouped variant: same per-company fan-out (the correctness guarantee —
+# grouping search only approximates per-group top-X), streamed so a large company
+# set doesn't 524 on a single synchronous browser leg. Streaming makes big runs
+# legitimate, so the ANN budget is relaxed (schema uses 6000; router mirrors it).
+_GROUPED_STREAM_MAX_ANN_CALLS = 6000
+# Progress heartbeat cadence: emit at least every N completed companies OR every
+# few seconds of idle, to keep the connection warm under the edge's idle timeout.
+_STREAM_PROGRESS_EVERY_N = 10
+_STREAM_HEARTBEAT_SECONDS = 5.0
+# Probe the client connection every N completed companies on the fast-producing
+# path too (the idle branch alone never fires when groups stream steadily).
+_STREAM_DISCONNECT_PROBE_EVERY_N = 5
+
+# Blast-radius bound: at most this many grouped-stream requests may RUN at once
+# process-wide. Without it one principal can queue tens of thousands of bulk ops
+# behind the shared fan-out gate with no external cancel lever. Per-principal
+# quotas are the P4 program's job; this is the coarse concurrency cap. Excess is
+# rejected pre-flight with 429 (a normal status, before the first byte).
+_MAX_CONCURRENT_GROUPED_STREAMS = 4
+# Count of RUNNING grouped streams, lazily bound per event loop (recreated on a new
+# loop, e.g. tests), mirroring _grouped_fanout_semaphore().
+_grouped_stream_active: dict[str, Any] | None = None
+
+
+def _grouped_stream_counter() -> dict[str, Any]:
+    global _grouped_stream_active
+    loop = asyncio.get_running_loop()
+    if _grouped_stream_active is None or _grouped_stream_active.get("loop") is not loop:
+        _grouped_stream_active = {"loop": loop, "count": 0}
+    return _grouped_stream_active
+
+
+def _acquire_grouped_stream_slot() -> bool:
+    """Reserve a run slot (True) or report the cap is full (False).
+
+    Sync check-then-increment with no ``await`` between => atomic under the single
+    event loop, so concurrent requests cannot both slip past a full cap.
+    """
+    state = _grouped_stream_counter()
+    if state["count"] >= _MAX_CONCURRENT_GROUPED_STREAMS:
+        return False
+    state["count"] += 1
+    return True
+
+
+def _release_grouped_stream_slot() -> None:
+    state = _grouped_stream_counter()
+    state["count"] = max(0, state["count"] - 1)
+
+
+@router.post("/similarity-search-grouped/stream")
+async def similarity_search_grouped_stream(
+    body: GroupedSimilaritySearchStreamRequest,
+    request: Request,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """Streaming per-company top-``per_company_limit`` search (NDJSON).
+
+    Runs the SAME dedicated per-company fan-out as the sync endpoint (the guarantee
+    of each company's true top-X), but emits a ``group`` event AS EACH COMPANY
+    COMPLETES so the browser leg is incremental instead of one ~N*300ms wait.
+
+    Events (NDJSON, one per line):
+      - ``{"type":"group","index":i,"company_id":..,"company":{..},"hits":[..]}``
+        — a company finished (COMPLETION order; ``index`` = request order for placement).
+      - ``{"type":"progress","done":n,"total":N}`` — heartbeat (every ~10 companies
+        or ~5s idle).
+      - ``{"type":"item_error","index":i,"company_id":..,"detail":<code>}`` — ONE
+        company's search failed; NON-terminal, the run continues (siblings are NOT
+        cancelled — that TaskGroup semantic is the sync path's only).
+      - terminal ``{"type":"complete","total_hits":N,"done":N,"failed":M}`` OR
+        ``{"type":"error","detail":<code>}`` (whole-request failure only). Exactly one
+        terminal is emitted; once the stream starts the generator never raises (P8).
+
+    Pre-flight failures (resolution 404, caps 422, OPENAI not configured 503) surface
+    as normal HTTP status codes BEFORE the stream begins.
+    """
+    resolved = await _resolve_company_values(db, body.company_ids)
+    embeds = body.embeds if body.embeds is not None else ["apollo"]
+    total = len(resolved)
+    if total * body.per_company_limit > _GROUPED_MAX_TOTAL_HITS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({total}) * per_company_limit "
+                f"({body.per_company_limit}) exceeds the {_GROUPED_MAX_TOTAL_HITS} cap"
+            ),
+        )
+    if total * max(1, len(embeds)) > _GROUPED_STREAM_MAX_ANN_CALLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({total}) * embed kinds "
+                f"({max(1, len(embeds))}) exceeds the {_GROUPED_STREAM_MAX_ANN_CALLS} "
+                "ANN-call budget"
+            ),
+        )
+    if embeds and not settings.openai_configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OPENAI_API_KEY is not configured",
+        )
+
+    # Batch-hydrate org docs (each group's ``company`` field) across companies (500-chunks).
+    company_docs: dict[str, dict[str, Any]] = {}
+    resolved_object_ids = [ObjectId(rid) for rid in resolved]
+    for chunk_start in range(0, len(resolved_object_ids), _HYDRATE_CHUNK):
+        chunk = resolved_object_ids[chunk_start : chunk_start + _HYDRATE_CHUNK]
+        cursor = db.leads.find({"_id": {"$in": chunk}})
+        async for doc in cursor:
+            company_docs[str(doc["_id"])] = doc
+
+    query = (body.query or "").strip()
+
+    async def _generate() -> AsyncIterator[str]:
+        sem = _grouped_fanout_semaphore()
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        producer: asyncio.Task[None] | None = None
+        done = 0
+        failed = 0
+        total_hits = 0
+        last_progress_done = 0
+        last_disconnect_probe_done = 0
+        terminal_emitted = False
+
+        async def _one(idx: int, org_id: str) -> None:
+            async with sem:
+                try:
+                    if not embeds:
+                        hits = await _pure_filter_hits(
+                            db, company_filter_ids=[org_id], body=body,
+                            limit=body.per_company_limit,
+                        )
+                    else:
+                        hits = await _vector_ranked_hits(
+                            db, query_vector=query_vector, embeds=embeds,
+                            company_filter_ids=[org_id], company_filter_id_set={org_id},
+                            body=body, limit=body.per_company_limit, settings=settings,
+                            nice=NICE_BULK_READ,
+                        )
+                    company_doc = company_docs.get(org_id)
+                    company_out = (
+                        _serialize_lead(company_doc, body.fields).model_dump()
+                        if company_doc is not None
+                        else None
+                    )
+                    await queue.put({
+                        "type": "group", "index": idx, "company_id": org_id,
+                        "company": company_out, "hits": [hit.model_dump() for hit in hits],
+                    })
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Per-company failure is NON-terminal on the streaming path.
+                    logger.exception("Grouped stream: company %s search failed", org_id)
+                    await queue.put({
+                        "type": "item_error", "index": idx, "company_id": org_id,
+                        "detail": classify_write_error(exc),
+                    })
+
+        async def _producer() -> None:
+            tasks = [asyncio.create_task(_one(i, oid)) for i, oid in enumerate(resolved)]
+            try:
+                # Per-company errors are handled inside _one, so gather never raises.
+                await asyncio.gather(*tasks)
+            finally:
+                await queue.put(None)  # sentinel: producer finished
+
+        try:
+            # Embed the query ONCE (vector mode); a failure here is a whole-request
+            # error (emit an error line, never raise — the stream has started).
+            query_vector: Any = None
+            if embeds:
+                try:
+                    vectors = await embed_texts([query], settings=settings)
+                    query_vector = vectors[0]
+                except Exception as exc:
+                    logger.exception("Grouped stream embed failed")
+                    yield _ndjson_line({
+                        "type": "error",
+                        "detail": f"similarity_unavailable:{classify_write_error(exc)}",
+                    })
+                    terminal_emitted = True
+                    return
+
+            producer = asyncio.create_task(_producer())
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=_STREAM_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # Idle: notice a hung-up caller (finally cancels remaining work),
+                    # else heartbeat to keep the connection warm.
+                    if await request.is_disconnected():
+                        return
+                    yield _ndjson_line({"type": "progress", "done": done, "total": total})
+                    last_progress_done = done
+                    continue
+                if event is None:
+                    break
+                if event["type"] == "group":
+                    done += 1
+                    total_hits += len(event["hits"])
+                elif event["type"] == "item_error":
+                    done += 1
+                    failed += 1
+                yield _ndjson_line(event)
+                if done - last_progress_done >= _STREAM_PROGRESS_EVERY_N:
+                    yield _ndjson_line({"type": "progress", "done": done, "total": total})
+                    last_progress_done = done
+                # Live disconnect probe on the fast-producing path (the idle branch
+                # never fires while groups stream steadily). On hang-up, stop — the
+                # finally cancels the producer + remaining per-company work.
+                if done - last_disconnect_probe_done >= _STREAM_DISCONNECT_PROBE_EVERY_N:
+                    last_disconnect_probe_done = done
+                    if await request.is_disconnected():
+                        return
+
+            yield _ndjson_line({
+                "type": "complete", "total_hits": total_hits, "done": done, "failed": failed,
+            })
+            terminal_emitted = True
+        except Exception as exc:
+            # Defensive P8: a whole-request failure after the stream started becomes an
+            # error line, never a raised connection reset.
+            logger.exception("Grouped stream failed")
+            if not terminal_emitted:
+                yield _ndjson_line({
+                    "type": "error",
+                    "detail": f"similarity_unavailable:{classify_write_error(exc)}",
+                })
+        finally:
+            # Caller gone or run done: cancel any remaining per-company work.
+            if producer is not None:
+                producer.cancel()
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Grouped stream producer cleanup failed")
+            # Free the concurrency slot reserved pre-flight (Starlette always drives
+            # the generator to aclose, so this finally runs exactly once per stream).
+            _release_grouped_stream_slot()
+
+    # Reserve a run slot LAST (after all fallible pre-flight), so there is no failure
+    # point between acquiring and the generator that would leak the slot; reject the
+    # excess pre-flight (429, before the first byte).
+    if not _acquire_grouped_stream_slot():
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="grouped_stream_busy",
+        )
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
 
 @router.post("", response_model=list[LeadOut])
