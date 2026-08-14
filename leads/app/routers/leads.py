@@ -33,6 +33,12 @@ from app.apollo_endpoints import (
 from app.config import Settings, get_settings
 from app.database import get_database, get_db
 from app.derived import derive_top_fields
+from app.resolve_cache import (
+    clear_resolve_miss,
+    is_resolve_miss,
+    mark_resolve_miss,
+    normalize_resolve_key,
+)
 from app.embeddings import (
     EMBED_SOURCE_COMPLETE_INFO,
     EMBED_SOURCE_MATCH,
@@ -857,13 +863,55 @@ async def _fetch_people_search_page(
     return mongo_ids, apollo_raw, len(people)
 
 
+# Org-search params that don't change WHICH orgs match (only paging), so a
+# domain-only search carrying just these is a pure "resolve this one domain".
+_ORG_RESOLVE_ALLOWED_PARAMS = frozenset(
+    {"q_organization_domains_list", "q_organization_domains_list[]", "page", "per_page"}
+)
+
+
+def _single_domain_resolve_key(page_params: dict[str, Any]) -> str | None:
+    """Normalized domain if ``page_params`` is a pure single-domain org resolve, else None.
+
+    The negative-resolve cache applies ONLY to this shape (one domain, no other
+    result-narrowing filters like name/keywords/multi-domain) — a broad search
+    returning empty is not the stable "Apollo has no org for this domain" fact.
+    """
+    domains = page_params.get("q_organization_domains_list") or page_params.get(
+        "q_organization_domains_list[]"
+    )
+    if isinstance(domains, str):
+        domains = [domains]
+    if not isinstance(domains, list) or len(domains) != 1:
+        return None
+    for key, value in page_params.items():
+        if key in _ORG_RESOLVE_ALLOWED_PARAMS:
+            continue
+        if value in (None, "", [], {}):
+            continue
+        return None  # a meaningful extra filter => not a pure single-domain resolve
+    return normalize_resolve_key(str(domains[0] or "")) or None
+
+
 async def _fetch_organizations_search_page(
     settings: Settings,
     page_params: dict[str, Any],
     db: AsyncIOMotorDatabase | None = None,
 ) -> tuple[list[str], dict[str, Any], int]:
     database = db if db is not None else get_db()
+
+    # Negative-resolve cache (single-domain resolve shape only): a cached genuine
+    # miss short-circuits BEFORE the Apollo call, saving ~1 export credit per
+    # re-uploaded unknown domain. Returns the identical empty result the caller
+    # already handles, so search/searchui behavior is unchanged.
+    resolve_key = _single_domain_resolve_key(page_params)
+    if resolve_key and await is_resolve_miss(database, resolve_key):
+        empty_raw = {"organizations": [], "pagination": {"total_pages": 1, "total_entries": 0}}
+        return [], empty_raw, 0
+
     client = ApolloLeadsClient(settings)
+    # Apollo call: on a credit refusal (422) / rate limit (429) / timeout / 5xx it
+    # RAISES and propagates — so no marker is minted for those (non-poisoning).
     apollo_raw = await client.search_organizations(page_params)
     # Every mixed_companies/search CALL costs 1 Apollo export credit, and an
     # exact-domain resolve fuzzy-matches ~10 pages of irrelevant orgs (a
@@ -890,6 +938,14 @@ async def _fetch_organizations_search_page(
         id_getter=_organization_id_from_record,
         endpoint=ORG_SEARCH,
     )
+    # Update the negative cache only for the single-domain resolve shape: a genuine
+    # empty Apollo result (the call succeeded above) mints a miss marker; a hit
+    # clears any stale marker so a now-known domain isn't cached as missing.
+    if resolve_key:
+        if organizations:
+            await clear_resolve_miss(database, resolve_key)
+        else:
+            await mark_resolve_miss(database, resolve_key)
     return mongo_ids, apollo_raw, len(organizations)
 
 
@@ -1736,6 +1792,12 @@ async def resolve_organization_lead(
             {"domain": value.strip().lower(), "entity_type": "organization"}
         )
     if org_doc is None:
+        # This endpoint stays Mongo-only (no Apollo). A marker check here would be a
+        # no-op — a miss-marked domain can still be Mongo-resolvable (ingested as an
+        # org via a people-search), so it must be checked AFTER Mongo, where the 404
+        # is already identical. The real credit saving is the org-search path this
+        # 404 falls through to; the resolve endpoint's role is keeping the cache
+        # consistent (below).
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
@@ -1743,6 +1805,9 @@ async def resolve_organization_lead(
                 "(accepts a company record's Mongo id or Apollo organization id)"
             ),
         )
+    # A Mongo hit means the domain IS known — clear any stale miss marker so a
+    # domain that later appeared (e.g. via a people-search) isn't cached as missing.
+    await clear_resolve_miss(db, value)
     return _serialize_lead(org_doc, "display")
 
 

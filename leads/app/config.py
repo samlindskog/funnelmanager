@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     mongodb_url: str = "mongodb://mongo:27017"
     mongodb_db: str = "funnelmanager_leads"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost"
+    # Negative-resolve cache: how long a "genuine Apollo miss" marker for a domain
+    # lives before it expires (Mongo TTL index). Bounds staleness for a company that
+    # later appears in Apollo. Default 7 days.
+    resolve_miss_ttl_seconds: int = 604800
 
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"

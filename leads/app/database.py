@@ -1,10 +1,17 @@
+import logging
 from collections.abc import AsyncGenerator
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 _client: AsyncIOMotorClient | None = None
+
+# Negative-resolve cache: domains Apollo genuinely has no organization for, so a
+# workflow re-upload short-circuits without re-burning an Apollo org-search credit.
+RESOLVE_MISSES_COLLECTION = "resolve_misses"
 
 
 def get_client() -> AsyncIOMotorClient:
@@ -44,6 +51,26 @@ async def init_db() -> None:
     await db.leads.create_index("phone")
     await db.leads.create_index("linkedin")
     await db.leads.create_index("domain")
+    await _ensure_resolve_misses_indexes(db)
+
+
+async def _ensure_resolve_misses_indexes(db: AsyncIOMotorDatabase) -> None:
+    """Unique(value) + TTL(created_at) on the negative-resolve cache.
+
+    Log-and-tolerate (like the Milvus ensure): a missing/failed index degrades the
+    cache to a no-op, never blocks startup. The TTL comes from
+    ``resolve_miss_ttl_seconds``; changing it later conflicts with the existing
+    index (logged, old TTL retained) — recreate the index by hand to change it.
+    """
+    ttl = int(get_settings().resolve_miss_ttl_seconds)
+    misses = db[RESOLVE_MISSES_COLLECTION]
+    try:
+        await misses.create_index("value", unique=True)
+        await misses.create_index("created_at", expireAfterSeconds=ttl)
+    except Exception:
+        logger.exception(
+            "resolve_misses index ensure failed; negative-resolve cache disabled"
+        )
 
 
 async def close_db() -> None:
