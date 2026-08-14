@@ -57,3 +57,15 @@ data:
         # Flush idle write buffers after 3 min (default 600s) so a crash
         # replays a bounded WAL instead of a whole bulk run's unsealed data.
         syncPeriod: 180
+    dataCoord:
+      gc:
+        # 2026-08-14 worker1 disk crisis: bulk-ingest churn left ~236GB of
+        # superseded segments in MinIO, and the DEFAULTS (scan hourly, delete
+        # dropped segments after 3h, orphans after 24h) let garbage pile up
+        # far faster than it drained — compaction's transient double-storage
+        # then tainted the node. Scan every 10 min; delete compacted-away
+        # segments after 10 min and orphans after 2h. Disk is the resource
+        # that scales with corpus now (mmap design) — GC lag is disk debt.
+        interval: 600
+        dropTolerance: 600
+        missingTolerance: 7200
