@@ -155,7 +155,10 @@ class LeadIndexingError(Exception):
 # gate — but waiters wake lowest-nice-first (FIFO within a nice), so an
 # interactive similarity query jumps ahead of a wall of queued embedding writes
 # instead of blocking behind them (FIFO would 90s-starve it → caller 502).
-NICE_INTERACTIVE = 0  # search_similar (user query) — preempts the embed backlog
+NICE_INTERACTIVE = 0  # search_similar (a lone user query) — preempts everything
+NICE_BULK_READ = 5  # a fan-out of many reads (grouped per-company search): yields
+# to a lone interactive query so one human still wins the gate, but still preempts
+# embedding writes — it is a read the caller is blocked on, not a background write.
 NICE_SEARCH_EMBED = 10  # embedding writes from a live search
 NICE_BACKFILL = 20  # bulk / backfill embedding — yields to everything
 
@@ -568,6 +571,7 @@ async def search_similar(
     *,
     expr: str | None = None,
     limit: int = 10,
+    nice: int = NICE_INTERACTIVE,
     settings: Settings | None = None,
 ) -> list[tuple[str, float]]:
     """Return [(mongo_id, score), ...] ordered by similarity (COSINE).
@@ -575,9 +579,13 @@ async def search_similar(
     ``expr`` is a Milvus boolean filter over the scalar fields (e.g.
     ``embed_kind == "apollo" and has_email == true``); the caller runs one search
     per embed kind and merges by ``mongo_id``.
+
+    ``nice`` sets the gate priority: a lone user query keeps the default
+    ``NICE_INTERACTIVE`` (jumps ahead of any queued embedding writes); a large
+    read fan-out (grouped per-company search) passes ``NICE_BULK_READ`` so one
+    interactive query still outranks the whole fan-out.
     """
-    # Interactive user query: jumps ahead of any queued embedding writes.
-    async with _gate()(NICE_INTERACTIVE):
+    async with _gate()(nice):
         return await asyncio.to_thread(
             _search_similar_sync,
             query_vector,

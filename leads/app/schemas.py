@@ -221,6 +221,13 @@ class GroupedSimilaritySearchRequest(BaseModel):
     company separately (rather than one flat global ``limit`` list). There is no
     single ``company_id``; ``company_ids`` is required (each entry accepts the same
     dual id-space — a company record's Mongo ``_id`` or its Apollo organization id).
+
+    Cost caps live in two layers: THIS schema pre-rejects the ANN-call budget on the
+    raw (pre-resolution) ``company_ids`` count — ``len(company_ids) * max(1,
+    len(embeds)) <= 3000`` — which is an upper bound since resolution only shrinks
+    the set. The ROUTER additionally enforces, on the RESOLVED company count, the
+    hit budget (``resolved * per_company_limit <= 5000``) and re-checks the ANN
+    budget authoritatively.
     """
 
     query: str | None = Field(default=None, max_length=8000)
@@ -253,6 +260,15 @@ class GroupedSimilaritySearchRequest(BaseModel):
             raise ValueError("query is required when embeds is non-empty")
         if not effective:
             self.query = None
+        # ANN-call budget (upper bound; the router re-checks on the resolved count).
+        # ``max(1, ...)`` floors pure-filter (no ANN) at 1 so the guard still bounds
+        # the company set. Fan-out ANN calls ~= companies * embed kinds.
+        ann_budget = len(self.company_ids) * max(1, len(self.embeds) if self.embeds else 0)
+        if ann_budget > 3000:
+            raise ValueError(
+                f"company_ids ({len(self.company_ids)}) * embed kinds exceeds the "
+                "3000 ANN-call budget; narrow the company set or embed kinds"
+            )
         return self
 
 

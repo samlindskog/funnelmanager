@@ -42,6 +42,8 @@ from app.embeddings import (
 )
 from app.milvus_client import (
     NICE_BACKFILL,
+    NICE_BULK_READ,
+    NICE_INTERACTIVE,
     NICE_SEARCH_EMBED,
     _milvus_str_literal,
     classify_write_error,
@@ -2513,15 +2515,17 @@ async def _vector_ranked_hits(
     body: "SimilaritySearchRequest | GroupedSimilaritySearchRequest",
     limit: int,
     settings: Settings,
+    nice: int = NICE_INTERACTIVE,
 ) -> list[SimilarityHitOut]:
     """Rank leads by mean similarity across the selected embed kinds, filtered.
 
     The shared core of the vector path: one ANN search per embed kind reusing the
     single pre-computed ``query_vector``, mean-score merge, then an authoritative
     Mongo re-check while filling to ``limit``. Reused by the single endpoint
-    (``limit=body.limit``) and per-company by the grouped endpoint
-    (``limit=per_company_limit``, ``company_filter_ids=[org_id]``). ``search_similar``
-    may raise (Milvus down) — the caller maps that to a sanitized 503.
+    (``limit=body.limit``, default ``NICE_INTERACTIVE``) and per-company by the
+    grouped endpoint (``limit=per_company_limit``, ``nice=NICE_BULK_READ`` so one
+    lone user query outranks the fan-out). ``search_similar`` may raise (Milvus
+    down) — the caller maps that to a sanitized 503.
     """
     scalar_expr = _milvus_scalar_expr(company_filter_ids, body)
     # Split the ANN candidate budget across the selected kinds. Total candidate
@@ -2536,7 +2540,7 @@ async def _vector_ranked_hits(
         if scalar_expr:
             expr = f"{expr} and {scalar_expr}"
         hits = await search_similar(
-            query_vector, expr=expr, limit=oversample, settings=settings
+            query_vector, expr=expr, limit=oversample, nice=nice, settings=settings
         )
         for mongo_id, score in hits:
             per_doc_scores.setdefault(mongo_id, {})[kind] = score
@@ -2656,16 +2660,43 @@ async def similarity_search(
 
 # Per-company fan-out concurrency for the grouped endpoint. Each company runs the
 # same vector search on the serializing Milvus gate; bound in-flight work so a
-# large company set doesn't flood the gate (the len*per_company_limit<=5000 cap
-# bounds total work, this bounds instantaneous concurrency).
+# large company set doesn't flood the gate.
 _GROUPED_FANOUT_CONCURRENCY = 8
-# Hard ceiling on resolved-companies * per_company_limit (P4 cost guard).
-_GROUPED_MAX_TOTAL_HITS = 5000
+# P4 cost guards (both re-checked on the RESOLVED company count in the router; the
+# ANN one is also pre-checked in the schema on the raw company_ids count).
+_GROUPED_MAX_TOTAL_HITS = 5000  # resolved companies * per_company_limit
+_GROUPED_MAX_ANN_CALLS = 3000  # resolved companies * max(1, embed kinds)
+
+
+class _ClientDisconnected(Exception):
+    """Raised by a per-company worker when the caller has hung up mid-fan-out.
+
+    A normal exception (not ``CancelledError``, whose TaskGroup semantics are
+    ambiguous) so the TaskGroup deterministically cancels the sibling workers.
+    """
+
+
+# ONE process-wide fan-out semaphore (not per-request): a per-request Semaphore(8)
+# would let N concurrent grouped requests run 8N searches at once. Lazily bound to
+# the running loop (recreated on a new loop, e.g. tests), mirroring the _gate() /
+# _embed_sem() pattern.
+_grouped_fanout_sem: asyncio.Semaphore | None = None
+_grouped_fanout_sem_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _grouped_fanout_semaphore() -> asyncio.Semaphore:
+    global _grouped_fanout_sem, _grouped_fanout_sem_loop
+    loop = asyncio.get_running_loop()
+    if _grouped_fanout_sem is None or _grouped_fanout_sem_loop is not loop:
+        _grouped_fanout_sem = asyncio.Semaphore(_GROUPED_FANOUT_CONCURRENCY)
+        _grouped_fanout_sem_loop = loop
+    return _grouped_fanout_sem
 
 
 @router.post("/similarity-search-grouped", response_model=GroupedSimilaritySearchResponse)
 async def similarity_search_grouped(
     body: GroupedSimilaritySearchRequest,
+    request: Request,
     db: AsyncIOMotorDatabase = Depends(get_database),
     settings: Settings = Depends(get_settings),
 ) -> GroupedSimilaritySearchResponse:
@@ -2675,15 +2706,33 @@ async def similarity_search_grouped(
     company (in request order, post-dedupe), each with the org lead doc + its top hits.
     Companies with zero matching hits still appear with ``hits: []`` (completeness).
     The query is embedded ONCE and reused across every company; each company reuses
-    the single-search internals (``_vector_ranked_hits`` / ``_pure_filter_hits``).
+    the single-search internals (``_vector_ranked_hits`` / ``_pure_filter_hits``) and
+    every fan-out search runs at ``NICE_BULK_READ`` so one lone interactive query
+    still wins the Milvus gate.
+
+    Cost guards: the schema pre-rejects ``company_ids * max(1, embeds) > 3000`` (ANN
+    budget, upper bound). THIS router re-checks that on the RESOLVED company count and
+    additionally enforces the hit budget ``resolved * per_company_limit <= 5000``
+    (both 422). Fan-out is structured (a TaskGroup: one failure cancels every sibling
+    — no orphaned per-company tasks) and bounded by a process-wide semaphore.
     """
     resolved = await _resolve_company_values(db, body.company_ids)
+    embeds = body.embeds if body.embeds is not None else ["apollo"]
     if len(resolved) * body.per_company_limit > _GROUPED_MAX_TOTAL_HITS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
                 f"resolved company count ({len(resolved)}) * per_company_limit "
                 f"({body.per_company_limit}) exceeds the {_GROUPED_MAX_TOTAL_HITS} cap"
+            ),
+        )
+    if len(resolved) * max(1, len(embeds)) > _GROUPED_MAX_ANN_CALLS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"resolved company count ({len(resolved)}) * embed kinds "
+                f"({max(1, len(embeds))}) exceeds the {_GROUPED_MAX_ANN_CALLS} "
+                "ANN-call budget"
             ),
         )
 
@@ -2697,7 +2746,6 @@ async def similarity_search_grouped(
         async for doc in cursor:
             company_docs[str(doc["_id"])] = doc
 
-    embeds = body.embeds if body.embeds is not None else ["apollo"]
     # Assigned once below (before the fan-out runs) and closed over by _hits_for_company.
     query_vector: Any = None
 
@@ -2719,36 +2767,61 @@ async def similarity_search_grouped(
             body=body,
             limit=body.per_company_limit,
             settings=settings,
+            nice=NICE_BULK_READ,
         )
 
-    try:
-        if embeds:
-            if not settings.openai_configured:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="OPENAI_API_KEY is not configured",
-                )
-            # Embed the query ONCE for the whole request; reused for every company.
-            query = (body.query or "").strip()
+    # Index-addressed results so ordering follows the resolved (request) order, not
+    # task completion order.
+    hits_per_company: list[list[SimilarityHitOut]] = [[] for _ in resolved]
+    sem = _grouped_fanout_semaphore()
+
+    async def _worker(idx: int, org_id: str) -> None:
+        async with sem:
+            # Cheap abandoned-caller check before spending Milvus/OpenAI work: if the
+            # client hung up, bail (the TaskGroup cancels the remaining siblings).
+            if await request.is_disconnected():
+                raise _ClientDisconnected()
+            hits_per_company[idx] = await _hits_for_company(org_id)
+
+    # Embed the query ONCE for the whole request (outside the fan-out try so its
+    # own HTTPException isn't caught by the except* handlers below).
+    if embeds:
+        if not settings.openai_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OPENAI_API_KEY is not configured",
+            )
+        query = (body.query or "").strip()
+        try:
             vectors = await embed_texts([query], settings=settings)
-            query_vector = vectors[0]
+        except Exception as exc:
+            logger.exception("Grouped similarity embed failed")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"similarity_unavailable:{classify_write_error(exc)}",
+            ) from exc
+        query_vector = vectors[0]
 
-        sem = asyncio.Semaphore(_GROUPED_FANOUT_CONCURRENCY)
-
-        async def _bounded(org_id: str) -> list[SimilarityHitOut]:
-            async with sem:
-                return await _hits_for_company(org_id)
-
-        # gather preserves order => groups stay in resolved (request post-dedupe) order.
-        hits_per_company = await asyncio.gather(*(_bounded(oid) for oid in resolved))
-    except HTTPException:
-        raise
-    except Exception as exc:
+    disconnected = False
+    # Structured fan-out: the TaskGroup cancels every sibling on the first failure
+    # (no orphaned per-company tasks for a dead request). Only except* clauses here.
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for idx, oid in enumerate(resolved):
+                tg.create_task(_worker(idx, oid))
+    except* _ClientDisconnected:
+        disconnected = True
+    except* Exception as eg:
         logger.exception("Grouped similarity search failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"similarity_unavailable:{classify_write_error(exc)}",
-        ) from exc
+            detail=f"similarity_unavailable:{classify_write_error(eg.exceptions[0])}",
+        ) from eg
+
+    if disconnected:
+        # Caller is gone; the response won't be delivered — return a valid empty
+        # payload rather than doing (already-cancelled) work.
+        return GroupedSimilaritySearchResponse(groups=[], total=0)
 
     groups: list[SimilarityGroupOut] = []
     total = 0
