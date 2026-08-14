@@ -214,14 +214,14 @@ export function GroupedResultsView({ view }: { view: GroupedRunView }) {
           </Typography>
         )}
         <Box sx={{ flex: 1 }} />
-        <Tooltip title={view.complete ? '' : 'Available when ranking completes'}>
+        <Tooltip title={view.canExport ? '' : 'Available when every company has finished ranking'}>
           <span>
             <Button
               data-testid="grouped-export"
               size="small"
               variant="outlined"
               startIcon={<DownloadIcon />}
-              disabled={!view.complete || view.totalHits === 0}
+              disabled={!view.canExport || view.totalHits === 0}
               onClick={() => downloadGroupedCsv(view)}
             >
               Export CSV

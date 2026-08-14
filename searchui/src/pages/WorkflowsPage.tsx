@@ -26,8 +26,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { runSimilaritySearch, GROUPED_MAX_RESULTS } from '../api'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { runSimilaritySearch, GROUPED_MAX_RESULTS, type CompanyOption } from '../api'
 import { GroupedResultsView } from '../components/GroupedResultsView'
 import { SimilarityForm } from '../components/SimilarityForm'
 import { SIMILARITY_LIMIT_MAX, triToBool } from '../components/similarity'
@@ -666,7 +666,26 @@ function TopPeopleRunner({
   const [stageError, setStageError] = useState<string | null>(null)
 
   const streaming = grouped.view.streaming
-  const companyCount = form.companyValues.length
+  // Two input domains can resolve to the SAME org; those survive the domain-keyed
+  // dedupe but the backend dedupes company_ids before indexing, so the UI must send
+  // — and build slots from — a list deduped by RESOLVED org id (mongo_id||apollo_id),
+  // preserving first-seen order. This keeps request ids ↔ slots 1:1.
+  const uniqueCompanies = useMemo<CompanyOption[]>(() => {
+    const seen = new Set<string>()
+    const out: CompanyOption[] = []
+    for (const c of form.companies) {
+      const key = (c.mongo_id || c.apollo_id || '').trim()
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      out.push(c)
+    }
+    return out
+  }, [form.companies])
+  const companyIds = useMemo(
+    () => uniqueCompanies.map((c) => (c.mongo_id || c.apollo_id || '').trim()),
+    [uniqueCompanies],
+  )
+  const companyCount = companyIds.length
   // embed_kinds = max(1, selected) — omitted/pure-filter both count as 1 (matches backend).
   const embedKinds = Math.max(1, form.selEmbeds.length)
   const estimated = companyCount * perCompany
@@ -705,17 +724,17 @@ function TopPeopleRunner({
       {
         query: form.hasEmbeds ? passage : null,
         embeds: form.selEmbeds,
-        companyIds: form.companyValues,
+        companyIds,
         perCompanyLimit: per,
         entityType: 'person',
         emailExists: triToBool(form.emailFilter),
         phoneExists: triToBool(form.phoneFilter),
         linkedinExists: triToBool(form.linkedinFilter),
       },
-      form.companies,
+      uniqueCompanies,
     )
     if (completed) await onHistoryRefresh()
-  }, [form, companyCount, embedKinds, perCompany, grouped, onHistoryRefresh])
+  }, [form, companyIds, uniqueCompanies, companyCount, embedKinds, perCompany, grouped, onHistoryRefresh])
 
   const canRun =
     companyCount > 0 &&

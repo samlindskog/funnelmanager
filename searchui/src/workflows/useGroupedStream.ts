@@ -29,8 +29,12 @@ export interface GroupedRunView {
   active: boolean
   /** Currently streaming (no terminal complete/error/abort yet). */
   streaming: boolean
-  /** Terminal complete received — export is now allowed. */
+  /** Terminal complete received. */
   complete: boolean
+  /** Every slot resolved (done or errored) — no company still pending. */
+  allResolved: boolean
+  /** Export is allowed: terminal complete AND no slot left pending. */
+  canExport: boolean
   slots: GroupedSlot[]
   /** Companies in the run (= slots.length). */
   total: number
@@ -68,6 +72,23 @@ function initialSlots(companies: CompanyOption[]): GroupedSlot[] {
     status: 'pending',
     hits: [],
   }))
+}
+
+/** Place a stream event's patch onto the right slot. Match by `company_id`
+ * (authoritative — the id the backend echoes) and fall back to the request-order
+ * `index` only when no slot carries that id. Placement must never depend on the UI
+ * and the backend deduping company_ids the same way, or a duplicate-resolving
+ * company would land under the wrong slot and leave another hanging pending. */
+function updateSlot(
+  slots: GroupedSlot[],
+  companyId: string,
+  index: number,
+  patch: Partial<GroupedSlot>,
+): GroupedSlot[] {
+  let target = companyId ? slots.findIndex((s) => s.companyId === companyId) : -1
+  if (target < 0) target = slots.findIndex((s) => s.index === index)
+  if (target < 0) return slots
+  return slots.map((slot, i) => (i === target ? { ...slot, ...patch } : slot))
 }
 
 export function useGroupedStream(): UseGroupedStream {
@@ -109,19 +130,18 @@ export function useGroupedStream(): UseGroupedStream {
           signal: controller.signal,
           onGroup: (group) =>
             setSlots((prev) =>
-              prev.map((slot) =>
-                slot.index === group.index
-                  ? { ...slot, status: 'done', hits: group.hits, company: group.company }
-                  : slot,
-              ),
+              updateSlot(prev, group.company_id, group.index, {
+                status: 'done',
+                hits: group.hits,
+                company: group.company,
+              }),
             ),
           onItemError: (itemError) =>
             setSlots((prev) =>
-              prev.map((slot) =>
-                slot.index === itemError.index
-                  ? { ...slot, status: 'error', errorReason: itemError.reason }
-                  : slot,
-              ),
+              updateSlot(prev, itemError.company_id, itemError.index, {
+                status: 'error',
+                errorReason: itemError.reason,
+              }),
             ),
           onProgress: () => {
             // Heartbeat only — the "n of N" count derives from resolved slots.
@@ -139,8 +159,12 @@ export function useGroupedStream(): UseGroupedStream {
           setError(err instanceof ApiError || err instanceof Error ? err.message : 'Grouped ranking failed')
         }
       } finally {
-        if (abortRef.current === controller) abortRef.current = null
-        setStreaming(false)
+        // Only the latest run may clear the shared flag — a superseded run's late
+        // cleanup must not flip `streaming` off on the newer run that replaced it.
+        if (abortRef.current === controller) {
+          abortRef.current = null
+          setStreaming(false)
+        }
       }
       return { completed, searchId: resultSearchId }
     },
@@ -166,10 +190,14 @@ export function useGroupedStream(): UseGroupedStream {
 
   const ranked = slots.reduce((n, s) => n + (s.status === 'pending' ? 0 : 1), 0)
   const totalHits = slots.reduce((n, s) => n + (s.status === 'done' ? s.hits.length : 0), 0)
+  const allResolved = slots.length > 0 && slots.every((s) => s.status !== 'pending')
   const view: GroupedRunView = {
     active: streaming || complete || slots.length > 0,
     streaming,
     complete,
+    allResolved,
+    // Never export a run with a company still pending (e.g. a misaligned slot).
+    canExport: complete && allResolved,
     slots,
     total: slots.length,
     ranked,
