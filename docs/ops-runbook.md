@@ -159,6 +159,20 @@ new source label is invisible to that allowlist until listed.
 
 ---
 
+## 4. Non-funnelmanager workloads on cluster hosts
+
+Inventory of things running on the k3s nodes that are **not** part of funnelmanager —
+recorded only so nobody is surprised by them during capacity/incident work:
+
+- **BeamMP game server on usfr5 (worker2)** — personal BeamNG.drive multiplayer server,
+  installed 2026-08-13. Runs **outside k3s** as systemd unit `beammp-server`
+  (binary + `ServerConfig.toml` in `/opt/beammp`, dedicated `beammpserver` user), capped at
+  `MemoryMax=768M` / `CPUQuota=100%` so it can never pressure prod pods. Listens on
+  30814 tcp+udp (ufw-opened). Ignore it in cluster debugging; stop with
+  `systemctl stop beammp-server` if worker2 is ever memory-tight.
+
+---
+
 ## See also
 
 - `deploy/clusters/prod/{infrastructure,apps}.yaml` — the Flux dependency graph.
