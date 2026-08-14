@@ -91,7 +91,7 @@ images:
   # `newTag: canary-*`); never pulled while the canary is `replicas: 0`.
   - name: ghcr.io/samlindskog/funnelmanager/leads-canary
     newName: ghcr.io/samlindskog/funnelmanager/leads
-    newTag: canary-016fe6d6
+    newTag: canary-1a9be86a
   # East-west BACKEND knowledge canary. Same remap pattern: the base uses the
   # canary-logical name `.../knowledge-canary`; this entry remaps it to the
   # real `knowledge` repo with an INDEPENDENT `canary-<sha>` tag. `canary-PINME`
