@@ -73,30 +73,28 @@ spec:
             timeoutSeconds: 10
           resources:
             requests:
-              cpu: 500m
-              memory: 3072Mi
+              # Right-sized 2026-08-14 from the 1,009-domain e2e run's monitor
+              # data: internal memUsage peaked ~6.8GB / sustained ~1.4-2.3 cores
+              # under bulk embed. Request ≈ sustained band so the kubelet never
+              # ranks milvus first-in-line for eviction under node pressure
+              # (usage/requests had hit ~330%). memory request == limit ⇒
+              # Guaranteed-class for memory.
+              cpu: 1500m
+              memory: 8192Mi
             limits:
               # 1500m throttled bulk index builds (847m sustained observed);
               # give indexing bursts real room.
               cpu: 2500m
-              # semsearch-v2 (leads_embeds_v2) holds ~3 vectors per person and the
-              # corpus GROWS with every search (2026-08-11: a 30-company sweep pushed
-              # the boot-time load past 6Gi -> OOM crashloop; 2560Mi and 4Gi OOMed
-              # earlier at smaller sizes). 8Gi; the durable fix when this outgrows
-              # again is queryNode mmap (load via page cache, not RAM).
-              # 8Gi OOMed on startup WAL-replay of unsealed growing segments after a
-              # bulk Prospect ingest (2026-08-12) — mmap covers sealed data only.
-              # 10Gi could not fully load leads_embeds_v2 (~1.15M vectors) after the
-              # worker2 migration: querycoord sizes its load watermark against this
-              # container limit, and 0.9*10Gi=9216Mi < the ~9.3GB predicted load, so
-              # one 2.4GB sealed segment perpetually failed to load (stuck at 85%).
-              # 12Gi -> watermark 11.06GB, comfortably above the prediction (worker2
-              # is a 16GB node). 2026-08-13: the durable fix landed — global mmap via
-              # the milvus-config user.yaml below (per-collection properties never
-              # took effect for loaded segments). Once the mmap steady-state is
-              # verified, this limit should come DOWN (~8Gi) to cap Milvus and
-              # return headroom to the node.
-              memory: 12288Mi
+              # MEMORY-CAPPED design (2026-08-13/14, see milvus-config user.yaml):
+              # global mmap + readAheadPolicy=random keeps resident memory
+              # ~O(active pages), not O(corpus) — verified on a 1,009-domain run
+              # (sawtooth 3-10.7GB working set, internal memUsage <=6.8GB, zero
+              # OOM/refusals at the old 12Gi). 12Gi -> 8Gi claws back 4Gi of node
+              # headroom; the write-protection watermarks (0.85/0.95 of this
+              # limit) now engage at ~7-7.8GB and leads backs off gracefully
+              # (canary-tested). History of the 2.5->12Gi OOM ladder: git log
+              # this file (2026-08-10..13).
+              memory: 8192Mi
           volumeMounts:
             - name: data
               mountPath: /var/lib/milvus

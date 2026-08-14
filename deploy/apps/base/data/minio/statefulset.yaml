@@ -62,8 +62,11 @@ spec:
             timeoutSeconds: 10
           resources:
             requests:
-              cpu: 100m
-              memory: 768Mi
+              # Right-sized 2026-08-14 (usage ~1.07GB / ~140m during the e2e bulk
+              # run; keep the request >= sustained so the segment store is never
+              # first-in-line for eviction).
+              cpu: 150m
+              memory: 1280Mi
             limits:
               # minio is milvus's segment store — it ran at 96% of a 512Mi limit /
               # 300m cap during the semsearch-v2 bulk index (2026-08-10), throttling

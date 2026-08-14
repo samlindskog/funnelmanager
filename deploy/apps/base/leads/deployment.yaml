@@ -48,7 +48,9 @@ spec:
           resources:
             requests:
               cpu: 300m
-              memory: 256Mi
+              # Right-sized 2026-08-14 (steady ~555-700Mi observed; 256Mi left
+              # leads far over-request and eviction-exposed under node pressure).
+              memory: 768Mi
             limits:
               # Concurrent multi-company ingest+embed pipelines throttle at 1
               # core (same 2026-08-11 burst that starved search).
