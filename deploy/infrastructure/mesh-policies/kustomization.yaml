@@ -14,7 +14,6 @@ resources:
   # Makes the canary marker trustworthy for each active canary's route
   # (gateway/canary/<svc>-canary.yaml).
   - debug-session-gate.yaml
-  - canary/leads-canary-eastwest.yaml
   # EAST-WEST canary VirtualServices — "canary-if-exists-else-stable" for
   # INTERNAL hops (the in-mesh analogue of the gateway/canary/<svc>-canary.yaml
   # HTTPRoutes). Each `canary/<svc>-canary-eastwest.yaml` splits an internal
