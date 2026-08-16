@@ -806,18 +806,41 @@ export type SimilaritySearchResponse = {
   history: SearchHistoryDetail
 }
 
-/** Download the FULL stored result list of a search as CSV (server-streamed). */
-export async function downloadSearchCsv(searchId: number): Promise<void> {
+/** Slugify a search query for a download filename (lowercase, alnum-dashed, ≤48). */
+function csvSlug(query?: string): string {
+  const slug = (query ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/g, '')
+  return slug || 'search'
+}
+
+/** Download the FULL stored result list of a search as CSV (server-streamed, all
+ * results — not just the current page). Filename is `<query-slug>-<id>.csv`. */
+export async function downloadSearchCsv(searchId: number, query?: string): Promise<void> {
   const headers = new Headers()
   headers.set('Authorization', `Bearer ${await bearerToken()}`)
   const response = await fetch(`/api/search/searches/${searchId}/export.csv`, { headers })
-  if (!response.ok) throw new Error(`Export failed (${response.status})`)
+  if (response.status === 401) throw handleUnauthorized()
+  if (!response.ok) {
+    let detail: unknown = `Export failed (${response.status})`
+    try {
+      const data = await response.json()
+      detail = data.detail ?? detail
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(response.status, detail, friendlyDetail(detail, `Export failed (${response.status})`))
+  }
   const blob = await response.blob()
   const url = URL.createObjectURL(blob)
   try {
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `search-${searchId}-all.csv`
+    anchor.download = `${csvSlug(query)}-${searchId}.csv`
+    anchor.rel = 'noopener'
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
