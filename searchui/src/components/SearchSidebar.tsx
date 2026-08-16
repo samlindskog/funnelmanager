@@ -1,12 +1,16 @@
 import BusinessIcon from '@mui/icons-material/Business'
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
+import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined'
 import HistoryIcon from '@mui/icons-material/History'
+import MoreVertIcon from '@mui/icons-material/MoreVert'
 import PersonSearchIcon from '@mui/icons-material/PersonSearch'
 import {
+  Alert,
   Box,
   Button,
   Checkbox,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -21,10 +25,14 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  Menu,
   MenuItem,
   Select,
+  Snackbar,
+  Tooltip,
   Typography,
 } from '@mui/material'
+import { downloadSearchCsv } from '../api'
 import {
   useCallback,
   useEffect,
@@ -114,6 +122,7 @@ const HistoryRow = memo(function HistoryRow({
   onSelect,
   onToggleChecked,
   onShiftSelect,
+  onExportError,
 }: {
   item: SearchHistorySummary
   selected: boolean
@@ -124,6 +133,8 @@ const HistoryRow = memo(function HistoryRow({
   onSelect: (id: number) => void
   onToggleChecked: (id: number, shiftKey: boolean) => void
   onShiftSelect: (id: number) => void
+  /** Surface an export failure (friendly message) to the sidebar-level toast. */
+  onExportError: (message: string) => void
 }) {
   const owner = ownerAnnotation(item, currentUsername)
   const secondary = [
@@ -134,6 +145,24 @@ const HistoryRow = memo(function HistoryRow({
   ]
     .filter(Boolean)
     .join(' · ')
+
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const hasResults = item.total_results > 0
+
+  const handleExport = useCallback(async () => {
+    setMenuAnchor(null)
+    setExporting(true)
+    try {
+      // Server endpoint streams EVERY stored result (not just the current page).
+      await downloadSearchCsv(item.id, item.query)
+    } catch (err) {
+      onExportError(err instanceof Error ? err.message : 'Export failed')
+    } finally {
+      setExporting(false)
+    }
+  }, [item.id, item.query, onExportError])
+
   return (
     <ListItem disablePadding>
       <Checkbox
@@ -184,6 +213,41 @@ const HistoryRow = memo(function HistoryRow({
           }}
         />
       </ListItemButton>
+      <IconButton
+        data-testid={`search-row-menu-${item.id}`}
+        aria-label={`Actions for “${item.query}”`}
+        size="small"
+        disabled={exporting}
+        onClick={(event) => {
+          event.stopPropagation()
+          setMenuAnchor(event.currentTarget)
+        }}
+        sx={{ mr: 0.5 }}
+      >
+        {exporting ? <CircularProgress size={16} /> : <MoreVertIcon fontSize="small" />}
+      </IconButton>
+      <Menu
+        anchorEl={menuAnchor}
+        open={Boolean(menuAnchor)}
+        onClose={() => setMenuAnchor(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <Tooltip title={hasResults ? '' : 'No results to export'} placement="left">
+          <span>
+            <MenuItem
+              data-testid={`search-export-all-${item.id}`}
+              disabled={!hasResults}
+              onClick={() => void handleExport()}
+            >
+              <ListItemIcon sx={{ minWidth: 32 }}>
+                <FileDownloadOutlinedIcon fontSize="small" />
+              </ListItemIcon>
+              Export all to CSV
+            </MenuItem>
+          </span>
+        </Tooltip>
+      </Menu>
     </ListItem>
   )
 })
@@ -205,6 +269,8 @@ export const SearchSidebar = memo(function SearchSidebar({
   const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set())
   const [pendingDeleteIds, setPendingDeleteIds] = useState<number[] | null>(null)
   const [dontAskAgain, setDontAskAgain] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const handleExportError = useCallback((message: string) => setExportError(message), [])
   const listRef = useRef<HTMLUListElement | null>(null)
   const checkAnchorRef = useRef<number | null>(null)
   const actionsOpenRef = useRef(actionsOpen)
@@ -525,6 +591,7 @@ export const SearchSidebar = memo(function SearchSidebar({
             onSelect={handleRowSelect}
             onToggleChecked={toggleChecked}
             onShiftSelect={shiftSelect}
+            onExportError={handleExportError}
           />
         ))}
         {!items.length && (
@@ -535,6 +602,22 @@ export const SearchSidebar = memo(function SearchSidebar({
           </Box>
         )}
       </List>
+
+      <Snackbar
+        open={exportError !== null}
+        autoHideDuration={6000}
+        onClose={() => setExportError(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          data-testid="search-export-error"
+          severity="error"
+          onClose={() => setExportError(null)}
+          variant="filled"
+        >
+          {exportError}
+        </Alert>
+      </Snackbar>
 
       <Dialog
         open={pendingDeleteIds !== null}
